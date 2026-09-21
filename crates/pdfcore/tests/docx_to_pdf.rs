@@ -75,8 +75,24 @@ fn convert(path: &std::path::Path) -> pdfcore::Report<docx_to_pdf::Outcome> {
     docx_to_pdf::run(path, &NoProgress).expect("转换失败")
 }
 
+/// 依赖中文字形的用例的前置条件。
+///
+/// 没有中文字体时，所有汉字都会落到同一个 `.notdef`，文字回抽必然对不上。
+/// 那种失败信息指向的是环境而不是代码，容易把人带偏，所以这里明确跳过并说明。
+/// CI 上会安装 `fonts-noto-cjk`，因此这些用例在 CI 里是实打实跑过的。
+fn require_cjk_font() -> bool {
+    if pdfcore::fonts::system::SystemFonts::load().has_cjk() {
+        return true;
+    }
+    eprintln!("跳过：本机没有中文字体（安装 fonts-noto-cjk 或思源黑体后可跑）");
+    false
+}
+
 #[test]
 fn chinese_paragraphs_round_trip() {
+    if !require_cjk_font() {
+        return;
+    }
     let body = para("示例标题") + &para("甲方某某某，合同编号 123456789012345678。");
     let path = make_docx("simple.docx", &body);
     let report = convert(&path);
@@ -165,6 +181,9 @@ fn first_text_x(pdf: &[u8]) -> f32 {
 /// 悄悄丢一张表格是危险的。
 #[test]
 fn tables_are_reported_and_their_text_preserved() {
+    if !require_cjk_font() {
+        return;
+    }
     let body = r#"<w:tbl>
 <w:tr><w:tc><w:p><w:r><w:t>条目一</w:t></w:r></w:p></w:tc>
 <w:tc><w:p><w:r><w:t>说明书</w:t></w:r></w:p></w:tc></w:tr>
@@ -216,6 +235,9 @@ fn legacy_doc_format_is_refused_clearly() {
 /// 现象是导出的 PDF 里 `；` 被抽成了 `，`。
 #[test]
 fn fullwidth_punctuation_after_latin_uses_cjk_font() {
+    if !require_cjk_font() {
+        return;
+    }
     let body = para("请下载PDF；文件较大（约3MB）：请耐心等待。");
     let path = make_docx("punct.docx", &body);
     let report = convert(&path);

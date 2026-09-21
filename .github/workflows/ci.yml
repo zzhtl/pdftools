@@ -29,6 +29,12 @@ jobs:
             libxrandr-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
 
+      - name: 安装中文字体
+        # runner 默认不带 CJK 字体。没有它，docx 排版测试无字体可用，
+        # 测的就不是真实行为了。macOS 与 Windows 自带中文字体，无需此步。
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

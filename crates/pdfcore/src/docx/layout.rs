@@ -67,6 +67,8 @@ pub struct FontBook {
     substituted: Vec<String>,
     /// 所选字体里没有字形的字符。
     missing: Vec<char>,
+    /// 系统里连一个可用字体都找不到。
+    no_font_at_all: bool,
 }
 
 /// 字体名看起来是不是衬线体。用于挑回退链。
@@ -110,6 +112,7 @@ impl FontBook {
             cache: HashMap::new(),
             substituted: Vec::new(),
             missing: Vec::new(),
+            no_font_at_all: false,
         }
     }
 
@@ -156,12 +159,26 @@ impl FontBook {
                 crate::fonts::system::LATIN_SANS_PREFERENCE
             };
             found = self.system.find(chain, bold, italic);
-            if found.is_none() && !east_asian {
-                // 西文字体一个都没有时，退回中文字体：Noto CJK 自带完整拉丁字形，
-                // 总比显示成豆腐块强。
-                found = self
-                    .system
-                    .find(crate::fonts::system::PDF_SANS_PREFERENCE, bold, italic);
+            if found.is_none() {
+                // 首选链全军覆没时，把其余所有链都试一遍，最后退到系统里任意一个字体。
+                //
+                // 这一步守的是一条底线：**绝不因为找不到字体就把文字丢掉**。
+                // 哪怕最终字体缺少对应字形（显示为空白），文字也仍在 PDF 里、仍可搜索，
+                // 而且 `.notdef` 检测会把这件事报出来。悄悄少一整段字要严重得多。
+                for alt in [
+                    crate::fonts::system::PDF_SANS_PREFERENCE,
+                    crate::fonts::system::PDF_SERIF_PREFERENCE,
+                    crate::fonts::system::LATIN_SANS_PREFERENCE,
+                    crate::fonts::system::LATIN_SERIF_PREFERENCE,
+                ] {
+                    found = self.system.find(alt, bold, italic);
+                    if found.is_some() {
+                        break;
+                    }
+                }
+            }
+            if found.is_none() {
+                found = self.system.any_face(bold, italic);
             }
             if let (Some(want), Some(got)) = (family, found.as_ref()) {
                 let note = format!("字体「{want}」不可用，已替换为「{}」", got.family);
@@ -185,6 +202,12 @@ impl FontBook {
             .drain(..)
             .map(|d| Warning::new(WarningKind::FontSubstituted, d))
             .collect();
+        if self.no_font_at_all {
+            out.push(Warning::new(
+                WarningKind::FontSubstituted,
+                "系统中找不到任何可用字体，部分内容无法排版。请安装 Noto Sans CJK 或思源黑体。",
+            ));
+        }
         if !self.missing.is_empty() {
             let chars: String = self.missing.drain(..).take(40).collect();
             out.push(Warning::new(
@@ -297,6 +320,8 @@ fn build_pieces(para: &ir::Paragraph, book: &mut FontBook) -> (String, Vec<Piece
                 run.font_latin.as_deref().or(run.font_east_asia.as_deref())
             };
             let Some(font) = book.resolve(family, east, run.bold, run.italic) else {
+                // 系统里一个字体都没有。无法排版，但要留痕而不是装作没事。
+                book.no_font_at_all = true;
                 continue;
             };
             let upem = book.face(font).metrics().upem as f32;

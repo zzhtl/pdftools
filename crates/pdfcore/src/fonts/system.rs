@@ -130,6 +130,19 @@ impl SystemFonts {
         })
     }
 
+    /// 系统里随便找一个能用的字体。只在所有偏好链都落空时作为最后兜底 ——
+    /// 有字体总比整段文字消失强。
+    pub fn any_face(&self, bold: bool, italic: bool) -> Option<Found> {
+        let mut families: Vec<String> = self
+            .db
+            .faces()
+            .flat_map(|f| f.families.iter().map(|(name, _)| name.clone()))
+            .collect();
+        families.sort();
+        families.dedup();
+        families.iter().find_map(|f| self.query(f, bold, italic))
+    }
+
     /// 是否存在任何可用的中文字体。用来在启动时给出一句有用的提示，
     /// 而不是等用户转换完才发现满页豆腐块。
     pub fn has_cjk(&self) -> bool {
