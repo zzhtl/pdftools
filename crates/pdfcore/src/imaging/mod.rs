@@ -20,7 +20,7 @@ pub fn quality_of(tier: Tier, grayscale: bool) -> ImageQuality {
 use std::path::Path;
 
 use crate::error::{CoreError, Result};
-use probe::{Container, Dpi};
+use probe::Dpi;
 
 /// 主图数据，以及它该以什么 filter 写进 PDF。
 pub enum ColorData {
@@ -116,41 +116,45 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
     let bytes = std::fs::read(path).map_err(|e| CoreError::io(path, e))?;
     let container = probe::sniff(&bytes);
 
-    // 先拿元数据决定「要不要解码」。对上百个文件逐个全量解码再决定，是本末倒置。
+    // 先靠元数据决定「要不要解码」。对上百个文件逐个全量解码再决定，是本末倒置。
     let exif_raw = read_exif(&bytes);
     let dpi = probe::dpi(&bytes, exif_raw.as_deref());
     let orientation = read_orientation(exif_raw.as_deref());
+    let upright = orientation == image::metadata::Orientation::NoTransforms;
 
-    if container == Container::Jpeg && quality.allow_passthrough {
-        if let Some(info) = probe::jpeg_info(&bytes) {
-            let (page_w, page_h) = page_size_pt(info.width, info.height, dpi);
-            let needs_scale = quality.needs_downscale(info.width, info.height, page_w, page_h);
-            let upright = orientation == image::metadata::Orientation::NoTransforms;
-            // CMYK（4 分量）不直通：PDF 里要写 /DeviceCMYK 并处理 Adobe APP14 的反相约定，
-            // 判错了输出就是偏色而不是报错。识别不了的一律走解码重编码，不赌。
-            let simple_color = info.components == 1 || info.components == 3;
+    // 这张图是否有资格走「原始字节直通」。
+    //
+    // 不直立就不行：旋转必须重新编码（真正无损的 DCT 系数旋转要靠 mozjpeg，
+    // 而它需要每个 CI runner 都装 C 编译器和 nasm，为此把三平台 CI 搞脆不划算）。
+    // CMYK（4 分量）也不行：PDF 里要写 /DeviceCMYK 并处理 Adobe APP14 的反相约定，
+    // 判错了输出是偏色而不是报错，不赌。
+    let passthrough: Option<(u32, u32, bool)> =
+        (container == probe::Container::Jpeg && quality.allow_passthrough && upright)
+            .then(|| probe::jpeg_info(&bytes))
+            .flatten()
+            .filter(|i| i.components == 1 || i.components == 3)
+            .map(|i| (i.width, i.height, i.components == 1));
 
-            if !needs_scale && upright && simple_color {
-                return Ok(PreparedImage {
-                    color: ColorData::Jpeg {
-                        bytes,
-                        gray: info.components == 1,
-                    },
-                    alpha: None,
-                    width: info.width,
-                    height: info.height,
-                    fidelity: Fidelity::Passthrough,
-                    page_w_pt: page_w,
-                    page_h_pt: page_h,
-                });
-            }
+    if let Some((w, h, gray)) = passthrough {
+        let (page_w, page_h) = page_size_pt(w, h, dpi);
+        if !quality.needs_downscale(w, h, page_w, page_h) {
+            return Ok(PreparedImage {
+                color: ColorData::Jpeg { bytes, gray },
+                alpha: None,
+                width: w,
+                height: h,
+                fidelity: Fidelity::Passthrough,
+                page_w_pt: page_w,
+                page_h_pt: page_h,
+            });
         }
     }
 
     // 走到这里就必须真的解码了。
     let mut img = image::load_from_memory(&bytes)
         .map_err(|e| CoreError::Image(format!("解码 {} 失败：{e}", path.display())))?;
-    // image 自带 EXIF 方向支持，不需要我们手写 8 种变换。漏了这步手机横拍的照片会躺倒。
+    // image 自带 EXIF 方向支持，不需要我们手写 8 种变换。
+    // 漏了这步，手机横拍的照片会躺着进 PDF。
     img.apply_orientation(orientation);
 
     let (mut w, mut h) = (img.width(), img.height());
@@ -167,30 +171,67 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
     let has_alpha = img.color().has_alpha();
     let alpha = has_alpha.then(|| extract_alpha(&img));
 
-    // 照片走 JPEG，图形/截图走无损。对文字和纯色块，JPEG 的振铃会在边缘糊一圈，
-    // 这正是用户说的「模糊」，而无损存储反而往往更小。
-    let is_photo = quality::looks_photographic(&img);
-
     let (color, fidelity) = if quality.lossless_only() && !rescaled {
         (raw_color(&img, quality.grayscale), Fidelity::Lossless)
-    } else if is_photo {
-        let jpeg = quality::encode_jpeg(&img, quality.jpeg_quality, quality.grayscale)?;
-        (
-            ColorData::Jpeg {
-                bytes: jpeg,
-                gray: quality.grayscale,
-            },
-            Fidelity::Reencoded,
-        )
     } else {
-        (
-            raw_color(&img, quality.grayscale),
-            if rescaled {
-                Fidelity::Reencoded
-            } else {
-                Fidelity::Lossless
-            },
-        )
+        // 到底该用 JPEG 还是无损存储？不靠「看起来像不像照片」这类猜测 ——
+        // 我试过用颜色数做判据，真实的白墙照片只有 0.8% 的不同色占比，
+        // 会被一律误判成图形，然后以原始像素塞进 PDF，体积暴涨十几倍。
+        //
+        // 改成直接测量：两种编码各估一次体积，按实测结果决定。
+        // 截图和线稿的 flate 体积远小于 JPEG，会自然选到无损；
+        // 照片的无损体积是 JPEG 的十几倍，会自然选到 JPEG。不需要任何魔法阈值。
+        let jpeg = quality::encode_jpeg(&img, quality.jpeg_quality, quality.grayscale)?;
+
+        // 护栏：降采样 + 重编码之后反而比原文件更大，就退回原图直通。
+        //
+        // 这不是假想情况：源文件本就是高压缩率的 JPEG，我们把它解开、缩小、
+        // 再以更高质量编回去，像素少了但字节多了。此时「压缩」既没省空间，
+        // 还白白损失一代画质。原图直通在两个维度上都更优。
+        if let Some((pw, ph, pgray)) = passthrough {
+            if jpeg.len() >= bytes.len() {
+                let (page_w, page_h) = page_size_pt(pw, ph, dpi);
+                return Ok(PreparedImage {
+                    color: ColorData::Jpeg { bytes, gray: pgray },
+                    alpha: None,
+                    width: pw,
+                    height: ph,
+                    fidelity: Fidelity::Passthrough,
+                    page_w_pt: page_w,
+                    page_h_pt: page_h,
+                });
+            }
+        }
+
+        let raw = raw_color(&img, quality.grayscale);
+        let ColorData::Raw {
+            bytes: raw_bytes,
+            gray,
+        } = &raw
+        else {
+            unreachable!("raw_color 只返回 Raw")
+        };
+        let components = if *gray { 1 } else { 3 };
+        let flate_est = quality::estimate_flate_len(raw_bytes, w as usize * components);
+
+        if (flate_est as f32) <= jpeg.len() as f32 * quality::LOSSLESS_TOLERANCE {
+            (
+                raw,
+                if rescaled {
+                    Fidelity::Reencoded
+                } else {
+                    Fidelity::Lossless
+                },
+            )
+        } else {
+            (
+                ColorData::Jpeg {
+                    bytes: jpeg,
+                    gray: quality.grayscale,
+                },
+                Fidelity::Reencoded,
+            )
+        }
     };
 
     Ok(PreparedImage {

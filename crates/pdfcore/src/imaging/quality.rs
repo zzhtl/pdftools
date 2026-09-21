@@ -1,6 +1,6 @@
 //! 质量档位，以及缩放/编码的具体实现。
 
-use image::{DynamicImage, GenericImageView};
+use image::DynamicImage;
 
 use crate::error::{CoreError, Result};
 
@@ -214,37 +214,45 @@ pub fn encode_jpeg(img: &DynamicImage, quality: u8, grayscale: bool) -> Result<V
     Ok(buf)
 }
 
-/// 判断是照片还是图形/截图。
+/// 估算原始像素经 Flate 压缩后的体积。
 ///
-/// 这个判断决定用 JPEG 还是无损存储。对文字和大片纯色，JPEG 会在边缘产生振铃，
-/// 那正是用户说的「模糊」；而这类图无损存储往往反而更小。
-///
-/// 手段是采样统计不同颜色数：照片几乎每个像素都不一样，截图则大量重复。
-pub fn looks_photographic(img: &DynamicImage) -> bool {
-    use std::collections::HashSet;
+/// 整份 deflate 一遍太贵 —— 一张 1200 万像素的 RGB 图有 36 MB 原始数据，
+/// 而我们只是想知道个数量级。按行采样 1/8 再外推，flate 的压缩率在这个尺度上足够稳定。
+pub fn estimate_flate_len(raw: &[u8], row_bytes: usize) -> usize {
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
 
-    const GRID: u32 = 64; // 最多采样 64×64 = 4096 个点
-    let (w, h) = (img.width(), img.height());
-    if w == 0 || h == 0 {
-        return false;
+    if row_bytes == 0 || raw.len() <= row_bytes {
+        return raw.len();
     }
-    let step_x = (w / GRID).max(1);
-    let step_y = (h / GRID).max(1);
-
-    let mut seen: HashSet<[u8; 3]> = HashSet::new();
-    let mut total = 0u32;
-    let mut y = 0;
-    while y < h {
-        let mut x = 0;
-        while x < w {
-            let p = img.get_pixel(x, y);
-            seen.insert([p.0[0], p.0[1], p.0[2]]);
-            total += 1;
-            x += step_x;
-        }
-        y += step_y;
+    const SAMPLE_EVERY: usize = 8;
+    let mut sample = Vec::with_capacity(raw.len() / SAMPLE_EVERY + row_bytes);
+    let mut rows = 0usize;
+    let mut offset = 0usize;
+    while offset + row_bytes <= raw.len() {
+        sample.extend_from_slice(&raw[offset..offset + row_bytes]);
+        rows += 1;
+        offset += row_bytes * SAMPLE_EVERY;
+    }
+    if rows == 0 {
+        return raw.len();
     }
 
-    // 照片的采样点里不同颜色占比很高；截图/线稿通常远低于这个比例。
-    total > 0 && (seen.len() as f32 / total as f32) > 0.5
+    let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::new(7));
+    if enc.write_all(&sample).is_err() {
+        return raw.len();
+    }
+    let Ok(compressed) = enc.finish() else {
+        return raw.len();
+    };
+
+    let total_rows = raw.len() / row_bytes;
+    compressed.len().saturating_mul(total_rows) / rows.max(1)
 }
+
+/// 无损编码可以比 JPEG 大多少，仍然值得选。
+///
+/// 给无损一点余量是有意的：对文字、线稿、纯色块，JPEG 在边缘产生的振铃
+/// 正是用户说的「发虚」，为此多付 50% 的体积是划算的。
+/// 但照片的无损体积通常是 JPEG 的十几倍，这个余量挡得住。
+pub const LOSSLESS_TOLERANCE: f32 = 1.5;
