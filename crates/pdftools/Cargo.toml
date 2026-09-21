@@ -1,0 +1,30 @@
+[package]
+name = "pdftools"
+description = "跨平台 PDF 工具箱：多图转 PDF、Word 转 PDF、PDF 压缩、图片批量压缩"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "pdftools"
+path = "src/main.rs"
+
+[dependencies]
+pdfcore = { path = "../pdfcore" }
+
+# 关掉默认 features 是为了用 glow 而非 wgpu：丢掉整棵 wgpu/naga/ash 依赖树，
+# 二进制更小，且 OpenGL 在老显卡 / 虚拟机 / 远程桌面上兼容面更宽。
+eframe = { version = "0.36.2", default-features = false, features = [
+    "glow", "default_fonts", "wayland", "x11", "links",
+] }
+egui = "0.36.2"
+rfd = "0.17.2"
+
+anyhow.workspace = true
+log.workspace = true
+env_logger = "0.11"
+image = { version = "0.25.10", default-features = false, features = [
+    "jpeg", "png", "gif", "bmp", "tiff", "webp", "ico", "pnm", "tga", "qoi",
+] }

@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu-22.04 而不是 latest：用较老的 glibc 构建，
+          # 产物才能在更旧的发行版上跑起来；反过来则不行。
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - name: macos-aarch64
+            os: macos-15
+            target: aarch64-apple-darwin
+          - name: macos-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 安装 Linux 构建依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+            libxrandr-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: 构建
+        run: cargo build --release --locked --target ${{ matrix.target }} -p pdftools
+
+      - name: 打包（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist/pdftools
+          cp target/${{ matrix.target }}/release/pdftools dist/pdftools/
+          cp README.md LICENSE dist/pdftools/ 2>/dev/null || cp README.md dist/pdftools/
+          tar -C dist -czf pdftools-${{ matrix.name }}.tar.gz pdftools
+
+      - name: 打包（macOS，手写 .app）
+        if: runner.os == 'macOS'
+        run: |
+          APP="dist/pdftools.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp target/${{ matrix.target }}/release/pdftools "$APP/Contents/MacOS/"
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>pdftools</string>
+            <key>CFBundleDisplayName</key><string>pdftools</string>
+            <key>CFBundleIdentifier</key><string>io.github.zzhtl.pdftools</string>
+            <key>CFBundleExecutable</key><string>pdftools</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${{ github.ref_name }}</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          cp README.md dist/
+          tar -C dist -czf pdftools-${{ matrix.name }}.tar.gz pdftools.app README.md
+
+      - name: 打包（Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/pdftools | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/pdftools.exe dist/pdftools/
+          Copy-Item README.md dist/pdftools/
+          Compress-Archive -Path dist/pdftools/* -DestinationPath pdftools-${{ matrix.name }}.zip
+
+      - name: 校验和
+        shell: bash
+        run: |
+          for f in pdftools-${{ matrix.name }}.*; do
+            if command -v sha256sum >/dev/null; then sha256sum "$f" > "$f.sha256";
+            else shasum -a 256 "$f" > "$f.sha256"; fi
+          done
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            pdftools-${{ matrix.name }}.tar.gz
+            pdftools-${{ matrix.name }}.zip
+            pdftools-${{ matrix.name }}.*.sha256
+          fail_on_unmatched_files: false
+          generate_release_notes: true
