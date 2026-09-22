@@ -90,9 +90,8 @@ pub fn shape_run(face: &FontFace, text: &str, script: rustybuzz::Script) -> Shap
 /// `w:rFonts w:ascii=".." w:eastAsia=".."` 两个字体，拉丁文和汉字必须分开用。
 /// 这些法律文书里满是身份证号、电话、邮箱，混在汉字段落中间。
 ///
-/// 数字、ASCII 标点、空格属于 Common，本身不指示字体。它们**继承前一个强字符**的归属
-/// （段首则继承后一个），这与 Word 的实际行为一致：中文段落里的 "2024年" 整体用中文字体，
-/// 而 "user@example.com" 整体用西文字体。
+/// ASCII 可见字符（字母、数字、半角标点）一律归西文 —— Word 的 `w:rFonts w:ascii`
+/// 管的就是这一段。只有空格这类既不属于中文也不属于西文的字符才继承相邻字符的归属。
 pub fn split_by_script(text: &str) -> Vec<(std::ops::Range<usize>, ScriptClass)> {
     use unicode_script::{Script, UnicodeScript};
 
@@ -114,6 +113,14 @@ pub fn split_by_script(text: &str) -> Vec<(std::ops::Range<usize>, ScriptClass)>
     fn strong(c: char) -> Option<ScriptClass> {
         if is_cjk_punctuation(c) {
             return Some(ScriptClass::EastAsian);
+        }
+        // ASCII 可见字符（字母、数字、半角标点）一律走西文字体。
+        //
+        // 这条是 Word 的规则：`w:rFonts w:ascii` 管的就是 0x00-0x7F 这一段。
+        // 之前把数字当 Common 让它继承前一个汉字，导致「第9条」整体被当成
+        // 中文，既用错了字体，也让中西文之间的自动间距无从插入。
+        if c.is_ascii_graphic() {
+            return Some(ScriptClass::Latin);
         }
         match c.script() {
             Script::Han

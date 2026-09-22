@@ -311,6 +311,9 @@ fn parse_ppr(r: &mut Rd) -> Result<PPr> {
                     };
                 }
                 "pageBreakBefore" => ppr.page_break_before = Some(on_off(&e)),
+                "snapToGrid" => ppr.snap_to_grid = Some(on_off(&e)),
+                "autoSpaceDE" => ppr.auto_space_latin = Some(on_off(&e)),
+                "autoSpaceDN" => ppr.auto_space_digits = Some(on_off(&e)),
                 _ => {}
             },
             Event::End(e) if e.local_name().as_ref() == "pPr" => break,
@@ -332,6 +335,19 @@ fn parse_sect_pr(r: &mut Rd) -> Result<SectPr> {
                     }
                     if let Some(h) = attr_i32(&e, "h") {
                         s.page_h = h;
+                    }
+                }
+                "docGrid" => {
+                    if let Some(pitch) = attr_i32(&e, "linePitch") {
+                        // 只有这三种 type 才吸附。实测 default / 不写 type 都不吸附。
+                        let snaps = matches!(
+                            attr(&e, "type").as_deref(),
+                            Some("lines" | "linesAndChars" | "snapToChars")
+                        );
+                        s.doc_grid = Some(DocGrid {
+                            line_pitch: pitch,
+                            snaps,
+                        });
                     }
                 }
                 "pgMar" => {

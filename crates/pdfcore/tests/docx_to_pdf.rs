@@ -258,3 +258,206 @@ fn fullwidth_punctuation_after_latin_uses_cjk_font() {
         report.warnings
     );
 }
+
+/// 取第一页内容流里所有文本定位（Tm）的 (x, y)。
+fn text_origins(pdf: &[u8]) -> Vec<(f32, f32)> {
+    let doc = lopdf::Document::load_mem(pdf).unwrap();
+    let page_id = *doc.get_pages().values().next().unwrap();
+    let content = doc.get_and_decode_page_content(page_id).unwrap();
+    let num = |o: &lopdf::Object| match o {
+        lopdf::Object::Real(v) => *v,
+        lopdf::Object::Integer(v) => *v as f32,
+        _ => f32::NAN,
+    };
+    content
+        .operations
+        .iter()
+        .filter(|op| op.operator == "Tm" && op.operands.len() == 6)
+        .map(|op| (num(&op.operands[4]), num(&op.operands[5])))
+        .collect()
+}
+
+/// 造一个可以指定 sectPr 额外内容的 docx。
+fn make_docx_with_sect(name: &str, body: &str, sect_extra: &str) -> PathBuf {
+    let path = tmp().join(name);
+    let file = std::fs::File::create(&path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let opts: zip::write::FileOptions<'_, ()> =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let doc = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>{body}
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>
+<w:pgMar w:top="1440" w:right="1588" w:bottom="1440" w:left="1588"/>{sect_extra}</w:sectPr>
+</w:body></w:document>"#
+    );
+    for (n, content) in [
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", RELS),
+        ("word/document.xml", doc.as_str()),
+    ] {
+        zip.start_file(n, opts).unwrap();
+        zip.write_all(content.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap();
+    path
+}
+
+/// 行网格（`w:docGrid`）必须生效。
+///
+/// 这是中文文档排版最要命的一处：网格生效时，单倍行高要**向上吸附到 linePitch
+/// 的整数倍**，倍数再乘在这之上。忽略它，整篇的行密度会高出近一倍 ——
+/// 实测曾经导致 8 份真实文书的页数只有 LibreOffice 参照的 60%。
+///
+/// 12pt 正文自然行高约 17.2pt，在 15.6pt（312 twips）的网格上占满 2 格 = 31.2pt。
+#[test]
+fn doc_grid_snaps_line_height_up_to_the_grid() {
+    if !require_cjk_font() {
+        return;
+    }
+    let body = (0..12)
+        .map(|_| {
+            r#"<w:p><w:pPr><w:spacing w:line="240" w:lineRule="auto"/></w:pPr>
+<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr>
+<w:t>测试文字测试文字测试文字测试文字测试文字测试文字测试文字测试文字测试文字</w:t></w:r></w:p>"#
+                .to_string()
+        })
+        .collect::<String>();
+
+    let spacing_of = |name: &str, sect: &str| {
+        let p = make_docx_with_sect(name, &body, sect);
+        let pdf = convert(&p).value.pdf;
+        let mut ys: Vec<f32> = text_origins(&pdf).iter().map(|(_, y)| *y).collect();
+        ys.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        ys.dedup();
+        (ys[0] - ys[1]).abs()
+    };
+
+    let plain = spacing_of("grid_off.docx", "");
+    let grid = spacing_of(
+        "grid_on.docx",
+        r#"<w:docGrid w:type="lines" w:linePitch="312"/>"#,
+    );
+
+    assert!(
+        (plain - 17.2).abs() < 1.5,
+        "无网格时应当是字体自然行高（约 17.2pt），实际 {plain:.2}"
+    );
+    assert!(
+        (grid - 31.2).abs() < 0.6,
+        "有网格时应当吸附到 2 × 15.6 = 31.2pt，实际 {grid:.2}"
+    );
+}
+
+/// `w:docGrid w:type="default"` 不吸附 —— Word 常写这种形式，一律吸附会把行距撑大一倍。
+#[test]
+fn doc_grid_type_default_does_not_snap() {
+    if !require_cjk_font() {
+        return;
+    }
+    let body = (0..6)
+        .map(|_| {
+            r#"<w:p><w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr>
+<w:t>测试文字测试文字</w:t></w:r></w:p>"#
+                .to_string()
+        })
+        .collect::<String>();
+    let p = make_docx_with_sect(
+        "grid_default.docx",
+        &body,
+        r#"<w:docGrid w:type="default" w:linePitch="312"/>"#,
+    );
+    let pdf = convert(&p).value.pdf;
+    let mut ys: Vec<f32> = text_origins(&pdf).iter().map(|(_, y)| *y).collect();
+    ys.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    ys.dedup();
+    let gap = (ys[0] - ys[1]).abs();
+    assert!(
+        gap < 20.0,
+        "type=\"default\" 不该吸附到网格，行距应当约 17.2pt，实际 {gap:.2}"
+    );
+}
+
+/// 中日韩文字与西文/数字之间要自动插入间距。
+///
+/// 没有它，「第9条」会挤成一团。Word 与 LibreOffice 默认都会加
+/// （Word 的开关是 `w:autoSpaceDE`/`w:autoSpaceDN`）。
+#[test]
+fn cjk_and_latin_get_automatic_spacing() {
+    if !require_cjk_font() {
+        return;
+    }
+    // 「中文」+「9」+「中文」：三段各自定位，从 Tm 的 x 差值能直接量出间距。
+    let body = r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/>
+<w:sz w:val="24"/></w:rPr><w:t>中文9中文</w:t></w:r></w:p>"#;
+    let with = convert(&make_docx_with_sect("space_on.docx", body, ""))
+        .value
+        .pdf;
+
+    let xs: Vec<f32> = {
+        let mut v: Vec<f32> = text_origins(&with).iter().map(|(x, _)| *x).collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v
+    };
+    assert!(xs.len() >= 3, "应当切成中文/数字/中文三段，实际 {xs:?}");
+
+    // 第一段「中文」= 2 × 12pt = 24pt。数字段的起点减去它，剩下的就是间距。
+    let gap = xs[1] - xs[0] - 24.0;
+    assert!(
+        (gap - 0.2 * 12.0).abs() < 0.5,
+        "中西文间距应当约 2.4pt（0.2em @12pt），实际 {gap:.2}pt"
+    );
+
+    // 关掉开关就不该有间距。
+    let body_off = r#"<w:p><w:pPr><w:autoSpaceDE w:val="0"/><w:autoSpaceDN w:val="0"/></w:pPr>
+<w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/>
+<w:sz w:val="24"/></w:rPr><w:t>中文9中文</w:t></w:r></w:p>"#;
+    let without = convert(&make_docx_with_sect("space_off.docx", body_off, ""))
+        .value
+        .pdf;
+    let mut xs2: Vec<f32> = text_origins(&without).iter().map(|(x, _)| *x).collect();
+    xs2.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let gap2 = xs2[1] - xs2[0] - 24.0;
+    assert!(
+        gap2.abs() < 0.5,
+        "autoSpaceDE/DN 关闭时不该有间距，实际 {gap2:.2}pt"
+    );
+}
+
+/// ASCII 字符（含数字）必须用西文字体，不能跟着相邻汉字走。
+///
+/// Word 的 `w:rFonts w:ascii` 管的就是 0x00-0x7F 这一段。归错了不仅字体不对，
+/// 中西文之间的自动间距也会因为识别不到边界而完全失效。
+#[test]
+fn ascii_digits_use_the_latin_font() {
+    if !require_cjk_font() {
+        return;
+    }
+    let body = r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/>
+<w:sz w:val="24"/></w:rPr><w:t>编号123456789012345678完</w:t></w:r></w:p>"#;
+    let pdf = convert(&make_docx_with_sect("ascii_font.docx", body, ""))
+        .value
+        .pdf;
+
+    // 三段（中文 / 数字 / 中文）意味着数字被单独切出来交给了西文字体。
+    let origins = text_origins(&pdf);
+    assert!(
+        origins.len() >= 3,
+        "数字应当被切成独立的一段用西文字体渲染，实际只有 {} 段",
+        origins.len()
+    );
+
+    let doc = lopdf::Document::load_mem(&pdf).unwrap();
+    let pages: Vec<u32> = doc.get_pages().keys().copied().collect();
+    let text: String = doc
+        .extract_text(&pages)
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert!(
+        text.contains("123456789012345678"),
+        "长数字串应当完整保留，实际抽回 {text}"
+    );
+}

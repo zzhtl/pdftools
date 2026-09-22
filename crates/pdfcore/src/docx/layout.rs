@@ -230,6 +230,8 @@ impl Default for FontBook {
 /// 一个「同字体、同字号、同 script」的可整形单元。
 struct Piece {
     range: Range<usize>,
+    /// 本片的文种。相邻两片文种不同才需要插入中西文间距。
+    class: ScriptClass,
     font: FontId,
     size_pt: f32,
     color: [u8; 3],
@@ -239,9 +241,30 @@ struct Piece {
     /// 与 `shaped.glyphs` 等长。
     texts: Vec<String>,
     upem: f32,
+    /// 本片开头要额外插入的间距（点）。中日韩与西文相邻时加，见 `CJK_LATIN_GAP_EM`。
+    gap_before: f32,
 }
 
+/// 中日韩文字与西文/数字相邻时插入的间距，单位 em。
+///
+/// 没有它，「第9条」会挤成一团 —— Word 与 LibreOffice 默认都会加这个间距
+/// （Word 的开关是 `w:autoSpaceDE` / `w:autoSpaceDN`，默认开启）。
+/// 0.2em 是对着 LibreOffice 实测出来的（9pt 与 12pt 两个字号交叉验证）。
+const CJK_LATIN_GAP_EM: f32 = 0.2;
+
 impl Piece {
+    /// 本片（含其前置间距）在区间内贡献的宽度。
+    fn width_with_gap(&self, from: usize, to: usize) -> f32 {
+        // 只有当本片的起点真的落在区间内部时，前置间距才算数 ——
+        // 区间从本片中途开始时，那个间距在上一行的行尾，不该重复计入。
+        let gap = if self.range.start > from && self.range.start < to {
+            self.gap_before
+        } else {
+            0.0
+        };
+        gap + self.width(from, to)
+    }
+
     /// 区间 `[from, to)`（段落全局字节偏移）在本片内的宽度，单位点。
     fn width(&self, from: usize, to: usize) -> f32 {
         let a = from.clamp(self.range.start, self.range.end) - self.range.start;
@@ -307,7 +330,7 @@ fn build_pieces(para: &ir::Paragraph, book: &mut FontBook) -> (String, Vec<Piece
         }
     }
 
-    let mut pieces = Vec::new();
+    let mut pieces: Vec<Piece> = Vec::new();
     for (span, run) in spans {
         let segment = &text[span.clone()];
         // 一个 run 内部还要按 script 再切：中文用 eastAsia 字体，西文用 ascii 字体。
@@ -331,8 +354,19 @@ fn build_pieces(para: &ir::Paragraph, book: &mut FontBook) -> (String, Vec<Piece
                 .into_iter()
                 .map(|(_, t)| t)
                 .collect();
+            // 与紧邻的上一片文种不同时，插入中西文间距。
+            // 间距按两侧较大的字号算，跟 Word 的观感一致。
+            let gap_before = match pieces.last() {
+                Some(prev)
+                    if para.auto_space && prev.class != class && prev.range.end == abs.start =>
+                {
+                    CJK_LATIN_GAP_EM * prev.size_pt.max(run.size_pt)
+                }
+                _ => 0.0,
+            };
             pieces.push(Piece {
                 range: abs,
+                class,
                 font,
                 size_pt: run.size_pt,
                 color: run.color,
@@ -341,6 +375,7 @@ fn build_pieces(para: &ir::Paragraph, book: &mut FontBook) -> (String, Vec<Piece
                 shaped,
                 texts,
                 upem,
+                gap_before,
             });
         }
     }
@@ -348,7 +383,7 @@ fn build_pieces(para: &ir::Paragraph, book: &mut FontBook) -> (String, Vec<Piece
 }
 
 fn width_between(pieces: &[Piece], from: usize, to: usize) -> f32 {
-    pieces.iter().map(|p| p.width(from, to)).sum()
+    pieces.iter().map(|p| p.width_with_gap(from, to)).sum()
 }
 
 // ---------------------------------------------------------------- 主流程
@@ -358,6 +393,7 @@ const PLACEHOLDER_COLOR: [u8; 3] = [0x88, 0x88, 0x88];
 pub fn layout(doc: &ir::Document, book: &mut FontBook) -> LaidOut {
     let mut ctx = Ctx {
         page: &doc.page,
+        grid: doc.grid,
         pages: vec![Page::default()],
         used: 0.0,
         warnings: Vec::new(),
@@ -379,6 +415,7 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook) -> LaidOut {
 
 struct Ctx<'a> {
     page: &'a ir::PageGeom,
+    grid: Option<ir::Grid>,
     pages: Vec<Page>,
     /// 当前页已用掉的垂直空间（从内容区顶部往下量）。
     used: f32,
@@ -403,10 +440,12 @@ impl Ctx<'_> {
         if para.page_break_before && !(self.at_page_top() && self.pages.len() == 1) {
             self.new_page();
         }
-        // Word 会吃掉页首段落的段前距，否则每页顶部都会莫名多出一块空白。
-        if !self.at_page_top() {
-            self.used += para.space_before;
-        }
+        // 段前距在页首也照常生效。
+        //
+        // 原先这里会在页首吃掉段前距（照搬了 HTML 的习惯），实测 LibreOffice
+        // 并不这么做：同一份文档，参照的首行基线距正文顶 40.3pt，而吃掉段前距
+        // 只有 24.1pt，整页内容整体上移一截。
+        self.used += para.space_before;
 
         let (text, pieces) = build_pieces(para, book);
         if pieces.is_empty() {
@@ -468,11 +507,19 @@ impl Ctx<'_> {
             .iter()
             .filter(|p| p.range.start < range.end && p.range.end > range.start)
             .collect();
-        let natural = active
+        let mut natural = active
             .iter()
             .map(|p| p.natural_line_pt(book))
             .fold(0.0f32, f32::max)
             .max(1.0);
+
+        // 行网格：单倍行高先向上吸附到网格整数倍，倍数再乘在这之上。
+        // 漏掉这一步，中文文档的行密度会比 Word 高出近一倍。
+        if para.snap_to_grid {
+            if let Some(g) = self.grid {
+                natural = g.snap(natural);
+            }
+        }
         let ascent = active
             .iter()
             .map(|p| p.ascent_pt(book))
@@ -537,6 +584,11 @@ impl Ctx<'_> {
             let glyphs = piece.glyphs_between(range.start, range.end);
             if glyphs.is_empty() {
                 continue;
+            }
+            // 中西文间距：只有本片确实从行中间开始时才推进，
+            // 行首的那个间距应当被吃掉，否则整行会往右偏。
+            if piece.range.start > range.start && piece.range.start < range.end {
+                x += piece.gap_before;
             }
             let w = piece.width(range.start, range.end);
             let extra = char_spacing * glyphs.len() as f32
@@ -626,6 +678,9 @@ fn placeholder_para(text: &str, is_note: bool) -> ir::Paragraph {
         space_after: if is_note { 2.0 } else { 0.0 },
         line: LineSpacing::Multiple(1.0),
         page_break_before: false,
+        // 占位说明不参与网格吸附：它是我们插入的提示，不属于原文排版。
+        snap_to_grid: false,
+        auto_space: true,
         runs: vec![ir::Run {
             text: text.to_string(),
             size_pt: 9.0,

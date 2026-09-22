@@ -20,6 +20,25 @@ fn half_pt(v: u32) -> f32 {
 /// 但 OOXML 的 docDefaults 缺省是 10 磅。
 const FALLBACK_SIZE_PT: f32 = 10.5;
 
+/// 行网格。`pitch_pt` 是网格行距（点）。
+#[derive(Debug, Clone, Copy)]
+pub struct Grid {
+    pub pitch_pt: f32,
+}
+
+impl Grid {
+    /// 把单倍行高向上吸附到网格整数倍。
+    ///
+    /// 这是中文排版行密度的决定性一步：12pt 宋体自然行高 17.4pt，
+    /// 在 15.6pt 的网格上要占满 2 格 = 31.2pt。不做这步，整篇会挤掉近一半。
+    pub fn snap(self, natural_pt: f32) -> f32 {
+        if self.pitch_pt <= 0.0 {
+            return natural_pt;
+        }
+        (natural_pt / self.pitch_pt).ceil().max(1.0) * self.pitch_pt
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct PageGeom {
     pub w_pt: f32,
@@ -73,6 +92,10 @@ pub struct Paragraph {
     pub space_after: f32,
     pub line: LineSpacing,
     pub page_break_before: bool,
+    /// 本段是否参与行网格吸附（`w:snapToGrid`，缺省 true）。
+    pub snap_to_grid: bool,
+    /// 中日韩文字与西文/数字之间是否自动加间距（`w:autoSpaceDE`/`DN`，缺省 true）。
+    pub auto_space: bool,
     pub runs: Vec<Run>,
 }
 
@@ -92,6 +115,8 @@ pub enum Block {
 #[derive(Debug, Clone)]
 pub struct Document {
     pub page: PageGeom,
+    /// 文档的行网格。None 表示没有网格或网格类型不吸附。
+    pub grid: Option<Grid>,
     pub blocks: Vec<Block>,
 }
 
@@ -145,7 +170,14 @@ pub fn build(raw: &RawDocument) -> Document {
         }
     }
 
-    Document { page, blocks }
+    let grid = s
+        .doc_grid
+        .filter(|g| g.snaps && g.line_pitch > 0)
+        .map(|g| Grid {
+            pitch_pt: tw(g.line_pitch),
+        });
+
+    Document { page, grid, blocks }
 }
 
 /// Word 的默认制表位是 0.74cm。本版本**不实现真正的制表位**，
@@ -216,6 +248,10 @@ fn build_paragraph(ppr: &PPr, runs: Vec<Run>, char_size_pt: f32) -> Paragraph {
         space_after: ppr.space_after_twips.map(tw).unwrap_or(0.0),
         line,
         page_break_before: ppr.page_break_before.unwrap_or(false),
+        snap_to_grid: ppr.snap_to_grid.unwrap_or(true),
+        // 两个开关只要有一个开着就加间距：它们分别管西文和数字，
+        // 而我们不在字符级区分这两类，统一按「非中日韩」处理。
+        auto_space: ppr.auto_space_latin.unwrap_or(true) || ppr.auto_space_digits.unwrap_or(true),
         runs,
     }
 }

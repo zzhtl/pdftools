@@ -100,6 +100,12 @@ pub struct PPr {
     pub line: Option<i32>,
     pub line_rule: Option<LineRule>,
     pub page_break_before: Option<bool>,
+    /// `w:snapToGrid`，段落是否参与行网格吸附。缺省为 true。
+    pub snap_to_grid: Option<bool>,
+    /// `w:autoSpaceDE`：中日韩文字与西文之间自动加间距。缺省为 true。
+    pub auto_space_latin: Option<bool>,
+    /// `w:autoSpaceDN`：中日韩文字与数字之间自动加间距。缺省为 true。
+    pub auto_space_digits: Option<bool>,
     /// `w:pPr/w:rPr`：段落标记自身的格式。它参与 run 的层叠，优先级低于 run 上的直接格式。
     pub mark_rpr: RPr,
 }
@@ -125,6 +131,15 @@ impl PPr {
         }
         if other.page_break_before.is_some() {
             self.page_break_before = other.page_break_before;
+        }
+        if other.snap_to_grid.is_some() {
+            self.snap_to_grid = other.snap_to_grid;
+        }
+        if other.auto_space_latin.is_some() {
+            self.auto_space_latin = other.auto_space_latin;
+        }
+        if other.auto_space_digits.is_some() {
+            self.auto_space_digits = other.auto_space_digits;
         }
         self.mark_rpr.merge(&other.mark_rpr);
     }
@@ -184,6 +199,23 @@ pub enum RawBlock {
     },
 }
 
+/// `w:docGrid` —— 中文排版的**行网格**。
+///
+/// 这是中文文档排版的关键，漏掉它整篇的行密度就全错。实测 LibreOffice 的行为
+/// （4 种字号、2 种 pitch 交叉验证）：网格生效时，单倍行高不是字体的自然行高，
+/// 而是**向上吸附到 linePitch 的整数倍**，`lineRule="auto"` 的倍数再乘在这之上。
+///
+/// 例：12pt 宋体自然行高 17.4pt，linePitch=312twips(15.6pt) → 吸附成 31.2pt，
+/// 再乘 1.3 倍行距 = 40.6pt。忽略网格只会得到 22.6pt，差 45%。
+#[derive(Debug, Clone, Copy)]
+pub struct DocGrid {
+    /// 网格行距，twips。
+    pub line_pitch: i32,
+    /// 是否真的吸附。`w:type` 为 lines / linesAndChars / snapToChars 时吸附，
+    /// 为 default 或缺省时不吸附 —— 后两种很常见，一律吸附会把行距撑大一倍。
+    pub snaps: bool,
+}
+
 /// `w:sectPr`，页面几何。单位 twips。
 #[derive(Debug, Clone, Copy)]
 pub struct SectPr {
@@ -193,6 +225,7 @@ pub struct SectPr {
     pub margin_bottom: i32,
     pub margin_left: i32,
     pub margin_right: i32,
+    pub doc_grid: Option<DocGrid>,
 }
 
 impl Default for SectPr {
@@ -205,6 +238,7 @@ impl Default for SectPr {
             margin_bottom: 1440,
             margin_left: 1800,
             margin_right: 1800,
+            doc_grid: None,
         }
     }
 }
