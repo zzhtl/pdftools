@@ -203,6 +203,11 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     egui::Color32::from_rgb(0x8A, 0x4B, 0x00),
                     "文件时间不能代替拍摄时间（复制一次就被刷新），所以不会写进 PDF。可以在下面每一行里直接填写真实拍摄时间，或改用手机相册里的原图。",
                 );
+                // 这条容易被误解成「填了就把照片修好了」，必须说在前面。
+                ui.colored_label(
+                    egui::Color32::from_rgb(0x8A, 0x4B, 0x00),
+                    "注意：手动填写只影响本次生成的 PDF，不会修改图片文件本身 —— 图片的 EXIF 仍然没有拍摄时间。",
+                );
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(!busy, egui::Button::new("把第一张的时间套用到全部"))
