@@ -23,11 +23,23 @@
 | --- | --- | --- |
 | Windows (x64) | `pdftools-windows-x86_64.exe` | 下载后直接双击 |
 | macOS (M 系列芯片) | `pdftools-macos-apple-silicon.dmg` | 双击挂载，把图标拖进 Applications |
-| Linux (x64) | `pdftools-linux-x86_64.AppImage` | `chmod +x` 后双击或直接运行 |
+| Ubuntu / Debian (x64) | `pdftools_<版本>_amd64.deb` | `sudo apt install ./pdftools_<版本>_amd64.deb` |
 
 每个文件旁边都有 `.sha256` 校验文件。
 
-macOS 只提供 M 系列（Apple Silicon）的包。Intel Mac 没有预编译版本，需要的话从源码构建（见文末）。
+### Linux 安装说明
+
+用 `apt install ./xxx.deb` 而不是 `dpkg -i`——前者会自动把依赖装上，后者不会。装完之后：
+
+- 在应用菜单里能直接找到 pdftools
+- 命令行输 `pdftools` 也能启动，`pdftools 照片1.jpg 照片2.jpg` 可以直接带文件打开
+- 卸载：`sudo apt remove pdftools`
+
+这个包在 **Ubuntu 22.04** 上构建，因此 22.04 及更新的版本都能装（反过来不行——在新系统上构建的包会要求更高版本的 glibc）。
+
+非 Debian 系的发行版（Fedora、Arch 等）没有预编译包，从源码构建即可，见文末。
+
+macOS 只提供 M 系列（Apple Silicon）的包。Intel Mac 没有预编译版本，需要的话同样从源码构建。
 
 ### macOS 首次打开会被拦截
 

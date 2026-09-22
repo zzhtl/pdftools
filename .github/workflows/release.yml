@@ -35,6 +35,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: 校验 tag 与 Cargo.toml 版本一致
+        # 版本号漂移过一次：tag 已经打到 v0.3.1，Cargo.toml 还停在 0.1.0。
+        # 对 .deb 来说这很要命 —— apt 靠它判断升级，装了新版也认不出来。
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(grep -m1 '^version = ' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "tag=$tag  Cargo.toml=$crate"
+          [ "$tag" = "$crate" ] || {
+            echo "::error::tag 版本 $tag 与 Cargo.toml 的 $crate 不一致，请先同步再打 tag"
+            exit 1
+          }
+
       - name: 安装 Linux 构建依赖
         if: runner.os == 'Linux'
         run: |
@@ -56,44 +71,23 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }} -p pdftools
 
       # ---------------------------------------------------------------- Linux
-      # 产物是单个 AppImage：下载、chmod +x、双击即可，不用解压也不用安装。
-      - name: 打包 AppImage
+      # 产物是 Ubuntu / Debian 原生包：apt install ./xxx.deb 即可，
+      # 装完在应用菜单里能直接找到，也能用「打开方式」关联文件。
+      #
+      # 在 ubuntu-22.04 上构建是有意的：deb 会把构建机的 libc6 版本写进 Depends，
+      # 在 24.04 上构建出来的包在 22.04 上装不了，反过来可以。
+      - name: 打包 deb
         if: runner.os == 'Linux'
         run: |
           set -eux
-          APPDIR=AppDir
-          mkdir -p "$APPDIR/usr/bin" \
-                   "$APPDIR/usr/share/applications" \
-                   "$APPDIR/usr/share/icons/hicolor/256x256/apps"
-          cp target/${{ matrix.target }}/release/pdftools "$APPDIR/usr/bin/"
-          cp assets/icon-256.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/pdftools.png"
-          cp assets/icon-256.png "$APPDIR/pdftools.png"
-
-          cat > "$APPDIR/pdftools.desktop" <<'DESKTOP'
-          [Desktop Entry]
-          Type=Application
-          Name=pdftools
-          Comment=图片转 PDF、Word 转 PDF、PDF 与图片压缩
-          Exec=pdftools
-          Icon=pdftools
-          Categories=Office;Utility;
-          Terminal=false
-          DESKTOP
-          cp "$APPDIR/pdftools.desktop" "$APPDIR/usr/share/applications/"
-
-          cat > "$APPDIR/AppRun" <<'APPRUN'
-          #!/bin/sh
-          HERE="$(dirname "$(readlink -f "$0")")"
-          exec "$HERE/usr/bin/pdftools" "$@"
-          APPRUN
-          chmod +x "$APPDIR/AppRun"
-
-          curl -sSfL -o appimagetool \
-            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x appimagetool
-          # runner 上没有 FUSE，用 extract-and-run 绕开
-          ARCH=x86_64 ./appimagetool --appimage-extract-and-run \
-            "$APPDIR" "pdftools-${{ matrix.name }}.AppImage"
+          cargo install cargo-deb --locked --version '^3'
+          cargo deb -p pdftools --no-build --output .
+          ls -la ./*.deb
+          # 依赖里必须有那些运行时 dlopen 的库，否则装上也起不来
+          deb=$(ls ./*.deb | head -1)
+          dpkg -I "$deb" | grep -q 'libgl1' || {
+            echo "::error::Depends 里缺少 libgl1，包装错了"; exit 1; }
+          dpkg -I "$deb"
 
       # ---------------------------------------------------------------- macOS
       # 产物是 .dmg：双击挂载，把 pdftools 拖进 Applications 即完成安装。
@@ -153,7 +147,7 @@ jobs:
           set -eu
           # 每个平台只会产出三者之一，所以要跳过不存在的，
           # 否则 sha256sum 会因为文件缺失让整步失败。
-          for f in pdftools-${{ matrix.name }}.AppImage \
+          for f in ./*.deb \
                    pdftools-${{ matrix.name }}.dmg \
                    pdftools-${{ matrix.name }}.exe; do
             [ -f "$f" ] || continue
@@ -165,7 +159,8 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           files: |
-            pdftools-${{ matrix.name }}.AppImage
+            *.deb
+            *.deb.sha256
             pdftools-${{ matrix.name }}.dmg
             pdftools-${{ matrix.name }}.exe
             pdftools-${{ matrix.name }}.*.sha256

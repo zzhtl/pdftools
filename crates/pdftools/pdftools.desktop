@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=pdftools
+GenericName=PDF 工具箱
+Comment=图片转 PDF、Word 转 PDF、PDF 与图片压缩
+Exec=pdftools %F
+Icon=pdftools
+Terminal=false
+Categories=Office;Publishing;Viewer;
+MimeType=image/jpeg;image/png;image/tiff;image/bmp;image/webp;application/pdf;application/vnd.openxmlformats-officedocument.wordprocessingml.document;
+Keywords=PDF;图片;压缩;Word;

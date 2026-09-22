@@ -1,6 +1,6 @@
 [package]
 name = "pdftools"
-description = "跨平台 PDF 工具箱：多图转 PDF、Word 转 PDF、PDF 压缩、图片批量压缩"
+description = "跨平台 PDF 工具箱：图片转 PDF、Word 转 PDF、压缩"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -28,3 +28,28 @@ env_logger = "0.11"
 image = { version = "0.25.10", default-features = false, features = [
     "jpeg", "png", "gif", "bmp", "tiff", "webp", "ico", "pnm", "tga", "qoi",
 ] }
+
+# Ubuntu / Debian 原生包。
+#
+# 注意 depends 里那一长串：eframe 走 glow 后端，X11 / Wayland / GL 这些库全是
+# 运行时 dlopen 的，二进制的动态段里根本没有它们 —— dpkg-shlibdeps（也就是
+# $auto）只能探测到 libc、libgcc、libm。只靠 $auto 的话包能装上但一启动就失败，
+# 所以下面这些必须手写。清单是实际跑起来后读 /proc/<pid>/maps 得到的。
+[package.metadata.deb]
+maintainer = "zzhtl <zzhtl@users.noreply.github.com>"
+copyright = "2026 zzhtl"
+license-file = ["../../LICENSE", "0"]
+section = "utils"
+priority = "optional"
+extended-description = """\
+跨平台桌面 PDF 工具箱，不联网、不上传、文件不出本机。
+支持多图片无损合成 PDF、Word 转 PDF、PDF 压缩与图片批量压缩。"""
+depends = "$auto, libgl1, libegl1, libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6, libxrandr2, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-cursor0, libwayland-egl1"
+assets = [
+    ["../../target/release/pdftools", "usr/bin/", "755"],
+    ["../../assets/icon-256.png", "usr/share/icons/hicolor/256x256/apps/pdftools.png", "644"],
+    ["../../assets/icon-128.png", "usr/share/icons/hicolor/128x128/apps/pdftools.png", "644"],
+    ["../../assets/icon-64.png", "usr/share/icons/hicolor/64x64/apps/pdftools.png", "644"],
+    ["pdftools.desktop", "usr/share/applications/pdftools.desktop", "644"],
+    ["../../README.md", "usr/share/doc/pdftools/README.md", "644"],
+]
