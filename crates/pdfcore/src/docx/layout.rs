@@ -482,6 +482,7 @@ impl Ctx<'_> {
                 book,
                 is_first_line,
                 is_last || mandatory,
+                is_last,
             );
 
             line_start = line_end;
@@ -501,13 +502,16 @@ impl Ctx<'_> {
         book: &FontBook,
         is_first_line: bool,
         suppress_justify: bool,
+        // 本行是不是所属段落的最后一行 —— 决定倍数行距怎么算，见函数体内的说明。
+        is_last_line: bool,
     ) {
         // 行内实际出现的片段决定行高：取最大的那个字体。
         let active: Vec<&Piece> = pieces
             .iter()
             .filter(|p| p.range.start < range.end && p.range.end > range.start)
             .collect();
-        let mut natural = active
+        // 字体的自然行高（吸附前）。段落最后一行要用到它，见下。
+        let unsnapped = active
             .iter()
             .map(|p| p.natural_line_pt(book))
             .fold(0.0f32, f32::max)
@@ -515,17 +519,25 @@ impl Ctx<'_> {
 
         // 行网格：单倍行高先向上吸附到网格整数倍，倍数再乘在这之上。
         // 漏掉这一步，中文文档的行密度会比 Word 高出近一倍。
-        if para.snap_to_grid {
-            if let Some(g) = self.grid {
-                natural = g.snap(natural);
-            }
-        }
+        let natural = match self.grid {
+            Some(g) if para.snap_to_grid => g.snap(unsnapped),
+            _ => unsnapped,
+        };
+
         let ascent = active
             .iter()
             .map(|p| p.ascent_pt(book))
             .fold(0.0f32, f32::max);
 
         let line_height = match para.line {
+            // 段落的**最后一行**，倍数带来的额外行距按**吸附前**的自然行高算，
+            // 而不是吸附后的。这条实测自 LibreOffice，1.0 / 1.3 / 1.5 / 2.0
+            // 四个倍数全部吻合；没有网格时 natural == unsnapped，公式自然退化
+            // 成 natural × m。
+            //
+            // 不区分这一条，每个段落边界都会多出 (m-1) × 吸附增量，
+            // 段落密集的文档累积下来会平白多出一整页。
+            LineSpacing::Multiple(m) if is_last_line => natural + (m - 1.0).max(0.0) * unsnapped,
             LineSpacing::Multiple(m) => natural * m,
             LineSpacing::Exact(pt) => pt,
             LineSpacing::AtLeast(pt) => natural.max(pt),

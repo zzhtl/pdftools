@@ -461,3 +461,56 @@ fn ascii_digits_use_the_latin_font() {
         "长数字串应当完整保留，实际抽回 {text}"
     );
 }
+
+/// 段落**最后一行**的倍数行距，额外部分按**吸附前**的自然行高算。
+///
+/// 实测自 LibreOffice（1.0 / 1.3 / 1.5 / 2.0 四个倍数全部吻合）：
+///   段内行距     = 吸附后行高 × 倍数
+///   段落末行贡献 = 吸附后行高 + (倍数 − 1) × 吸附前自然行高
+///
+/// 不区分这一条，每个段落边界都会多出 (倍数−1) × 吸附增量。8 份真实文书上
+/// 累积的结果是平白多出一整页；区分之后页数与参照 8/8 完全一致。
+#[test]
+fn last_line_of_paragraph_uses_unsnapped_extra_leading() {
+    if !require_cjk_font() {
+        return;
+    }
+    let grid = r#"<w:docGrid w:type="lines" w:linePitch="312"/>"#;
+    let para = |text: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:spacing w:after="0" w:line="312" w:lineRule="auto"/></w:pPr>
+<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    };
+
+    let gap_of = |name: &str, body: String| {
+        let p = make_docx_with_sect(name, &body, grid);
+        let pdf = convert(&p).value.pdf;
+        let mut ys: Vec<f32> = text_origins(&pdf).iter().map(|(_, y)| *y).collect();
+        ys.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        ys.dedup();
+        (ys[0] - ys[1]).abs()
+    };
+
+    // 多个单行段落：相邻基线之间跨的是「段落边界」。
+    let between_paragraphs = gap_of(
+        "tail_single.docx",
+        (0..6).map(|_| para("甲方：某某某")).collect(),
+    );
+    // 一个长段落：相邻基线之间跨的是「段内换行」。
+    let within_paragraph = gap_of("tail_multi.docx", para(&"测试文字".repeat(40)));
+
+    assert!(
+        (within_paragraph - 40.56).abs() < 0.8,
+        "段内行距应当是 31.2 × 1.3 = 40.56，实际 {within_paragraph:.2}"
+    );
+    // 31.2 + 0.3 × 17.2 ≈ 36.4（自然行高随字体略有出入，留 1pt 余量）
+    assert!(
+        (between_paragraphs - 36.4).abs() < 1.0,
+        "段落边界应当是 31.2 + 0.3 × 自然行高 ≈ 36.4，实际 {between_paragraphs:.2}"
+    );
+    assert!(
+        within_paragraph > between_paragraphs + 2.0,
+        "段内行距必须明显大于段落边界的推进量，否则说明没有区分末行"
+    );
+}
