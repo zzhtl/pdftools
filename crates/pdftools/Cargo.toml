@@ -46,7 +46,7 @@ extended-description = """\
 支持多图片无损合成 PDF、Word 转 PDF、PDF 压缩与图片批量压缩。"""
 depends = "$auto, libgl1, libegl1, libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6, libxrandr2, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-cursor0, libwayland-egl1"
 assets = [
-    ["../../target/release/pdftools", "usr/bin/", "755"],
+    ["target/release/pdftools", "usr/bin/", "755"],
     ["../../assets/icon-256.png", "usr/share/icons/hicolor/256x256/apps/pdftools.png", "644"],
     ["../../assets/icon-128.png", "usr/share/icons/hicolor/128x128/apps/pdftools.png", "644"],
     ["../../assets/icon-64.png", "usr/share/icons/hicolor/64x64/apps/pdftools.png", "644"],

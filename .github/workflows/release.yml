@@ -81,7 +81,11 @@ jobs:
         run: |
           set -eux
           cargo install cargo-deb --locked --version '^3'
-          cargo deb -p pdftools --no-build --output .
+          # 必须把 --target 一起传给 cargo-deb：上面是用 --target 构建的，
+          # 二进制在 target/<triple>/release/ 而不是 target/release/。
+          # 少了这个参数，cargo-deb 会去 target/release/ 找，然后报
+          # 「Static file asset path did not match any existing files」。
+          cargo deb -p pdftools --target ${{ matrix.target }} --no-build --output .
           ls -la ./*.deb
           # 依赖里必须有那些运行时 dlopen 的库，否则装上也起不来
           deb=$(ls ./*.deb | head -1)
