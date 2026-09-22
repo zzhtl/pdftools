@@ -22,11 +22,12 @@
 | 平台 | 文件 | 怎么用 |
 | --- | --- | --- |
 | Windows (x64) | `pdftools-windows-x86_64.exe` | 下载后直接双击 |
-| macOS (Apple Silicon，M1 及以后) | `pdftools-macos-aarch64.dmg` | 双击挂载，把图标拖进 Applications |
-| macOS (Intel) | `pdftools-macos-x86_64.dmg` | 同上 |
+| macOS (M 系列芯片) | `pdftools-macos-apple-silicon.dmg` | 双击挂载，把图标拖进 Applications |
 | Linux (x64) | `pdftools-linux-x86_64.AppImage` | `chmod +x` 后双击或直接运行 |
 
 每个文件旁边都有 `.sha256` 校验文件。
+
+macOS 只提供 M 系列（Apple Silicon）的包。Intel Mac 没有预编译版本，需要的话从源码构建（见文末）。
 
 ### macOS 首次打开会被拦截
 
@@ -61,6 +62,8 @@
 - 可以**按拍摄时间排序**。
 - 生成的 PDF 里，`创建时间`（`/CreationDate`）记的是**最早一张照片的拍摄时间**，`修改时间`（`/ModDate`）才是导出的时刻。用任何阅读器打开「文档属性」都能看到。「主题」字段里另记了完整的时间跨度。
 - 如果这批图片**全都没有 EXIF 拍摄时间**，程序会明确告诉你「PDF 里记录的是文件修改时间」，不会让你误以为那是拍摄时刻。
+
+  拍摄时间丢失比想象中常见：经微信、部分网盘、以及任何「清除元数据」的操作转发过的照片，`DateTimeOriginal` 通常已被剥掉（有个典型特征是 `OffsetTimeOriginal`、`SubsecTimeOriginal` 这些配套标签还在，唯独日期没了）。如果时间对你重要，请用**手机相册里的原图**导出，不要用聊天软件里收到的那一份。
 - Word 转 PDF 时，`/CreationDate` 沿用 docx 自己的创建时间，而不是导出的那一刻。
 - PDF 压缩会**保留原文件的创建时间**，只更新修改时间。
 
