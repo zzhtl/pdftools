@@ -34,11 +34,17 @@ impl Tier {
 
     pub fn description(self) -> &'static str {
         match self {
-            Tier::Lossless => "不改动任何像素，只做无损的结构优化",
-            Tier::HighQuality => "上限 300 DPI（印刷级），肉眼不可见差异",
-            Tier::Balanced => "上限 200 DPI，屏幕阅读足够清晰",
-            Tier::Extreme => "上限 144 DPI，体积优先",
+            Tier::Lossless => "绝不改动任何像素。JPEG 原样搬入，其余格式无损存储",
+            Tier::HighQuality => "上限 300 DPI（印刷级）。超过上限的图会被重新采样",
+            Tier::Balanced => "上限 200 DPI。超过上限的图会被重新采样",
+            Tier::Extreme => "上限 144 DPI，体积优先。超过上限的图会被重新采样",
         }
+    }
+
+    /// 这一档是否会改动像素。界面上要据此给出醒目提示 ——
+    /// 用户选了「不失真」就该真的不失真，选了别的也该知道自己在换什么。
+    pub fn is_lossy(self) -> bool {
+        !matches!(self, Tier::Lossless)
     }
 
     /// 图片转 PDF / 图片批量压缩用的参数。

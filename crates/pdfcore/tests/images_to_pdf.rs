@@ -61,11 +61,14 @@ fn jpeg_streams_are_byte_identical_to_source() {
     let originals: Vec<Vec<u8>> = [&a, &b].iter().map(|p| std::fs::read(p).unwrap()).collect();
 
     let report = images_to_pdf::run(&[a, b], Tier::Lossless, &NoProgress).unwrap();
-    assert!(
-        report.warnings.is_empty(),
-        "不该有警告：{:?}",
-        report.warnings
-    );
+    // 合成的测试图没有 EXIF，「缺少拍摄时间」的提示是预期内的；
+    // 但不该出现任何处理失败。
+    let failures: Vec<_> = report
+        .warnings
+        .iter()
+        .filter(|w| w.kind != pdfcore::WarningKind::CaptureTimeMissing)
+        .collect();
+    assert!(failures.is_empty(), "不该有失败类警告：{failures:?}");
 
     // 两张都应该走直通
     for (path, fidelity) in &report.value.fidelity {

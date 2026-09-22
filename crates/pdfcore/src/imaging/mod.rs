@@ -58,9 +58,46 @@ pub struct PreparedImage {
     pub width: u32,
     pub height: u32,
     pub fidelity: Fidelity,
-    /// 页面尺寸（点）。已按下文的规则定好。
+    /// 页面尺寸（点）。已按下文的规则定好，且已考虑方向带来的宽高互换。
     pub page_w_pt: f32,
     pub page_h_pt: f32,
+    /// 仍需由 PDF 变换矩阵施加的 EXIF 方向。
+    ///
+    /// 走直通路径时像素没有被旋转过，方向靠内容流里的矩阵来纠正 ——
+    /// 这样连横拍的手机照片也能保持字节级无损。
+    /// 解码过的路径已经把方向作用在像素上了，这里会是 `NoTransforms`。
+    pub orientation: image::metadata::Orientation,
+}
+
+impl PreparedImage {
+    /// 把图片铺满整页的变换矩阵，含 EXIF 方向纠正。
+    ///
+    /// image XObject 永远画在 (0,0)-(1,1) 的单位方块里，且第一行样本在**上边**（y=1）。
+    /// 下面每一条都是按「存储态的四个角应当落到页面的哪四个角」解出来的。
+    pub fn placement_matrix(&self) -> [f32; 6] {
+        use image::metadata::Orientation as O;
+        let (w, h) = (self.page_w_pt, self.page_h_pt);
+        match self.orientation {
+            O::NoTransforms => [w, 0.0, 0.0, h, 0.0, 0.0],
+            O::FlipHorizontal => [-w, 0.0, 0.0, h, w, 0.0],
+            O::Rotate180 => [-w, 0.0, 0.0, -h, w, h],
+            O::FlipVertical => [w, 0.0, 0.0, -h, 0.0, h],
+            // 以下四种含 90/270 旋转，页面宽高已经互换过。
+            O::Rotate90FlipH => [0.0, -h, -w, 0.0, w, h],
+            O::Rotate90 => [0.0, -h, w, 0.0, 0.0, h],
+            O::Rotate270FlipH => [0.0, h, w, 0.0, 0.0, 0.0],
+            O::Rotate270 => [0.0, h, -w, 0.0, w, 0.0],
+        }
+    }
+}
+
+/// 这几种方向会让显示出来的宽高相对存储态互换。
+fn swaps_dimensions(o: image::metadata::Orientation) -> bool {
+    use image::metadata::Orientation as O;
+    matches!(
+        o,
+        O::Rotate90 | O::Rotate270 | O::Rotate90FlipH | O::Rotate270FlipH
+    )
 }
 
 /// A4 长边，单位点。没有可信 DPI 元数据时，长边归一到这个值。
@@ -104,6 +141,28 @@ pub fn page_size_pt(width: u32, height: u32, dpi: Option<Dpi>) -> (f32, f32) {
     (pw.max(1.0), ph.max(1.0))
 }
 
+/// 读取一张图片的时间：优先 EXIF 拍摄时间，退到文件修改时间。
+///
+/// 两者的可信度差很多，所以要把来源一并返回 —— 文件时间复制一下就变了，
+/// 在取证场景里必须让用户看得见这个区别。
+pub fn read_time(path: &Path) -> Option<crate::timestamp::DatedFile> {
+    use crate::timestamp::{DatedFile, TimeSource, Timestamp};
+
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Some(when) = read_exif(&bytes).as_deref().and_then(probe::capture_time) {
+            return Some(DatedFile {
+                when,
+                source: TimeSource::Captured,
+            });
+        }
+    }
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(DatedFile {
+        when: Timestamp::from_system_time(modified),
+        source: TimeSource::FileModified,
+    })
+}
+
 /// 为放进 PDF 准备一张图。
 pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedImage> {
     if probe::is_heif(path) {
@@ -120,24 +179,41 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
     let exif_raw = read_exif(&bytes);
     let dpi = probe::dpi(&bytes, exif_raw.as_deref());
     let orientation = read_orientation(exif_raw.as_deref());
-    let upright = orientation == image::metadata::Orientation::NoTransforms;
 
     // 这张图是否有资格走「原始字节直通」。
     //
-    // 不直立就不行：旋转必须重新编码（真正无损的 DCT 系数旋转要靠 mozjpeg，
-    // 而它需要每个 CI runner 都装 C 编译器和 nasm，为此把三平台 CI 搞脆不划算）。
-    // CMYK（4 分量）也不行：PDF 里要写 /DeviceCMYK 并处理 Adobe APP14 的反相约定，
+    // 方向不再是障碍：旋转由 PDF 的变换矩阵施加，像素一个字节都不用动。
+    // 这一点很关键 —— 手机横拍的照片几乎都带方向标记，
+    // 如果为了摆正而重新编码，「绝不失真」这个承诺对它们就失效了。
+    //
+    // CMYK（4 分量）仍然不行：PDF 里要写 /DeviceCMYK 并处理 Adobe APP14 的反相约定，
     // 判错了输出是偏色而不是报错，不赌。
-    let passthrough: Option<(u32, u32, bool)> =
-        (container == probe::Container::Jpeg && quality.allow_passthrough && upright)
-            .then(|| probe::jpeg_info(&bytes))
-            .flatten()
-            .filter(|i| i.components == 1 || i.components == 3)
-            .map(|i| (i.width, i.height, i.components == 1));
+    let passthrough: Option<(u32, u32, bool)> = (container == probe::Container::Jpeg
+        && quality.allow_passthrough)
+        .then(|| probe::jpeg_info(&bytes))
+        .flatten()
+        .filter(|i| i.components == 1 || i.components == 3)
+        .map(|i| (i.width, i.height, i.components == 1));
+
+    // 页面按**显示后**的宽高算：旋转 90/270 时宽高互换。
+    let page_of = |w: u32, h: u32| {
+        if swaps_dimensions(orientation) {
+            let (a, b) = page_size_pt(h, w, dpi.map(|d| Dpi { x: d.y, y: d.x }));
+            (a, b)
+        } else {
+            page_size_pt(w, h, dpi)
+        }
+    };
 
     if let Some((w, h, gray)) = passthrough {
-        let (page_w, page_h) = page_size_pt(w, h, dpi);
-        if !quality.needs_downscale(w, h, page_w, page_h) {
+        let (page_w, page_h) = page_of(w, h);
+        // 有效分辨率按显示尺寸算，所以这里传显示后的宽高。
+        let (disp_w, disp_h) = if swaps_dimensions(orientation) {
+            (h, w)
+        } else {
+            (w, h)
+        };
+        if !quality.needs_downscale(disp_w, disp_h, page_w, page_h) {
             return Ok(PreparedImage {
                 color: ColorData::Jpeg { bytes, gray },
                 alpha: None,
@@ -146,6 +222,7 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
                 fidelity: Fidelity::Passthrough,
                 page_w_pt: page_w,
                 page_h_pt: page_h,
+                orientation,
             });
         }
     }
@@ -153,8 +230,7 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
     // 走到这里就必须真的解码了。
     let mut img = image::load_from_memory(&bytes)
         .map_err(|e| CoreError::Image(format!("解码 {} 失败：{e}", path.display())))?;
-    // image 自带 EXIF 方向支持，不需要我们手写 8 种变换。
-    // 漏了这步，手机横拍的照片会躺着进 PDF。
+    // 这条路径上方向直接作用在像素上，后面不再需要变换矩阵。
     img.apply_orientation(orientation);
 
     let (mut w, mut h) = (img.width(), img.height());
@@ -175,7 +251,7 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
         (raw_color(&img, quality.grayscale), Fidelity::Lossless)
     } else {
         // 到底该用 JPEG 还是无损存储？不靠「看起来像不像照片」这类猜测 ——
-        // 我试过用颜色数做判据，真实的白墙照片只有 0.8% 的不同色占比，
+        // 试过用颜色数做判据，真实的白墙照片只有 0.8% 的不同色占比，
         // 会被一律误判成图形，然后以原始像素塞进 PDF，体积暴涨十几倍。
         //
         // 改成直接测量：两种编码各估一次体积，按实测结果决定。
@@ -190,7 +266,7 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
         // 还白白损失一代画质。原图直通在两个维度上都更优。
         if let Some((pw, ph, pgray)) = passthrough {
             if jpeg.len() >= bytes.len() {
-                let (page_w, page_h) = page_size_pt(pw, ph, dpi);
+                let (page_w, page_h) = page_of(pw, ph);
                 return Ok(PreparedImage {
                     color: ColorData::Jpeg { bytes, gray: pgray },
                     alpha: None,
@@ -199,6 +275,7 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
                     fidelity: Fidelity::Passthrough,
                     page_w_pt: page_w,
                     page_h_pt: page_h,
+                    orientation,
                 });
             }
         }
@@ -242,6 +319,8 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
         fidelity,
         page_w_pt: page_w,
         page_h_pt: page_h,
+        // 方向已经作用在像素上了。
+        orientation: image::metadata::Orientation::NoTransforms,
     })
 }
 

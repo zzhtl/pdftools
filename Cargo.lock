@@ -2337,6 +2337,7 @@ name = "pdfcore"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "fast_image_resize",
  "flate2",
  "fontdb",

@@ -58,12 +58,26 @@ impl PageSpec {
     }
 }
 
+/// PDF 的文档信息字典。
+///
+/// 对取证类文档，`creation` 记的是**内容形成的时间**（最早一张照片的拍摄时间、
+/// 或 Word 文档的创建时间），而不是「按下导出按钮的那一刻」——
+/// 别人拿到 PDF 打开属性看到的应当是前者。后者记在 `modified` 里。
+#[derive(Debug, Clone, Default)]
+pub struct DocInfo {
+    pub title: Option<String>,
+    pub subject: Option<String>,
+    pub creation: Option<crate::timestamp::Timestamp>,
+    pub modified: Option<crate::timestamp::Timestamp>,
+}
+
 pub struct DocBuilder {
     pdf: Pdf,
     alloc: RefAlloc,
     catalog: Ref,
     page_tree: Ref,
     pages: Vec<(Ref, PageSpec)>,
+    info: DocInfo,
 }
 
 impl DocBuilder {
@@ -77,7 +91,12 @@ impl DocBuilder {
             catalog,
             page_tree,
             pages: Vec::new(),
+            info: DocInfo::default(),
         }
+    }
+
+    pub fn set_info(&mut self, info: DocInfo) {
+        self.info = info;
     }
 
     /// 直接访问底层写入器，用于写 XObject、字体这类独立对象。
@@ -108,6 +127,28 @@ impl DocBuilder {
 
     pub fn finish(mut self) -> Result<Vec<u8>> {
         let page_ids: Vec<Ref> = self.pages.iter().map(|(id, _)| *id).collect();
+
+        {
+            let info = std::mem::take(&mut self.info);
+            let info_id = self.alloc.next_ref();
+            // document_info 会自动把这个对象登记进 trailer 的 /Info。
+            let mut d = self.pdf.document_info(info_id);
+            d.producer(pdf_writer::TextStr(PRODUCER));
+            d.creator(pdf_writer::TextStr(PRODUCER));
+            if let Some(t) = &info.title {
+                d.title(pdf_writer::TextStr(t));
+            }
+            if let Some(t) = &info.subject {
+                d.subject(pdf_writer::TextStr(t));
+            }
+            if let Some(t) = info.creation {
+                d.creation_date(t.to_pdf_date());
+            }
+            if let Some(t) = info.modified {
+                d.modified_date(t.to_pdf_date());
+            }
+            d.finish();
+        }
 
         self.pdf.catalog(self.catalog).pages(self.page_tree);
         self.pdf
@@ -163,6 +204,9 @@ impl Default for DocBuilder {
         Self::new()
     }
 }
+
+/// 写进 PDF 的 /Producer 与 /Creator。
+const PRODUCER: &str = "pdftools";
 
 /// zlib 压缩。PDF 的 FlateDecode 就是 zlib 流。
 pub fn deflate(data: &[u8]) -> Vec<u8> {

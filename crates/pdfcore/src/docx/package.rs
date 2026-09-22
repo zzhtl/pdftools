@@ -13,6 +13,8 @@ const MAX_PART_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 
 pub struct Package {
+    /// `docProps/core.xml` 里的 `dcterms:created`，文档的创建时间。
+    pub created: Option<crate::timestamp::Timestamp>,
     pub document: String,
     pub styles: Option<String>,
     pub numbering: Option<String>,
@@ -50,6 +52,7 @@ pub fn open(path: &Path) -> Result<Package> {
     let mut styles = None;
     let mut numbering = None;
     let mut rels_xml = None;
+    let mut core_xml = None;
     let mut media = HashMap::new();
 
     for i in 0..zip.len() {
@@ -75,6 +78,7 @@ pub fn open(path: &Path) -> Result<Package> {
                 | "word/styles.xml"
                 | "word/numbering.xml"
                 | "word/_rels/document.xml.rels"
+                | "docProps/core.xml"
         );
         let want_media = name.starts_with("word/media/");
         if !want_text && !want_media {
@@ -96,6 +100,7 @@ pub fn open(path: &Path) -> Result<Package> {
             "word/document.xml" => document = Some(text),
             "word/styles.xml" => styles = Some(text),
             "word/numbering.xml" => numbering = Some(text),
+            "docProps/core.xml" => core_xml = Some(text),
             _ => rels_xml = Some(text),
         }
     }
@@ -105,12 +110,51 @@ pub fn open(path: &Path) -> Result<Package> {
     })?;
 
     Ok(Package {
+        created: core_xml.as_deref().and_then(parse_created),
         document,
         styles,
         numbering,
         rels: rels_xml.as_deref().map(parse_rels).unwrap_or_default(),
         media,
     })
+}
+
+/// 从 `docProps/core.xml` 取 `dcterms:created`，格式是 ISO 8601（`2024-01-15T08:30:00Z`）。
+fn parse_created(xml: &str) -> Option<crate::timestamp::Timestamp> {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut in_created = false;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) if e.local_name().as_ref() == "created" => in_created = true,
+            Ok(Event::Text(t)) if in_created => return parse_iso8601(&t),
+            Ok(Event::End(e)) if e.local_name().as_ref() == "created" => in_created = false,
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_iso8601(s: &str) -> Option<crate::timestamp::Timestamp> {
+    let s = s.trim();
+    // 只认最常见的 `YYYY-MM-DDTHH:MM:SS` 前缀，尾部的 Z 或时区偏移单独看。
+    let bytes = s.as_bytes();
+    if bytes.len() < 19 {
+        return None;
+    }
+    let num = |a: usize, b: usize| s.get(a..b)?.parse::<u32>().ok();
+    let ts = crate::timestamp::Timestamp {
+        year: num(0, 4)? as u16,
+        month: num(5, 7)? as u8,
+        day: num(8, 10)? as u8,
+        hour: num(11, 13)? as u8,
+        minute: num(14, 16)? as u8,
+        second: num(17, 19)? as u8,
+        // Word 写的是 UTC（尾部 Z）。非 Z 的偏移形式少见，保守地留空而不是猜。
+        utc_offset_minutes: s.ends_with('Z').then_some(0),
+    };
+    Some(ts)
 }
 
 fn parse_rels(xml: &str) -> HashMap<String, String> {

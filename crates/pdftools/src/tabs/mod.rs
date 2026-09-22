@@ -43,14 +43,6 @@ impl FileList {
             ))
         });
     }
-
-    pub fn sort_by_mtime(&mut self) {
-        self.items.sort_by_key(|p| {
-            std::fs::metadata(p)
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-        });
-    }
 }
 
 /// 把字符串切成「非数字片段 / 数字」交替的序列，数字按数值比较。

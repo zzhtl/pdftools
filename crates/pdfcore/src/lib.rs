@@ -10,6 +10,8 @@ pub mod imaging;
 pub mod ops;
 pub mod pdf;
 pub mod progress;
+pub mod timestamp;
 
 pub use error::{CoreError, Report, Result, Warning, WarningKind};
 pub use progress::{Cancel, NoProgress, Progress, ProgressSink};
+pub use timestamp::{DatedFile, TimeSource, Timestamp};

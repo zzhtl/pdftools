@@ -116,6 +116,10 @@ pub fn run(
         }
     }
 
+    // 内容被改写过，/ModDate 要如实更新；但 /CreationDate 必须原样保留 ——
+    // 那记的是文档形成的时间，压缩不该改变它。
+    touch_mod_date(&mut doc);
+
     // 结构层优化。这部分在任何档位下都做，也是「无损」档唯一的收益来源。
     // compress() 只作用于没有 /Filter 的流，所以不会把已有的 JPEG 二次 flate。
     doc.compress();
@@ -164,6 +168,18 @@ pub fn run(
     }
 
     Ok(Report::with(outcome, warnings))
+}
+
+/// 更新 `/Info` 里的 `/ModDate`。没有 Info 字典就什么都不做 ——
+/// 为此新建一个反而是在给文件添加原本没有的元数据。
+fn touch_mod_date(doc: &mut Document) {
+    let Ok(info_ref) = doc.trailer.get(b"Info").and_then(Object::as_reference) else {
+        return;
+    };
+    let stamp = crate::timestamp::Timestamp::now().to_pdf_string();
+    if let Ok(Object::Dictionary(d)) = doc.get_object_mut(info_ref) {
+        d.set("ModDate", Object::string_literal(stamp));
+    }
 }
 
 fn has_signature(doc: &Document) -> bool {

@@ -11,7 +11,12 @@ use crate::pdf::writer::font::{embed_font, EmbeddedFont};
 use crate::pdf::writer::text::{show_text, TextItem};
 use crate::pdf::writer::{DocBuilder, PageSpec};
 
-pub fn paint(laid: &LaidOut, page: &PageGeom, book: &FontBook) -> Result<Vec<u8>> {
+pub fn paint(
+    laid: &LaidOut,
+    page: &PageGeom,
+    book: &FontBook,
+    info: crate::pdf::writer::DocInfo,
+) -> Result<Vec<u8>> {
     // 第一趟：把每个字体实际用到的字形收齐。子集化必须一次性知道全部用量，
     // 所以字体只能等内容全部排完才能写。
     let mut used: BTreeMap<usize, BTreeMap<u16, String>> = BTreeMap::new();
@@ -44,6 +49,7 @@ pub fn paint(laid: &LaidOut, page: &PageGeom, book: &FontBook) -> Result<Vec<u8>
     }
 
     let mut doc = DocBuilder::new();
+    doc.set_info(info);
     let mut embedded: BTreeMap<usize, EmbeddedFont> = BTreeMap::new();
     for (font_id, glyphs) in &used {
         let face = book.face(*font_id);

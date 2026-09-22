@@ -19,8 +19,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ubuntu-22.04 而不是 latest：用较老的 glibc 构建，
-          # 产物才能在更旧的发行版上跑起来；反过来则不行。
+          # ubuntu-22.04 而不是 latest：用较老的 glibc 构建，产物才能在更旧的
+          # 发行版上跑起来；反过来则不行。
           - name: linux-x86_64
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
@@ -56,21 +56,68 @@ jobs:
       - name: 构建
         run: cargo build --release --locked --target ${{ matrix.target }} -p pdftools
 
-      - name: 打包（Linux）
+      # ---------------------------------------------------------------- Linux
+      # 产物是单个 AppImage：下载、chmod +x、双击即可，不用解压也不用安装。
+      - name: 打包 AppImage
         if: runner.os == 'Linux'
         run: |
-          mkdir -p dist/pdftools
-          cp target/${{ matrix.target }}/release/pdftools dist/pdftools/
-          cp README.md LICENSE dist/pdftools/ 2>/dev/null || cp README.md dist/pdftools/
-          tar -C dist -czf pdftools-${{ matrix.name }}.tar.gz pdftools
+          set -eux
+          APPDIR=AppDir
+          mkdir -p "$APPDIR/usr/bin" \
+                   "$APPDIR/usr/share/applications" \
+                   "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+          cp target/${{ matrix.target }}/release/pdftools "$APPDIR/usr/bin/"
+          cp assets/icon-256.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/pdftools.png"
+          cp assets/icon-256.png "$APPDIR/pdftools.png"
 
-      - name: 打包（macOS，手写 .app）
+          cat > "$APPDIR/pdftools.desktop" <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=pdftools
+          Comment=图片转 PDF、Word 转 PDF、PDF 与图片压缩
+          Exec=pdftools
+          Icon=pdftools
+          Categories=Office;Utility;
+          Terminal=false
+          DESKTOP
+          cp "$APPDIR/pdftools.desktop" "$APPDIR/usr/share/applications/"
+
+          cat > "$APPDIR/AppRun" <<'APPRUN'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/pdftools" "$@"
+          APPRUN
+          chmod +x "$APPDIR/AppRun"
+
+          curl -sSfL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          # runner 上没有 FUSE，用 extract-and-run 绕开
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run \
+            "$APPDIR" "pdftools-${{ matrix.name }}.AppImage"
+
+      # ---------------------------------------------------------------- macOS
+      # 产物是 .dmg：双击挂载，把 pdftools 拖进 Applications 即完成安装。
+      - name: 打包 dmg
         if: runner.os == 'macOS'
         run: |
+          set -eux
           APP="dist/pdftools.app"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp target/${{ matrix.target }}/release/pdftools "$APP/Contents/MacOS/"
-          cat > "$APP/Contents/Info.plist" <<'PLIST'
+
+          # iconutil 只认这一组固定文件名，多一个 icon_64x64.png 之类的都会让它报错。
+          mkdir icon.iconset
+          for s in 16 32 128 256 512; do
+            sips -z $s $s assets/icon.png --out "icon.iconset/icon_${s}x${s}.png" >/dev/null
+          done
+          for s in 16 32 128 256; do
+            d=$((s * 2))
+            sips -z $d $d assets/icon.png --out "icon.iconset/icon_${s}x${s}@2x.png" >/dev/null
+          done
+          iconutil -c icns icon.iconset -o "$APP/Contents/Resources/pdftools.icns"
+
+          cat > "$APP/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
@@ -78,36 +125,50 @@ jobs:
             <key>CFBundleDisplayName</key><string>pdftools</string>
             <key>CFBundleIdentifier</key><string>io.github.zzhtl.pdftools</string>
             <key>CFBundleExecutable</key><string>pdftools</string>
+            <key>CFBundleIconFile</key><string>pdftools</string>
             <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>${{ github.ref_name }}</string>
+            <key>CFBundleShortVersionString</key><string>${GITHUB_REF_NAME#v}</string>
+            <key>CFBundleVersion</key><string>${GITHUB_REF_NAME#v}</string>
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
           PLIST
-          cp README.md dist/
-          tar -C dist -czf pdftools-${{ matrix.name }}.tar.gz pdftools.app README.md
 
-      - name: 打包（Windows）
+          # 放一个 Applications 的快捷方式，挂载后直接拖过去就装好了
+          ln -s /Applications dist/Applications
+          cp README.md dist/
+          hdiutil create -volname "pdftools" -srcfolder dist -ov -format UDZO \
+            "pdftools-${{ matrix.name }}.dmg"
+
+      # -------------------------------------------------------------- Windows
+      # 产物就是 exe 本身：下载即可双击运行，不用解压。
+      - name: 准备 exe
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist/pdftools | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/pdftools.exe dist/pdftools/
-          Copy-Item README.md dist/pdftools/
-          Compress-Archive -Path dist/pdftools/* -DestinationPath pdftools-${{ matrix.name }}.zip
+          Copy-Item target/${{ matrix.target }}/release/pdftools.exe `
+                    -Destination "pdftools-${{ matrix.name }}.exe"
 
       - name: 校验和
         shell: bash
         run: |
-          for f in pdftools-${{ matrix.name }}.*; do
+          set -eu
+          # 每个平台只会产出三者之一，所以要跳过不存在的，
+          # 否则 sha256sum 会因为文件缺失让整步失败。
+          for f in pdftools-${{ matrix.name }}.AppImage \
+                   pdftools-${{ matrix.name }}.dmg \
+                   pdftools-${{ matrix.name }}.exe; do
+            [ -f "$f" ] || continue
             if command -v sha256sum >/dev/null; then sha256sum "$f" > "$f.sha256";
             else shasum -a 256 "$f" > "$f.sha256"; fi
+            echo "已生成 $f.sha256"
           done
 
       - uses: softprops/action-gh-release@v3
         with:
           files: |
-            pdftools-${{ matrix.name }}.tar.gz
-            pdftools-${{ matrix.name }}.zip
+            pdftools-${{ matrix.name }}.AppImage
+            pdftools-${{ matrix.name }}.dmg
+            pdftools-${{ matrix.name }}.exe
             pdftools-${{ matrix.name }}.*.sha256
           fail_on_unmatched_files: false
           generate_release_notes: true

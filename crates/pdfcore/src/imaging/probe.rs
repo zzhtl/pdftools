@@ -217,3 +217,38 @@ pub fn is_heif(path: &Path) -> bool {
         Some("heic" | "heif" | "hif")
     )
 }
+
+/// 从 EXIF 里读拍摄时间。
+///
+/// 优先级 `DateTimeOriginal`（按下快门的时刻）→ `DateTimeDigitized`（数字化时刻）
+/// → `DateTime`（文件最后修改，最不可信）。时区取 `OffsetTimeOriginal`，没有就留空 ——
+/// 硬套一个本地时区是在编造信息。
+pub fn capture_time(exif_raw: &[u8]) -> Option<crate::timestamp::Timestamp> {
+    let exif = exif::Reader::new().read_raw(exif_raw.to_vec()).ok()?;
+
+    let read = |tag| {
+        exif.get_field(tag, exif::In::PRIMARY)
+            .and_then(|f| match &f.value {
+                exif::Value::Ascii(v) => v.first().and_then(|b| exif::DateTime::from_ascii(b).ok()),
+                _ => None,
+            })
+    };
+
+    let mut dt = read(exif::Tag::DateTimeOriginal)
+        .or_else(|| read(exif::Tag::DateTimeDigitized))
+        .or_else(|| read(exif::Tag::DateTime))?;
+
+    // 时区是独立的一个 tag，DateTime::from_ascii 拿不到。
+    if let Some(offset) = exif
+        .get_field(exif::Tag::OffsetTimeOriginal, exif::In::PRIMARY)
+        .or_else(|| exif.get_field(exif::Tag::OffsetTime, exif::In::PRIMARY))
+        .and_then(|f| match &f.value {
+            exif::Value::Ascii(v) => v.first().cloned(),
+            _ => None,
+        })
+    {
+        let _ = dt.parse_offset(&offset);
+    }
+
+    Some(crate::timestamp::Timestamp::from_exif(&dt))
+}

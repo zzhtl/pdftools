@@ -63,6 +63,9 @@ pub enum WarningKind {
     ImageRecompressed,
     /// 图片原样保留（重编码后反而更大）
     ImageKeptOriginal,
+    /// 拿不到 EXIF 拍摄时间，退而使用文件修改时间。
+    /// 在取证场景里这个区别很要紧，所以单独成类而不是混进「失败」里。
+    CaptureTimeMissing,
     /// 单个条目失败，但整体继续
     ItemFailed,
 }
