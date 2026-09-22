@@ -10,6 +10,14 @@ mod thumbs;
 fn main() -> eframe::Result {
     env_logger::init();
 
+    // 命令行上给的文件直接进列表。这让「用 pdftools 打开」「把文件拖到图标上」
+    // 这类系统级用法能正常工作。
+    let initial: Vec<std::path::PathBuf> = std::env::args_os()
+        .skip(1)
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.exists())
+        .collect();
+
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([960.0, 680.0])
         .with_min_inner_size([680.0, 480.0])
@@ -31,7 +39,9 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             let font = fonts_ui::install(&cc.egui_ctx);
-            Ok(Box::new(app::App::new(cc, font)))
+            let mut app = app::App::new(cc, font);
+            app.open_paths(initial);
+            Ok(Box::new(app))
         }),
     )
 }

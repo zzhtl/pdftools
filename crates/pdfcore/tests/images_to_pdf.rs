@@ -60,7 +60,8 @@ fn jpeg_streams_are_byte_identical_to_source() {
     let b = write_jpeg(&dir, "b.jpg", 600, 800);
     let originals: Vec<Vec<u8>> = [&a, &b].iter().map(|p| std::fs::read(p).unwrap()).collect();
 
-    let report = images_to_pdf::run(&[a, b], Tier::Lossless, &NoProgress).unwrap();
+    let report =
+        images_to_pdf::run(&[a, b], Tier::Lossless, &Default::default(), &NoProgress).unwrap();
     // 合成的测试图没有 EXIF，「缺少拍摄时间」的提示是预期内的；
     // 但不该出现任何处理失败。
     let failures: Vec<_> = report
@@ -113,7 +114,8 @@ fn jpeg_streams_are_byte_identical_to_source() {
 fn page_aspect_follows_the_image() {
     let dir = tmp();
     let wide = write_jpeg(&dir, "wide.jpg", 1600, 900);
-    let report = images_to_pdf::run(&[wide], Tier::Lossless, &NoProgress).unwrap();
+    let report =
+        images_to_pdf::run(&[wide], Tier::Lossless, &Default::default(), &NoProgress).unwrap();
 
     let doc = lopdf::Document::load_mem(&report.value.pdf).unwrap();
     let page_id = *doc.get_pages().values().next().unwrap();
@@ -147,7 +149,8 @@ fn oversized_images_are_capped_at_the_dpi_limit() {
     // 「重编码后不比原图小就退回直通」的护栏会（正确地）接管，
     // 那验证的就是另一条规则了。
     let big = write_jpeg_q(&dir, "big.jpg", 4000, 3000, 98);
-    let report = images_to_pdf::run(&[big], Tier::HighQuality, &NoProgress).unwrap();
+    let report =
+        images_to_pdf::run(&[big], Tier::HighQuality, &Default::default(), &NoProgress).unwrap();
 
     assert_eq!(
         report.value.fidelity[0].1,
@@ -207,7 +210,8 @@ fn single_image_filter(img: image::RgbImage, name: &str) -> (String, usize) {
         .save_with_format(&path, image::ImageFormat::Png)
         .unwrap();
 
-    let report = images_to_pdf::run(&[path], Tier::HighQuality, &NoProgress).unwrap();
+    let report =
+        images_to_pdf::run(&[path], Tier::HighQuality, &Default::default(), &NoProgress).unwrap();
     let doc = lopdf::Document::load_mem(&report.value.pdf).unwrap();
     let stream = doc
         .objects

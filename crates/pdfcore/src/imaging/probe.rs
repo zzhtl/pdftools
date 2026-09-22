@@ -252,3 +252,95 @@ pub fn capture_time(exif_raw: &[u8]) -> Option<crate::timestamp::Timestamp> {
 
     Some(crate::timestamp::Timestamp::from_exif(&dt))
 }
+
+/// 从 XMP 里读拍摄时间。
+///
+/// EXIF 被剥掉之后，XMP 里常常还留着日期 —— 很多「清除元数据」的工具只处理 EXIF。
+/// 按可信度依次尝试三个字段，它们的值都是 ISO 8601。
+pub fn xmp_capture_time(xmp: &str) -> Option<crate::timestamp::Timestamp> {
+    for key in [
+        "exif:DateTimeOriginal",
+        "photoshop:DateCreated",
+        "xmp:CreateDate",
+    ] {
+        // 既可能写成属性 `key="值"`，也可能写成元素 `<key>值</key>`。
+        for (open, close) in [(format!("{key}=\""), "\""), (format!("<{key}>"), "<")] {
+            if let Some(i) = xmp.find(&open) {
+                let rest = &xmp[i + open.len()..];
+                if let Some(j) = rest.find(close) {
+                    if let Some(t) = crate::timestamp::Timestamp::parse_iso8601(&rest[..j]) {
+                        return Some(t);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 从 IPTC-IIM 里读拍摄时间。
+///
+/// 结构：Photoshop 的 8BIM 资源块 `0x0404` 里装着 IPTC 数据集，
+/// 每条是 `0x1C <record> <dataset> <len:u16> <data>`。
+/// 我们要的是 record 2 的 55（DateCreated，`CCYYMMDD`）和 60（TimeCreated，`HHMMSS±HHMM`）。
+pub fn iptc_capture_time(iptc: &[u8]) -> Option<crate::timestamp::Timestamp> {
+    let mut date: Option<&[u8]> = None;
+    let mut time: Option<&[u8]> = None;
+
+    let mut i = 0usize;
+    while i + 5 <= iptc.len() {
+        if iptc[i] != 0x1C {
+            i += 1;
+            continue;
+        }
+        let record = iptc[i + 1];
+        let dataset = iptc[i + 2];
+        let len = u16::from_be_bytes([iptc[i + 3], iptc[i + 4]]) as usize;
+        let start = i + 5;
+        // 长度最高位置 1 表示扩展长度字段，这种极少见，遇到就放弃。
+        if len & 0x8000 != 0 || start + len > iptc.len() {
+            break;
+        }
+        if record == 2 {
+            match dataset {
+                55 => date = Some(&iptc[start..start + len]),
+                60 => time = Some(&iptc[start..start + len]),
+                _ => {}
+            }
+        }
+        i = start + len;
+    }
+
+    let d = std::str::from_utf8(date?).ok()?;
+    if d.len() < 8 {
+        return None;
+    }
+    let num = |s: &str| s.parse::<u32>().ok();
+    let (y, mo, da) = (num(&d[0..4])?, num(&d[4..6])?, num(&d[6..8])?);
+
+    // 时间可以缺失，缺了就当 00:00:00。
+    let (h, mi, se, off) = match time.and_then(|t| std::str::from_utf8(t).ok()) {
+        Some(t) if t.len() >= 6 => {
+            let off = if t.len() >= 11 {
+                let sign = if t.as_bytes()[6] == b'-' { -1i16 } else { 1 };
+                num(&t[7..9])
+                    .zip(num(&t[9..11]))
+                    .map(|(hh, mm)| sign * (hh as i16 * 60 + mm as i16))
+            } else {
+                None
+            };
+            (num(&t[0..2])?, num(&t[2..4])?, num(&t[4..6])?, off)
+        }
+        _ => (0, 0, 0, None),
+    };
+
+    Some(crate::timestamp::Timestamp {
+        year: y as u16,
+        month: mo as u8,
+        day: da as u8,
+        hour: h as u8,
+        minute: mi as u8,
+        second: se as u8,
+        utc_offset_minutes: off,
+    })
+}

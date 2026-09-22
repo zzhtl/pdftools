@@ -50,7 +50,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         out => {
             let images: Vec<PathBuf> = args[1..].iter().map(PathBuf::from).collect();
-            let report = pdfcore::ops::images_to_pdf::run(&images, Tier::Lossless, &NoProgress)?;
+            let report = pdfcore::ops::images_to_pdf::run(
+                &images,
+                Tier::Lossless,
+                &Default::default(),
+                &NoProgress,
+            )?;
             std::fs::write(out, &report.value.pdf)?;
             println!(
                 "{} 张图 → {out}：{} KB，耗时 {:?}",

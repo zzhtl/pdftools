@@ -40,6 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let r = pdfcore::ops::images_to_pdf::run(
             &[p],
             pdfcore::imaging::Tier::Lossless,
+            &Default::default(),
             &pdfcore::NoProgress,
         )?;
         std::fs::write(out.join(format!("pdf{o}.pdf")), &r.value.pdf)?;

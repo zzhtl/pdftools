@@ -34,7 +34,7 @@ fn scanned_pdf() -> Vec<u8> {
     image::DynamicImage::ImageRgb8(img)
         .save_with_format(&path, image::ImageFormat::Jpeg)
         .unwrap();
-    images_to_pdf::run(&[path], Tier::Lossless, &NoProgress)
+    images_to_pdf::run(&[path], Tier::Lossless, &Default::default(), &NoProgress)
         .unwrap()
         .value
         .pdf

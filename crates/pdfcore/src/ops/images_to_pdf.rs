@@ -1,5 +1,6 @@
 //! 多张图片合成一个 PDF。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::bail_if_cancelled;
@@ -13,10 +14,14 @@ pub struct Outcome {
     pub pdf: Vec<u8>,
     /// 每张图实际达到的保真度，顺序与输入一致。界面上按行显示徽章。
     pub fidelity: Vec<(PathBuf, Fidelity)>,
-    /// 写进 PDF 的创建时间（最早一张照片的拍摄时间）。
+    /// 写进 PDF 的创建时间。
     pub creation: Option<Timestamp>,
-    /// 参与合成的图片里，时间的最早与最晚值。
-    pub time_span: Option<(Timestamp, Timestamp)>,
+    /// `creation` 是否来自真实的拍摄时间。为 false 时它只是导出时刻。
+    pub creation_is_capture_time: bool,
+    /// 有真实拍摄时间的那些图片里，最早与最晚的拍摄时刻。
+    pub capture_span: Option<(Timestamp, Timestamp)>,
+    /// 没有任何拍摄时间信息的图片数量。
+    pub without_capture_time: usize,
 }
 
 impl std::fmt::Debug for Outcome {
@@ -30,7 +35,16 @@ impl std::fmt::Debug for Outcome {
 }
 
 /// 按给定顺序把图片合成 PDF。页面尺寸逐张跟随图片。
-pub fn run(paths: &[PathBuf], tier: Tier, sink: &dyn ProgressSink) -> Result<Report<Outcome>> {
+/// 按给定顺序把图片合成 PDF。
+///
+/// `manual_times` 是用户手动指定的拍摄时间。文件里的拍摄时间被剥掉时，
+/// 这是唯一能让 PDF 带上正确时间的途径。
+pub fn run(
+    paths: &[PathBuf],
+    tier: Tier,
+    manual_times: &HashMap<PathBuf, Timestamp>,
+    sink: &dyn ProgressSink,
+) -> Result<Report<Outcome>> {
     if paths.is_empty() {
         return Err(CoreError::Image("没有选择任何图片".into()));
     }
@@ -41,7 +55,6 @@ pub fn run(paths: &[PathBuf], tier: Tier, sink: &dyn ProgressSink) -> Result<Rep
     let mut fidelity = Vec::new();
     // 时间对取证场景很关键：拍摄时间要一路带进 PDF 的文档属性。
     let mut times: Vec<DatedFile> = Vec::new();
-    let mut only_file_times = true;
 
     sink.emit(Progress::Started { total: paths.len() });
 
@@ -67,10 +80,15 @@ pub fn run(paths: &[PathBuf], tier: Tier, sink: &dyn ProgressSink) -> Result<Rep
         };
 
         fidelity.push((path.clone(), prepared.fidelity));
-        if let Some(t) = read_time(path) {
-            if t.source == TimeSource::Captured {
-                only_file_times = false;
-            }
+        // 手动指定优先于文件里读到的。
+        let dated = match manual_times.get(path) {
+            Some(when) => Some(DatedFile {
+                when: *when,
+                source: TimeSource::Manual,
+            }),
+            None => read_time(path),
+        };
+        if let Some(t) = dated {
             times.push(t);
         }
 
@@ -99,44 +117,55 @@ pub fn run(paths: &[PathBuf], tier: Tier, sink: &dyn ProgressSink) -> Result<Rep
         return Err(CoreError::Image("所有图片都处理失败了".into()));
     }
 
-    times.sort_by_key(|t| t.when);
-    let time_span = times
-        .first()
-        .zip(times.last())
-        .map(|(a, b)| (a.when, b.when));
-    let creation = time_span.map(|(first, _)| first);
+    // 只有真正的拍摄时间才有资格填 /CreationDate。文件系统时间一复制就被刷新，
+    // 拿它冒充拍摄时刻等于往证据材料里塞一个伪造的日期。
+    let mut captures: Vec<Timestamp> = times
+        .iter()
+        .filter(|t| t.source.is_capture_time())
+        .map(|t| t.when)
+        .collect();
+    captures.sort();
+    let capture_span = captures.first().zip(captures.last()).map(|(a, b)| (*a, *b));
+    let without_capture_time = times.len().saturating_sub(captures.len());
 
-    if !times.is_empty() && only_file_times {
-        // 说明所有图片都没有 EXIF 拍摄时间。用户以为记下的是拍摄时刻，
-        // 实际只是文件修改时间，这个差别在取证时是要命的，必须说出来。
+    let creation_is_capture_time = capture_span.is_some();
+    let creation = match capture_span {
+        Some((first, _)) => first,
+        // 一个拍摄时间都没有：按 PDF 规范的本义，/CreationDate 就记这份文件的生成时刻。
+        None => Timestamp::now(),
+    };
+
+    if without_capture_time > 0 {
         warnings.push(Warning::new(
             WarningKind::CaptureTimeMissing,
-            "所有图片都没有 EXIF 拍摄时间，PDF 里记录的是文件修改时间（复制、导出都会改变它）",
+            if creation_is_capture_time {
+                format!(
+                    "{without_capture_time} 张图片没有拍摄时间信息（EXIF / XMP / IPTC 里都没有）",
+                )
+            } else {
+                "所有图片都没有拍摄时间信息。PDF 的创建时间记的是本次导出时刻，\
+                 不是拍摄时刻 —— 需要真实拍摄时间的话，请用手机相册里的原图，\
+                 或在列表里手动填写。"
+                    .to_string()
+            },
         ));
     }
 
     doc.set_info(DocInfo {
         title: None,
-        subject: time_span.map(|(a, b)| {
-            // 措辞必须跟着时间来源走：把文件修改时间说成「拍摄于」是在误导，
-            // 而这份 PDF 可能是要拿去举证的。
-            let kind = if only_file_times {
-                "文件时间"
-            } else {
-                "拍摄时间"
-            };
-            if a == b {
-                format!("共 {} 张图片，{kind} {}", fidelity.len(), a.display())
-            } else {
-                format!(
-                    "共 {} 张图片，{kind} {} 至 {}",
-                    fidelity.len(),
-                    a.display(),
-                    b.display()
-                )
+        subject: Some(match capture_span {
+            Some((a, b)) if a == b => {
+                format!("共 {} 张图片，拍摄于 {}", fidelity.len(), a.display())
             }
+            Some((a, b)) => format!(
+                "共 {} 张图片，拍摄时间 {} 至 {}",
+                fidelity.len(),
+                a.display(),
+                b.display()
+            ),
+            None => format!("共 {} 张图片；原始文件中没有拍摄时间信息", fidelity.len()),
         }),
-        creation,
+        creation: Some(creation),
         modified: Some(Timestamp::now()),
     });
 
@@ -145,8 +174,10 @@ pub fn run(paths: &[PathBuf], tier: Tier, sink: &dyn ProgressSink) -> Result<Rep
         Outcome {
             pdf,
             fidelity,
-            creation,
-            time_span,
+            creation: Some(creation),
+            creation_is_capture_time,
+            capture_span,
+            without_capture_time,
         },
         warnings,
     ))

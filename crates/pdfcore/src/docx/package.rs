@@ -127,34 +127,15 @@ fn parse_created(xml: &str) -> Option<crate::timestamp::Timestamp> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) if e.local_name().as_ref() == "created" => in_created = true,
-            Ok(Event::Text(t)) if in_created => return parse_iso8601(&t),
+            Ok(Event::Text(t)) if in_created => {
+                return crate::timestamp::Timestamp::parse_iso8601(&t)
+            }
             Ok(Event::End(e)) if e.local_name().as_ref() == "created" => in_created = false,
             Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
     }
     None
-}
-
-fn parse_iso8601(s: &str) -> Option<crate::timestamp::Timestamp> {
-    let s = s.trim();
-    // 只认最常见的 `YYYY-MM-DDTHH:MM:SS` 前缀，尾部的 Z 或时区偏移单独看。
-    let bytes = s.as_bytes();
-    if bytes.len() < 19 {
-        return None;
-    }
-    let num = |a: usize, b: usize| s.get(a..b)?.parse::<u32>().ok();
-    let ts = crate::timestamp::Timestamp {
-        year: num(0, 4)? as u16,
-        month: num(5, 7)? as u8,
-        day: num(8, 10)? as u8,
-        hour: num(11, 13)? as u8,
-        minute: num(14, 16)? as u8,
-        second: num(17, 19)? as u8,
-        // Word 写的是 UTC（尾部 Z）。非 Z 的偏移形式少见，保守地留空而不是猜。
-        utc_offset_minutes: s.ends_with('Z').then_some(0),
-    };
-    Some(ts)
 }
 
 fn parse_rels(xml: &str) -> HashMap<String, String> {

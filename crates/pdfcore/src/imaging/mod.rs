@@ -141,26 +141,80 @@ pub fn page_size_pt(width: u32, height: u32, dpi: Option<Dpi>) -> (f32, f32) {
     (pw.max(1.0), ph.max(1.0))
 }
 
-/// 读取一张图片的时间：优先 EXIF 拍摄时间，退到文件修改时间。
+/// 读取一张图片的时间。
 ///
-/// 两者的可信度差很多，所以要把来源一并返回 —— 文件时间复制一下就变了，
-/// 在取证场景里必须让用户看得见这个区别。
+/// 依次尝试三个**嵌在文件内部**的来源：EXIF → XMP → IPTC。
+/// 它们随文件本身走，重命名、复制、转发都不会改变，才配称为「拍摄时间」。
+///
+/// 三个都没有时，退到文件系统时间，但会标成 `FileSystem` —— 那**不是**拍摄时间，
+/// 复制一次就被刷成当前时刻，调用方必须区别对待，不能拿它去填 PDF 的 `/CreationDate`。
 pub fn read_time(path: &Path) -> Option<crate::timestamp::DatedFile> {
     use crate::timestamp::{DatedFile, TimeSource, Timestamp};
 
     if let Ok(bytes) = std::fs::read(path) {
-        if let Some(when) = read_exif(&bytes).as_deref().and_then(probe::capture_time) {
+        let meta = read_metadata(&bytes);
+
+        if let Some(when) = meta.exif.as_deref().and_then(probe::capture_time) {
             return Some(DatedFile {
                 when,
-                source: TimeSource::Captured,
+                source: TimeSource::Exif,
+            });
+        }
+        if let Some(when) = meta
+            .xmp
+            .as_deref()
+            .and_then(|x| std::str::from_utf8(x).ok())
+            .and_then(probe::xmp_capture_time)
+        {
+            return Some(DatedFile {
+                when,
+                source: TimeSource::Xmp,
+            });
+        }
+        if let Some(when) = meta.iptc.as_deref().and_then(probe::iptc_capture_time) {
+            return Some(DatedFile {
+                when,
+                source: TimeSource::Iptc,
             });
         }
     }
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+
+    // 兜底：取创建时间与修改时间里更早的那个。复制会把两者都刷新，
+    // 但至少「改内容」只动 mtime，取较早值能少受一点干扰。
+    let md = std::fs::metadata(path).ok()?;
+    let earliest = [md.created().ok(), md.modified().ok()]
+        .into_iter()
+        .flatten()
+        .min()?;
     Some(DatedFile {
-        when: Timestamp::from_system_time(modified),
-        source: TimeSource::FileModified,
+        when: Timestamp::from_system_time(earliest),
+        source: TimeSource::FileSystem,
     })
+}
+
+#[derive(Default)]
+struct EmbeddedMetadata {
+    exif: Option<Vec<u8>>,
+    xmp: Option<Vec<u8>>,
+    iptc: Option<Vec<u8>>,
+}
+
+/// 一次性取出三种元数据块。只开一次 decoder，避免把文件读三遍。
+fn read_metadata(bytes: &[u8]) -> EmbeddedMetadata {
+    use image::ImageDecoder;
+    let Ok(reader) = image::ImageReader::new(std::io::BufReader::new(std::io::Cursor::new(bytes)))
+        .with_guessed_format()
+    else {
+        return EmbeddedMetadata::default();
+    };
+    let Ok(mut decoder) = reader.into_decoder() else {
+        return EmbeddedMetadata::default();
+    };
+    EmbeddedMetadata {
+        exif: decoder.exif_metadata().ok().flatten(),
+        xmp: decoder.xmp_metadata().ok().flatten(),
+        iptc: decoder.iptc_metadata().ok().flatten(),
+    }
 }
 
 /// 为放进 PDF 准备一张图。

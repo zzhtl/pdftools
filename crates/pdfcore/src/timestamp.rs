@@ -23,18 +23,36 @@ pub struct Timestamp {
 /// 时间是从哪来的。界面上要显示出来 —— 拍摄时间可信，文件时间只是参考。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeSource {
-    /// EXIF 的 DateTimeOriginal，相机按下快门的时刻。
-    Captured,
-    /// 文件系统的修改时间。复制、导出都会改变它。
-    FileModified,
+    /// EXIF `DateTimeOriginal` —— 相机按下快门的时刻。最可信。
+    Exif,
+    /// XMP `xmp:CreateDate` / `photoshop:DateCreated`。
+    /// EXIF 被剥掉之后，这里常常还留着。
+    Xmp,
+    /// IPTC `DateCreated` + `TimeCreated`。
+    Iptc,
+    /// 用户手动录入。文件里没有拍摄时间时，这是唯一能得到正确时间的途径。
+    Manual,
+    /// 文件系统时间。**不是拍摄时间**，仅作为参考显示。
+    FileSystem,
 }
 
 impl TimeSource {
     pub fn label(self) -> &'static str {
         match self {
-            TimeSource::Captured => "拍摄",
-            TimeSource::FileModified => "文件时间",
+            TimeSource::Exif => "EXIF 拍摄时间",
+            TimeSource::Xmp => "XMP 拍摄时间",
+            TimeSource::Iptc => "IPTC 拍摄时间",
+            TimeSource::Manual => "手动录入",
+            TimeSource::FileSystem => "文件时间·非拍摄时间",
         }
+    }
+
+    /// 是不是可以当作「拍摄时间」使用的值。
+    ///
+    /// 文件系统时间不算：复制一次就被刷成当前时刻，把它写进 PDF 的
+    /// `/CreationDate` 等于伪造一个拍摄时间。
+    pub fn is_capture_time(self) -> bool {
+        !matches!(self, TimeSource::FileSystem)
     }
 }
 
@@ -86,6 +104,76 @@ impl Timestamp {
             "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
             self.year, self.month, self.day, self.hour, self.minute, self.second
         )
+    }
+
+    /// 解析 ISO 8601（`2024-03-15T14:30:22+08:00`、`2024-03-15 14:30:22Z`…）。
+    /// XMP 与 docx 的核心属性都用这个格式。
+    pub fn parse_iso8601(s: &str) -> Option<Self> {
+        let s = s.trim();
+        let num = |a: usize, b: usize| s.get(a..b)?.parse::<u32>().ok();
+        if s.len() < 19 {
+            return None;
+        }
+        let offset = if s.ends_with('Z') || s.ends_with('z') {
+            Some(0i16)
+        } else {
+            // 尾部形如 +08:00 / -05:30
+            let tail = &s[s.len().saturating_sub(6)..];
+            let bytes = tail.as_bytes();
+            match (bytes.first(), tail.len()) {
+                (Some(b'+'), 6) | (Some(b'-'), 6) if bytes[3] == b':' => {
+                    let h: i16 = tail[1..3].parse().ok()?;
+                    let m: i16 = tail[4..6].parse().ok()?;
+                    let v = h * 60 + m;
+                    Some(if bytes[0] == b'-' { -v } else { v })
+                }
+                _ => None,
+            }
+        };
+        Some(Self {
+            year: num(0, 4)? as u16,
+            month: num(5, 7)? as u8,
+            day: num(8, 10)? as u8,
+            hour: num(11, 13)? as u8,
+            minute: num(14, 16)? as u8,
+            second: num(17, 19)? as u8,
+            utc_offset_minutes: offset,
+        })
+    }
+
+    /// 解析用户手动录入的时间。接受 `2024-03-15 14:30`、`2024-03-15 14:30:22`、
+    /// `2024/03/15 14:30` 这几种常见写法，日期和时间之间可以是空格或 T。
+    pub fn parse_user_input(s: &str) -> Option<Self> {
+        let s = s.trim();
+        let digits: Vec<u32> = s
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|p| !p.is_empty())
+            .map(|p| p.parse::<u32>().ok())
+            .collect::<Option<Vec<_>>>()?;
+        if digits.len() < 5 {
+            return None;
+        }
+        let (y, mo, d, h, mi) = (digits[0], digits[1], digits[2], digits[3], digits[4]);
+        let sec = digits.get(5).copied().unwrap_or(0);
+        if !(1900..=9999).contains(&y)
+            || !(1..=12).contains(&mo)
+            || !(1..=31).contains(&d)
+            || h > 23
+            || mi > 59
+            || sec > 59
+        {
+            return None;
+        }
+        Some(Self {
+            year: y as u16,
+            month: mo as u8,
+            day: d as u8,
+            hour: h as u8,
+            minute: mi as u8,
+            second: sec as u8,
+            // 手动录入按本地时间理解，取当前时区偏移。
+            utc_offset_minutes: Self::now().utc_offset_minutes,
+        })
     }
 
     /// PDF 的日期字符串形式：`D:YYYYMMDDHHmmSS+HH'mm'`。

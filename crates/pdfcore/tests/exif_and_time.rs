@@ -109,7 +109,8 @@ fn rotated_jpeg_still_passes_through_byte_identically() {
     let path = write_jpeg_with_exif("rot90.jpg", 1600, 900, 6, "2024:03:15 14:30:22");
     let original = std::fs::read(&path).unwrap();
 
-    let report = images_to_pdf::run(&[path], Tier::Lossless, &NoProgress).unwrap();
+    let report =
+        images_to_pdf::run(&[path], Tier::Lossless, &Default::default(), &NoProgress).unwrap();
     assert_eq!(
         report.value.fidelity[0].1,
         pdfcore::imaging::Fidelity::Passthrough,
@@ -159,7 +160,7 @@ fn exif_capture_time_is_read_and_labelled() {
     let path = write_jpeg_with_exif("dated.jpg", 400, 300, 1, "2024:03:15 14:30:22");
     let t = pdfcore::imaging::read_time(&path).expect("读不到时间");
 
-    assert_eq!(t.source, TimeSource::Captured, "应当识别为 EXIF 拍摄时间");
+    assert_eq!(t.source, TimeSource::Exif, "应当识别为 EXIF 拍摄时间");
     assert_eq!(t.when.year, 2024);
     assert_eq!(t.when.month, 3);
     assert_eq!(t.when.day, 15);
@@ -175,7 +176,13 @@ fn pdf_creation_date_is_the_earliest_capture_time() {
     let early = write_jpeg_with_exif("early.jpg", 400, 300, 1, "2024:03:15 14:30:22");
 
     // 故意把晚的排在前面，验证取的是最早值而不是第一个
-    let report = images_to_pdf::run(&[late, early], Tier::Lossless, &NoProgress).unwrap();
+    let report = images_to_pdf::run(
+        &[late, early],
+        Tier::Lossless,
+        &Default::default(),
+        &NoProgress,
+    )
+    .unwrap();
     let creation = report.value.creation.expect("没有写入创建时间");
     assert_eq!(
         (creation.year, creation.month, creation.day),
@@ -184,9 +191,10 @@ fn pdf_creation_date_is_the_earliest_capture_time() {
         creation.display()
     );
 
-    // 时间跨度也要正确
-    let (first, last) = report.value.time_span.unwrap();
+    // 拍摄时间跨度也要正确
+    let (first, last) = report.value.capture_span.unwrap();
     assert_eq!((first.month, last.month), (3, 6));
+    assert!(report.value.creation_is_capture_time);
 
     // 真的写进了 PDF 的 Info 字典
     let doc = lopdf::Document::load_mem(&report.value.pdf).unwrap();
@@ -207,7 +215,8 @@ fn lossless_tier_never_resamples() {
     let path = write_jpeg_with_exif("huge.jpg", 4000, 3000, 1, "2024:01:01 00:00:00");
     let original = std::fs::read(&path).unwrap();
 
-    let report = images_to_pdf::run(&[path], Tier::Lossless, &NoProgress).unwrap();
+    let report =
+        images_to_pdf::run(&[path], Tier::Lossless, &Default::default(), &NoProgress).unwrap();
     assert_eq!(
         report.value.fidelity[0].1,
         pdfcore::imaging::Fidelity::Passthrough
@@ -262,7 +271,7 @@ fn page_matrix(pdf: &[u8]) -> [f32; 6] {
 fn orientation_reaches_the_content_stream_matrix() {
     // 方向 6：顺时针旋转 90 度。页面因此是竖向。
     let path = write_jpeg_with_exif("m6.jpg", 1600, 900, 6, "2024:01:01 00:00:00");
-    let pdf = images_to_pdf::run(&[path], Tier::Lossless, &NoProgress)
+    let pdf = images_to_pdf::run(&[path], Tier::Lossless, &Default::default(), &NoProgress)
         .unwrap()
         .value
         .pdf;
@@ -277,7 +286,7 @@ fn orientation_reaches_the_content_stream_matrix() {
 
     // 方向 1 才应当是那个平凡形式，用作对照。
     let plain = write_jpeg_with_exif("m1.jpg", 1600, 900, 1, "2024:01:01 00:00:00");
-    let pdf = images_to_pdf::run(&[plain], Tier::Lossless, &NoProgress)
+    let pdf = images_to_pdf::run(&[plain], Tier::Lossless, &Default::default(), &NoProgress)
         .unwrap()
         .value
         .pdf;
@@ -294,7 +303,7 @@ fn all_eight_orientations_produce_distinct_matrices() {
     let mut seen: Vec<[i32; 6]> = Vec::new();
     for o in 1..=8u16 {
         let p = write_jpeg_with_exif(&format!("d{o}.jpg"), 1600, 900, o, "2024:01:01 00:00:00");
-        let pdf = images_to_pdf::run(&[p], Tier::Lossless, &NoProgress)
+        let pdf = images_to_pdf::run(&[p], Tier::Lossless, &Default::default(), &NoProgress)
             .unwrap()
             .value
             .pdf;
@@ -305,5 +314,196 @@ fn all_eight_orientations_produce_distinct_matrices() {
             "方向 {o} 的矩阵 {m:?} 与之前某个方向重复了"
         );
         seen.push(m);
+    }
+}
+
+/// 造一段 XMP 的 APP1 段。
+fn xmp_app1(create_date: &str) -> Vec<u8> {
+    let packet = format!(
+        r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF
+ xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+ xmp:CreateDate="{create_date}"/>
+</rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#
+    );
+    let mut payload = b"http://ns.adobe.com/xap/1.0/\x00".to_vec();
+    payload.extend_from_slice(packet.as_bytes());
+    let mut app1 = vec![0xFF, 0xE1];
+    app1.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+    app1.extend_from_slice(&payload);
+    app1
+}
+
+fn write_jpeg_with_xmp(name: &str, create_date: &str) -> PathBuf {
+    let mut jpeg = Vec::new();
+    image::DynamicImage::ImageRgb8(photo(320, 240))
+        .write_to(
+            &mut std::io::Cursor::new(&mut jpeg),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+    let mut out = jpeg[..2].to_vec();
+    out.extend_from_slice(&xmp_app1(create_date));
+    out.extend_from_slice(&jpeg[2..]);
+    let path = tmp().join(name);
+    std::fs::write(&path, &out).unwrap();
+    path
+}
+
+/// EXIF 被剥掉后，XMP 里往往还留着拍摄时间 —— 必须也读。
+#[test]
+fn xmp_create_date_is_used_when_exif_is_absent() {
+    let path = write_jpeg_with_xmp("xmp.jpg", "2023-11-08T09:15:30+08:00");
+    let t = pdfcore::imaging::read_time(&path).expect("读不到时间");
+
+    assert_eq!(
+        t.source,
+        pdfcore::TimeSource::Xmp,
+        "应当识别为 XMP 拍摄时间"
+    );
+    assert_eq!(
+        (
+            t.when.year,
+            t.when.month,
+            t.when.day,
+            t.when.hour,
+            t.when.minute
+        ),
+        (2023, 11, 8, 9, 15)
+    );
+    assert_eq!(
+        t.when.utc_offset_minutes,
+        Some(8 * 60),
+        "时区偏移没解析出来"
+    );
+}
+
+/// 核心规则：**文件系统时间绝不能被当作拍摄时间写进 PDF。**
+///
+/// 文件时间一复制就被刷新，把它填进 /CreationDate 等于在证据材料里
+/// 伪造一个拍摄日期。没有真实拍摄时间时，/CreationDate 应当退回
+/// PDF 规范的本义 —— 这份文件的生成时刻。
+#[test]
+fn filesystem_time_is_never_passed_off_as_capture_time() {
+    // 一张完全没有元数据的 JPEG
+    let mut jpeg = Vec::new();
+    image::DynamicImage::ImageRgb8(photo(320, 240))
+        .write_to(
+            &mut std::io::Cursor::new(&mut jpeg),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+    let path = tmp().join("bare.jpg");
+    std::fs::write(&path, &jpeg).unwrap();
+
+    // read_time 仍会给出一个文件时间，但必须标成 FileSystem
+    let t = pdfcore::imaging::read_time(&path).unwrap();
+    assert_eq!(t.source, pdfcore::TimeSource::FileSystem);
+    assert!(!t.source.is_capture_time());
+
+    let report =
+        images_to_pdf::run(&[path], Tier::Lossless, &Default::default(), &NoProgress).unwrap();
+    assert!(
+        !report.value.creation_is_capture_time,
+        "没有拍摄时间却声称 /CreationDate 是拍摄时间"
+    );
+    assert_eq!(report.value.capture_span, None);
+    assert_eq!(report.value.without_capture_time, 1);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.kind == pdfcore::WarningKind::CaptureTimeMissing),
+        "缺少拍摄时间必须给出提示"
+    );
+
+    // 文档属性里要如实说明，不能暗示那是拍摄时间
+    let doc = lopdf::Document::load_mem(&report.value.pdf).unwrap();
+    let info_ref = doc.trailer.get(b"Info").unwrap().as_reference().unwrap();
+    let info = doc.get_dictionary(info_ref).unwrap();
+    let subject = decode_pdf_text(info.get(b"Subject").unwrap().as_str().unwrap());
+    assert!(
+        subject.contains("没有拍摄时间"),
+        "主题字段应当写明没有拍摄时间，实际为 {subject}"
+    );
+}
+
+/// 解码 PDF 的文本串。含非 ASCII 时是带 BOM 的 UTF-16BE，否则是 PDFDocEncoding
+/// （对 ASCII 范围与 UTF-8 等价）。
+fn decode_pdf_text(raw: &[u8]) -> String {
+    if raw.starts_with(&[0xFE, 0xFF]) {
+        let units: Vec<u16> = raw[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(raw).into_owned()
+    }
+}
+
+/// 手动填写的时间要能覆盖掉文件时间，并作为真正的拍摄时间写进 PDF。
+/// 对已经被剥掉时间的照片，这是唯一能拿到正确时间的途径。
+#[test]
+fn manual_time_overrides_and_counts_as_capture_time() {
+    let mut jpeg = Vec::new();
+    image::DynamicImage::ImageRgb8(photo(320, 240))
+        .write_to(
+            &mut std::io::Cursor::new(&mut jpeg),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+    let path = tmp().join("manual.jpg");
+    std::fs::write(&path, &jpeg).unwrap();
+
+    let when = pdfcore::Timestamp::parse_user_input("2022-05-09 16:40").expect("解析失败");
+    let manual = std::collections::HashMap::from([(path.clone(), when)]);
+
+    let report = images_to_pdf::run(&[path], Tier::Lossless, &manual, &NoProgress).unwrap();
+    assert!(report.value.creation_is_capture_time);
+    assert_eq!(report.value.without_capture_time, 0);
+
+    let c = report.value.creation.unwrap();
+    assert_eq!(
+        (c.year, c.month, c.day, c.hour, c.minute),
+        (2022, 5, 9, 16, 40)
+    );
+
+    let doc = lopdf::Document::load_mem(&report.value.pdf).unwrap();
+    let info_ref = doc.trailer.get(b"Info").unwrap().as_reference().unwrap();
+    let raw = doc
+        .get_dictionary(info_ref)
+        .unwrap()
+        .get(b"CreationDate")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(String::from_utf8_lossy(raw).starts_with("D:20220509164000"));
+}
+
+/// 手动录入的几种常见写法都要能解析。
+#[test]
+fn user_time_input_accepts_common_formats() {
+    use pdfcore::Timestamp;
+    for s in [
+        "2024-03-15 14:30:22",
+        "2024-03-15 14:30",
+        "2024/03/15 14:30",
+        "2024.03.15 14:30:22",
+        "2024-03-15T14:30:22",
+    ] {
+        let t = Timestamp::parse_user_input(s).unwrap_or_else(|| panic!("解析失败：{s}"));
+        assert_eq!(
+            (t.year, t.month, t.day, t.hour, t.minute),
+            (2024, 3, 15, 14, 30),
+            "{s}"
+        );
+    }
+    for bad in ["", "今天下午", "2024-03-15", "9999-99-99 99:99"] {
+        assert!(
+            Timestamp::parse_user_input(bad).is_none(),
+            "不该解析成功：{bad}"
+        );
     }
 }

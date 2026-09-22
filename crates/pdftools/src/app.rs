@@ -59,6 +59,46 @@ impl App {
         }
     }
 
+    /// 按扩展名把文件分派到对应的 Tab，并切换过去。
+    /// 拖放和命令行参数共用这条路径。
+    pub fn open_paths(&mut self, paths: Vec<std::path::PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let ext = |p: &std::path::Path| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+                .unwrap_or_default()
+        };
+        let docx: Vec<_> = paths
+            .iter()
+            .filter(|p| matches!(ext(p).as_str(), "docx" | "doc"))
+            .cloned()
+            .collect();
+        let pdfs: Vec<_> = paths.iter().filter(|p| ext(p) == "pdf").cloned().collect();
+        let images: Vec<_> = paths
+            .iter()
+            .filter(|p| {
+                pdfcore::imaging::probe::looks_like_image(p) || pdfcore::imaging::probe::is_heif(p)
+            })
+            .cloned()
+            .collect();
+
+        if !images.is_empty() {
+            self.tab = Tab::ImagesToPdf;
+            self.images.add_paths(images);
+        }
+        if !docx.is_empty() {
+            self.tab = Tab::DocxToPdf;
+            self.docx.add_paths(docx);
+        }
+        if !pdfs.is_empty() {
+            self.tab = Tab::PdfCompress;
+            self.compress.add_paths(pdfs);
+        }
+    }
+
     pub fn busy(&self) -> bool {
         self.job.as_ref().is_some_and(|j| j.is_active())
     }
@@ -133,11 +173,11 @@ impl App {
         if dropped.is_empty() || self.busy() {
             return;
         }
-        match self.tab {
-            Tab::ImagesToPdf => self.images.add_paths(dropped),
-            Tab::ImagesCompress => self.img_compress.add_paths(dropped),
-            Tab::DocxToPdf => self.docx.add_paths(dropped),
-            Tab::PdfCompress => self.compress.add_paths(dropped),
+        // 在「图片压缩」页拖图片时应当留在本页，其余情况按文件类型自动分派。
+        if self.tab == Tab::ImagesCompress {
+            self.img_compress.add_paths(dropped);
+        } else {
+            self.open_paths(dropped);
         }
     }
 
