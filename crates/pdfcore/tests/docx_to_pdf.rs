@@ -266,6 +266,66 @@ fn table_geometry_follows_word() {
     }
 }
 
+/// Word 默认插入的「网格型」表格只写了 `w:tblStyle`：框线、单元格里的段距都来自表格样式；
+/// 首行的条件格式铺底纹（加粗在 `ir` 的单元测试里验：宋体没有粗体时是合成的，字体名看不出）。
+#[test]
+fn table_styles_draw_borders_and_fills() {
+    use common::pdfpaths;
+    if !require_cjk_font() {
+        return;
+    }
+    let all: String = ["top", "left", "bottom", "right", "insideH", "insideV"]
+        .iter()
+        .map(|side| format!(r#"<w:{side} w:val="single" w:sz="4" w:space="0" w:color="000000"/>"#))
+        .collect();
+    let styles = format!(
+        r#"<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="200" w:line="360" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>
+<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+<w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr><w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style>
+<w:style w:type="table" w:styleId="TableGrid"><w:name w:val="Table Grid"/><w:basedOn w:val="TableNormal"/><w:pPr><w:spacing w:after="0" w:line="400" w:lineRule="exact"/></w:pPr><w:tblPr><w:tblBorders>{all}</w:tblBorders></w:tblPr>
+<w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="D9D9D9"/></w:tcPr></w:tblStylePr></w:style>"#
+    );
+    let cell = |t: &str| {
+        format!(
+            r#"<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>{t}</w:t></w:r></w:p></w:tc>"#
+        )
+    };
+    let body = format!(
+        r#"<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="6000" w:type="dxa"/><w:tblLook w:val="0020" w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid><w:tr>{}{}</w:tr><w:tr>{}{}</w:tr></w:tbl><w:p/>"#,
+        cell("表头甲"),
+        cell("表头乙"),
+        cell("正文甲"),
+        cell("正文乙")
+    );
+    let pdf = convert(
+        &DocxBuilder::new()
+            .styles(&styles)
+            .body(&body)
+            .build("table_style.docx"),
+    )
+    .value
+    .pdf;
+    let lines = &common::pdftext::extract(&pdf)[0].lines;
+    // 行距来自表格样式（固定 20pt，段后 0），而不是 docDefaults 的 1.5 倍加段后 10pt：
+    // 两行之间只隔一条 0.5pt 的框线。
+    assert!((lines[0].y - lines[1].y - 20.5).abs() < 0.01, "{lines:?}");
+
+    let paths = &pdfpaths::extract(&pdf)[0];
+    let horizontal = paths
+        .iter()
+        .filter(|p| p.stroke && p.w() > p.h() && p.w() > 100.0)
+        .count();
+    assert!(horizontal >= 3, "上、中、下三条横线：{paths:?}");
+    let grey = paths
+        .iter()
+        .filter(|p| !p.stroke && p.color.iter().all(|c| (c - 0.85).abs() < 0.01))
+        .collect::<Vec<_>>();
+    assert_eq!(grey.len(), 2, "首行两格铺底纹：{paths:?}");
+    assert!(grey
+        .iter()
+        .all(|p| p.bbox[1] < lines[0].y && lines[0].y < p.bbox[3]));
+}
+
 /// 嵌套的表格、参差的行、没写列宽的表格，都对照 LibreOffice 实测：
 /// - 嵌套表格的第一条列边界在所在单元格的文字左边往里半个左框线宽，两种兼容模式
 ///   都是（Word 2010 往左让出边距的规则只管正文里的表格）；

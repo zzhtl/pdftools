@@ -226,6 +226,15 @@ pub fn parse_styles(xml: &str) -> Styles {
                     let kind = attr(&e, "type").unwrap_or_else(|| "paragraph".into());
                     let id = attr(&e, "styleId").unwrap_or_default();
                     let is_default = attr(&e, "default").is_some_and(|v| v == "1" || v == "true");
+                    if kind == "table" {
+                        if let Ok(st) = table::parse_table_style(&mut r) {
+                            if is_default && styles.default_table_style.is_none() {
+                                styles.default_table_style = Some(id.clone());
+                            }
+                            styles.table.insert(id, st);
+                        }
+                        continue;
+                    }
                     let Ok(mut st) = parse_style_body(&mut r) else {
                         continue;
                     };
@@ -243,7 +252,6 @@ pub fn parse_styles(xml: &str) -> Styles {
                         "numbering" => {
                             styles.numbering.insert(id, st);
                         }
-                        // 表格样式：还不参与层叠。
                         _ => {}
                     }
                 }

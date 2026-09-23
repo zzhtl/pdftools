@@ -589,6 +589,77 @@ pub struct TblPr {
     /// `w:tblLayout w:type="fixed"`：列宽不随内容调整。
     pub fixed_layout: bool,
     pub shading: Option<Option<[u8; 3]>>,
+    /// `w:tblLook`：表格样式里的哪些条件格式生效。
+    pub look: Option<TblLook>,
+    /// `w:tblStyleRowBandSize` / `w:tblStyleColBandSize`：隔行、隔列底纹几行（列）一换。
+    pub row_band: Option<u32>,
+    pub col_band: Option<u32>,
+}
+
+impl TblPr {
+    /// 表格样式沿 basedOn 合并、直接格式盖样式时用：写了的项覆盖。
+    pub fn merge(&mut self, other: &TblPr) {
+        macro_rules! take {
+            ($($f:ident),*) => { $( if other.$f.is_some() { self.$f = other.$f.clone(); } )* };
+        }
+        take!(style_id, width, align, indent, shading, look, row_band, col_band);
+        self.borders.merge(&other.borders);
+        self.cell_margins.merge(&other.cell_margins);
+        self.fixed_layout |= other.fixed_layout;
+    }
+}
+
+/// `w:tblLook`。没写的项是「不」。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TblLook {
+    pub first_row: bool,
+    pub last_row: bool,
+    pub first_col: bool,
+    pub last_col: bool,
+    /// 不要隔行底纹。
+    pub no_h_band: bool,
+    /// 不要隔列底纹。
+    pub no_v_band: bool,
+}
+
+/// 表格样式（`w:style w:type="table"`）。
+#[derive(Debug, Clone, Default)]
+pub struct TableStyle {
+    pub based_on: Option<String>,
+    /// 表格里段落、文字的格式，层叠时在 docDefaults 之后、段落样式之前。
+    pub ppr: PPr,
+    pub rpr: RPr,
+    pub tbl_pr: TblPr,
+    pub tc_pr: TcPr,
+    /// `w:tblStylePr`：首行、末行、隔行……各自的格式。
+    pub conditions: Vec<(TableRegion, TableCondition)>,
+}
+
+/// 表格样式里一类区域的格式（`w:tblStylePr`）。
+#[derive(Debug, Clone, Default)]
+pub struct TableCondition {
+    pub ppr: PPr,
+    pub rpr: RPr,
+    pub tbl_pr: TblPr,
+    pub tc_pr: TcPr,
+}
+
+/// 条件格式作用的区域。排在后面的优先（ECMA-376 §17.7.6）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TableRegion {
+    WholeTable,
+    Band1Vert,
+    Band2Vert,
+    Band1Horz,
+    Band2Horz,
+    FirstCol,
+    LastCol,
+    FirstRow,
+    LastRow,
+    NeCell,
+    NwCell,
+    SeCell,
+    SwCell,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -638,6 +709,21 @@ pub struct TcPr {
     pub shading: Option<Option<[u8; 3]>>,
     pub margins: CellMargins,
     pub v_align: Option<VAlign>,
+}
+
+impl TcPr {
+    /// 表格样式里的单元格格式（沿 basedOn、各条件格式）逐层盖上去：写了的项覆盖。
+    /// 宽度、合并这类只属于单元格自己的不参与。
+    pub fn merge_style(&mut self, other: &TcPr) {
+        if other.shading.is_some() {
+            self.shading = other.shading;
+        }
+        if other.v_align.is_some() {
+            self.v_align = other.v_align;
+        }
+        self.borders.merge(&other.borders);
+        self.margins.merge(&other.margins);
+    }
 }
 
 /// `w:docGrid` —— 中文排版的**行网格**。
@@ -756,6 +842,9 @@ pub struct Styles {
     pub numbering: HashMap<String, Style>,
     /// 标了 `w:default="1"` 的段落样式，通常是 Normal。
     pub default_paragraph_style: Option<String>,
+    pub table: HashMap<String, TableStyle>,
+    /// 标了 `w:default="1"` 的表格样式（Normal Table）：没写 `w:tblStyle` 的表格用它。
+    pub default_table_style: Option<String>,
 }
 
 /// `numbering.xml`：编号定义。

@@ -363,6 +363,55 @@ pub fn all() -> Vec<Probe> {
         ),
     );
 
+    // 表格样式：网格型（框线、段距、字号都来自样式）与带首行、隔行、末行格式的样式。
+    // 各样式都自己写全段落格式（Word 内置样式就是这样）：LibreOffice 不沿 basedOn 取
+    // 表格样式的段落格式。
+    let all_borders: String = ["top", "left", "bottom", "right", "insideH", "insideV"]
+        .iter()
+        .map(|s| border(s))
+        .collect();
+    let cell_ppr = r#"<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:rPr><w:sz w:val="21"/></w:rPr>"#;
+    let styles = format!(
+        r#"<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Liberation Serif" w:hAnsi="Liberation Serif" w:eastAsia="Noto Serif CJK SC"/><w:sz w:val="24"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>
+<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+<w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr><w:tblInd w:w="0" w:type="dxa"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style>
+<w:style w:type="table" w:styleId="TableGrid"><w:name w:val="Table Grid"/><w:basedOn w:val="TableNormal"/>{cell_ppr}<w:tblPr><w:tblBorders>{all_borders}</w:tblBorders></w:tblPr></w:style>
+<w:style w:type="table" w:styleId="Banded"><w:name w:val="Banded"/><w:basedOn w:val="TableGrid"/>{cell_ppr}<w:tblPr><w:tblStyleRowBandSize w:val="1"/></w:tblPr>
+<w:tblStylePr w:type="firstRow"><w:rPr><w:b/><w:color w:val="FFFFFF"/></w:rPr><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="4472C4"/></w:tcPr></w:tblStylePr>
+<w:tblStylePr w:type="band1Horz"><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="D9E2F3"/></w:tcPr></w:tblStylePr>
+<w:tblStylePr w:type="lastRow"><w:rPr><w:b/></w:rPr><w:tcPr><w:tcBorders><w:top w:val="double" w:sz="4" w:space="0" w:color="000000"/></w:tcBorders></w:tcPr></w:tblStylePr></w:style>"#
+    );
+    let styled = |style: &str, look: &str, rows: &str| {
+        format!(
+            r#"<w:tbl><w:tblPr><w:tblStyle w:val="{style}"/><w:tblW w:w="8600" w:type="dxa"/>{look}</w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="6600"/></w:tblGrid>{rows}</w:tbl>"#
+        )
+    };
+    let plain = |t: &str| format!("<w:p><w:r><w:t>{t}</w:t></w:r></w:p>");
+    let two = |i: usize, len: usize| {
+        format!(
+            "<w:tr>{}{}</w:tr>",
+            xcell(2000, "", &plain(&format!("第{i}项"))),
+            xcell(6600, "", &plain(&filler(i, len)))
+        )
+    };
+    let body = plain("网格型表格")
+        + &styled(
+            "TableGrid",
+            "",
+            &(0..8).map(|i| two(i, 20 + i * 9)).collect::<String>(),
+        )
+        + &plain("带条件格式的表格")
+        + &styled(
+            "Banded",
+            r#"<w:tblLook w:val="04E0" w:firstRow="1" w:lastRow="1" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>"#,
+            &(0..10).map(|i| two(i, 16 + i * 5)).collect::<String>(),
+        )
+        + &plain("表格之后的正文。");
+    add(
+        "table_styles",
+        DocxBuilder::new().styles(&styles).body(&body),
+    );
+
     let numbering = r#"<w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="hybridMultilevel"/>
 <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="chineseCounting"/><w:lvlText w:val="%1、"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="420" w:hanging="420"/></w:pPr></w:lvl>
 <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="840" w:hanging="420"/></w:pPr></w:lvl>
