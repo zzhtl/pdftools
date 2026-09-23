@@ -56,6 +56,10 @@ pub(super) struct Piece {
     pub synthetic_italic: bool,
     /// 画出来的字号。上下标比 run 的字号小。
     pub size_pt: f32,
+    /// 字符间距（点）：每个字后面加这么多，负数是紧缩。
+    pub letter_spacing: f32,
+    /// `letter_ends[i]` = 前 i 个字形里有几个是字（cluster）的末尾。没有字符间距时为空。
+    letter_ends: Vec<u32>,
     /// 决定行高、基线用的字号：始终是 run 的字号，上下标不让行变矮。
     pub metrics_size_pt: f32,
     /// 基线的升降（点），正数往上：上下标与 `w:position`。
@@ -87,7 +91,7 @@ impl Piece {
         gap + self.width(from, to)
     }
 
-    /// 区间 `[from, to)`（段落全局字节偏移）在本片内的宽度，单位点。
+    /// 区间 `[from, to)`（段落全局字节偏移）在本片内的宽度，单位点。含字符间距。
     pub fn width(&self, from: usize, to: usize) -> f32 {
         let a = from.clamp(self.range.start, self.range.end) - self.range.start;
         let b = to.clamp(self.range.start, self.range.end) - self.range.start;
@@ -96,7 +100,21 @@ impl Piece {
         }
         let gi = self.shaped.glyph_index_at_byte(a as u32);
         let gj = self.shaped.glyph_index_at_byte(b as u32);
-        self.shaped.width_between(gi, gj) as f32 * self.size_pt / self.upem
+        let glyphs = self.shaped.width_between(gi, gj) as f32 * self.size_pt / self.upem;
+        if self.letter_ends.is_empty() {
+            glyphs
+        } else {
+            glyphs + self.letter_spacing * (self.letter_ends[gj] - self.letter_ends[gi]) as f32
+        }
+    }
+
+    /// 第 `k` 个字形之后的字符间距（点）：字的最后一个字形才有。
+    pub fn letter_spacing_after(&self, k: usize) -> f32 {
+        if self.letter_ends.is_empty() || self.letter_ends[k + 1] == self.letter_ends[k] {
+            0.0
+        } else {
+            self.letter_spacing
+        }
     }
 
     /// 字节区间对应的字形下标区间。
@@ -401,12 +419,23 @@ pub(super) fn shape(
                 let shaped = if is_unpainted(&text[part.clone()]) {
                     ShapedRun::empty()
                 } else {
-                    let mut shaped = shape_run(face, &text[part.clone()], class.to_rustybuzz());
-                    if style.char_spacing != 0.0 {
-                        let units = style.char_spacing * upem / size;
-                        shaped.add_letter_spacing(units.round() as i32);
-                    }
-                    shaped
+                    shape_run(face, &text[part.clone()], class.to_rustybuzz())
+                };
+                // 字符间距加在每个字（cluster）的最后一个字形之后；记下到每个字形为止
+                // 有几个字的末尾，量宽度时一次减法就够。不折算成字体单位：
+                // 宋体每 em 只有 256 个单位，取整后每个字会差出 0.016pt。
+                let letter_ends = if style.char_spacing != 0.0 {
+                    let g = &shaped.glyphs;
+                    std::iter::once(0)
+                        .chain((0..g.len()).scan(0u32, |n, i| {
+                            if i + 1 == g.len() || g[i + 1].cluster != g[i].cluster {
+                                *n += 1;
+                            }
+                            Some(*n)
+                        }))
+                        .collect()
+                } else {
+                    Vec::new()
                 };
                 collect_missing(&text[part.clone()], &shaped, book);
                 let texts = cluster_texts(&text[part.clone()], &shaped.glyphs)
@@ -443,6 +472,8 @@ pub(super) fn shape(
                     synthetic_bold: font.synthetic_bold,
                     synthetic_italic: font.synthetic_italic,
                     size_pt: size,
+                    letter_spacing: style.char_spacing,
+                    letter_ends,
                     metrics_size_pt: style.size_pt,
                     rise,
                     color: style.color,

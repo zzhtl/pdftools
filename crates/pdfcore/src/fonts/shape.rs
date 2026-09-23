@@ -48,26 +48,6 @@ impl ShapedRun {
     pub fn glyph_index_at_byte(&self, byte: u32) -> usize {
         self.glyphs.partition_point(|g| g.cluster < byte)
     }
-
-    /// 每个字后面加 `units`（字体单位）的间距：Word 的「字符间距」。
-    /// 加在每个 cluster 的最后一个字形上，连字、组合符号不会被拆开。
-    pub fn add_letter_spacing(&mut self, units: i32) {
-        let n = self.glyphs.len();
-        for i in 0..n {
-            let last_of_cluster =
-                i + 1 == n || self.glyphs[i + 1].cluster != self.glyphs[i].cluster;
-            if last_of_cluster {
-                self.glyphs[i].x_advance += units;
-            }
-        }
-        let mut acc = 0i64;
-        self.prefix_width.clear();
-        self.prefix_width.push(0);
-        for g in &self.glyphs {
-            acc += g.x_advance as i64;
-            self.prefix_width.push(acc);
-        }
-    }
 }
 
 /// 对一段**同字体、同 script** 的文本整形。

@@ -289,9 +289,15 @@ fn line(
         if piece.range.start > range.start && piece.range.start < range.end {
             x += piece.gap_before;
         }
+        // `w` 已含字符间距；`extra` 只是两端对齐分到的。画字时两者都要进 TJ。
         let w = piece.width(range.start, range.end);
         let gr = piece.glyph_range(range.start, range.end);
         let extra: f32 = extra_after.iter().sum();
+        let extra_after: Vec<f32> = extra_after
+            .iter()
+            .enumerate()
+            .map(|(k, e)| e + piece.letter_spacing_after(gr.start + k))
+            .collect();
 
         ops.push(PaintOp::Text {
             font: piece.font,
