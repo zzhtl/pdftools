@@ -7,6 +7,9 @@
 #[derive(Debug, Clone)]
 pub struct Calib {
     /// docDefaults、样式、直接格式都没写 `w:sz` 时用的字号。
+    ///
+    /// OOXML 规定缺省是 10pt（20 个半磅）；LibreOffice 在 docDefaults 不写字号时
+    /// 实测也是 10pt。重写前按五号字 10.5pt 算。
     pub default_size_pt: f32,
     pub empty_para: EmptyPara,
 }
@@ -22,7 +25,10 @@ pub enum EmptyPara {
 impl Calib {
     /// 现行规则。每条与 [`legacy`](Self::legacy) 不同的取值都要有对照实测的依据。
     pub fn current() -> Self {
-        Self::legacy()
+        Self {
+            default_size_pt: 10.0,
+            ..Self::legacy()
+        }
     }
 
     pub fn legacy() -> Self {

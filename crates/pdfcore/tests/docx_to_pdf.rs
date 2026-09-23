@@ -852,3 +852,30 @@ fn an_empty_line_between_two_breaks_keeps_its_height() {
         gap[0] - gap[1]
     );
 }
+
+/// 哪一级都没写 `w:sz` 时按 10pt 排：OOXML 的缺省值，也是 LibreOffice 的实测结果。
+#[test]
+fn text_without_any_size_is_10pt() {
+    if !require_cjk_font() {
+        return;
+    }
+    let path = DocxBuilder::new()
+        .styles(
+            r#"<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/></w:rPr></w:rPrDefault></w:docDefaults>
+<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>"#,
+        )
+        .body("<w:p><w:r><w:t>没有字号的正文 text</w:t></w:r></w:p>")
+        .build("default_size.docx");
+    let pdf = convert(&path).value.pdf;
+    let sizes: Vec<f32> = common::pdftext::extract(&pdf)
+        .into_iter()
+        .flat_map(|p| p.lines)
+        .flat_map(|l| l.frags)
+        .map(|f| f.size)
+        .collect();
+    assert!(!sizes.is_empty());
+    assert!(
+        sizes.iter().all(|s| (s - 10.0).abs() < 1e-3),
+        "字号应当都是 10pt：{sizes:?}"
+    );
+}
