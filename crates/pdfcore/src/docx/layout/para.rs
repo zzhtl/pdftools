@@ -2,9 +2,9 @@
 
 use std::ops::Range;
 
-use super::calib::{Calib, EmptyPara, TrailingSpaces};
+use super::calib::{Calib, EmptyPara, HangingPunct, TrailingSpaces};
 use super::metrics::line_box;
-use super::text::{self, ShapedPara};
+use super::text::{self, Hang, ShapedPara};
 use super::PaintOp;
 use crate::docx::ir::{self, Align, Grid, LineSpacing};
 use crate::fonts::FontBook;
@@ -104,6 +104,14 @@ fn mark_line(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> Option<Lin
     })
 }
 
+/// 行尾哪些东西可以悬挂在右边距外。
+fn hang(para: &ir::Paragraph, calib: &Calib) -> Hang {
+    Hang {
+        spaces: calib.trailing_spaces == TrailingSpaces::Hang,
+        punct: para.overflow_punct && calib.hanging_punct == HangingPunct::Punctuation,
+    }
+}
+
 fn break_lines(para: &ir::Paragraph, sp: &ShapedPara, env: &Env, book: &FontBook) -> Vec<Line> {
     let avail_first = env.width - para.indent_left - para.indent_right + para.first_line.min(0.0);
     let avail_rest = env.width - para.indent_left - para.indent_right;
@@ -118,8 +126,7 @@ fn break_lines(para: &ir::Paragraph, sp: &ShapedPara, env: &Env, book: &FontBook
         } else {
             avail_rest
         };
-        let hang = env.calib.trailing_spaces == TrailingSpaces::Hang;
-        let (end, mandatory) = sp.next_break(start, avail, hang);
+        let (end, mandatory) = sp.next_break(start, avail, hang(para, env.calib));
         let is_last = end >= sp.text.len();
         lines.push(line(
             para,
@@ -170,9 +177,8 @@ fn line(
         env.calib,
     );
 
-    // 行尾悬挂的空格不参与对齐（见 `TrailingSpaces::Hang`）。
-    let hang = env.calib.trailing_spaces == TrailingSpaces::Hang;
-    let measured = range.start..sp.measured_end(range.start, range.end, hang);
+    // 悬挂在右边距外的行尾空格、标点不参与对齐。
+    let measured = range.start..sp.measured_end(range.start, range.end, hang(para, env.calib));
     let line_width = sp.width(measured.start, measured.end);
     let content_left = env.left + para.indent_left;
     let avail = env.width - para.indent_left - para.indent_right;
@@ -201,13 +207,19 @@ fn line(
         if slack > 0.0 && !has_space {
             let glyphs: usize = active
                 .iter()
-                .map(|p| p.glyphs_between(range.start, range.end).len())
+                .map(|p| p.glyphs_between(measured.start, measured.end).len())
                 .sum();
             if glyphs > 1 {
                 char_spacing = slack / (glyphs - 1) as f32;
             }
         }
     }
+    // 行尾有悬挂的内容时，它紧挨着最后一个可见的字伸出边距：
+    // 从最后一个可见的字起不再加字距，否则悬挂的标点会离开前一个字。
+    let hanging_from = (measured.end < range.end)
+        .then(|| sp.text[..measured.end].char_indices().next_back())
+        .flatten()
+        .map(|(i, _)| i);
 
     let mut ops = Vec::new();
     for piece in active {
@@ -222,7 +234,19 @@ fn line(
         }
         let w = piece.width(range.start, range.end);
         let gr = piece.glyph_range(range.start, range.end);
-        let extra_after = vec![char_spacing; glyphs.len()];
+        let extra_after: Vec<f32> = match hanging_from {
+            None => vec![char_spacing; glyphs.len()],
+            Some(from) => glyphs
+                .iter()
+                .map(|g| {
+                    if piece.range.start + g.cluster as usize >= from {
+                        0.0
+                    } else {
+                        char_spacing
+                    }
+                })
+                .collect(),
+        };
         let extra: f32 = extra_after.iter().sum();
 
         ops.push(PaintOp::Text {

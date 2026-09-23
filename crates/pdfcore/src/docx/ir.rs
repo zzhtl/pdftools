@@ -126,6 +126,8 @@ pub struct Paragraph {
     pub snap_to_grid: bool,
     /// 中日韩文字与西文/数字之间是否自动加间距（`w:autoSpaceDE`/`DN`，缺省 true）。
     pub auto_space: bool,
+    /// 行尾标点可以伸出右边距（`w:overflowPunct`，缺省 true）。
+    pub overflow_punct: bool,
     /// 本段挂了自动编号，但编号文字没有生成。
     pub numbering_dropped: bool,
     pub text: String,
@@ -334,6 +336,7 @@ fn paragraph(
         // 两个开关只要有一个开着就加间距：它们分别管西文和数字，
         // 而我们不在字符级区分这两类，统一按「非中日韩」处理。
         auto_space: ppr.auto_space_latin.unwrap_or(true) || ppr.auto_space_digits.unwrap_or(true),
+        overflow_punct: ppr.overflow_punct.unwrap_or(true),
         numbering_dropped: ppr.numbering,
         text,
         spans,

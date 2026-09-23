@@ -17,6 +17,20 @@ pub struct Calib {
     pub page_bottom: PageBottom,
     pub fixed_baseline: FixedBaseline,
     pub trailing_spaces: TrailingSpaces,
+    pub hanging_punct: HangingPunct,
+}
+
+/// 行尾标点能不能伸出右边距（段落写了 `w:overflowPunct w:val="0"` 时一律不能）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HangingPunct {
+    Never,
+    /// 句读标点可以：它不算行宽，行里其余的字照常排满、对齐到边距，标点整个在边距外。
+    ///
+    /// 对照 LibreOffice 实测：36 个字正好排满一行时，后面的「，。、；：！？．」以及半角的
+    /// 「, . ; : ! ?」都留在本行（37 字），「」）”」这类后引号、后括号不行（它们不能出现在
+    /// 行首，只好带着前一个字换行，本行剩 35 字）；两端对齐时最后一个字的右缘在边距上，
+    /// 标点紧挨着它伸出去。
+    Punctuation,
 }
 
 /// 行尾的半角空格算不算行宽。
@@ -115,6 +129,7 @@ impl Calib {
             page_bottom: PageBottom::TextOnly,
             fixed_baseline: FixedBaseline::Measured,
             trailing_spaces: TrailingSpaces::Hang,
+            hanging_punct: HangingPunct::Punctuation,
         }
     }
 
@@ -127,6 +142,7 @@ impl Calib {
             page_bottom: PageBottom::WholeLine,
             fixed_baseline: FixedBaseline::Legacy,
             trailing_spaces: TrailingSpaces::Counted,
+            hanging_punct: HangingPunct::Never,
         }
     }
 }

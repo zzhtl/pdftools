@@ -596,6 +596,107 @@ pub fn page_bottom() -> Vec<Measure> {
     .collect()
 }
 
+/// P11：行尾标点能不能悬挂在右边距外。36 个 12pt 汉字正好排满一行（436.5pt 宽），
+/// 后面接一个标点：能悬挂的话首行 37 个字（标点在边距外），不能的话标点不许出现在行首，
+/// 要带着前一个字换行，首行只剩 35 个。量首行的字数。
+pub fn hanging_punctuation() -> Vec<Measure> {
+    let mut v = Vec::new();
+    for (jc, jc_label) in [("left", "左对齐"), ("both", "两端对齐")] {
+        for p in [
+            '，', '。', '、', '；', '：', '！', '？', '」', '）', '”', ',', '.',
+        ] {
+            let text = format!("{}{p}{}", "测".repeat(36), "测".repeat(10));
+            let body = format!(
+                r#"<w:p><w:pPr><w:jc w:val="{jc}"/></w:pPr><w:r><w:rPr>{FONTS}<w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+            );
+            v.push(Measure {
+                name: format!("P11 {jc_label} 行尾「{p}」 首行字数"),
+                doc: doc(body, false),
+                unit: "字",
+                value: Box::new(|p| Some(p.first()?.lines.first()?.text.chars().count() as f32)),
+            });
+        }
+    }
+    v
+}
+
+/// P11b：两端对齐、行尾标点悬挂时，首行最后一个字与那个标点各自的右缘离右边距多远
+/// （正数在边距以内）。以及半角标点里还有哪些能悬挂。
+pub fn hanging_positions() -> Vec<Measure> {
+    let mut v = Vec::new();
+    let text = format!("{}，{}", "测".repeat(36), "测".repeat(10));
+    let body = format!(
+        r#"<w:p><w:pPr><w:jc w:val="both"/></w:pPr><w:r><w:rPr>{FONTS}<w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+    );
+    // 右边距 1588 twips；首行的字形按 x 排好，逐个看右缘。
+    let edges = |p: &[PageText]| -> Option<(f32, f32)> {
+        let page = p.first()?;
+        let line = page.lines.first()?;
+        let margin = page.width - 1588.0 / 20.0;
+        let last = line.frags.last()?;
+        // 片段可能把多个字合在一起；用片段右缘近似最后一个字形的右缘。
+        let punct_right = last.x + last.width;
+        let n = last.text.chars().count() as f32;
+        let char_w = last.width / n.max(1.0);
+        Some((margin - (punct_right - char_w), margin - punct_right))
+    };
+    v.push(Measure {
+        name: "P11b 两端对齐 悬挂时首行最后一个汉字右缘".into(),
+        doc: doc(body.clone(), false),
+        unit: "pt",
+        value: Box::new(move |p| edges(p).map(|(a, _)| a)),
+    });
+    v.push(Measure {
+        name: "P11b 两端对齐 悬挂标点右缘".into(),
+        doc: doc(body, false),
+        unit: "pt",
+        value: Box::new(move |p| edges(p).map(|(_, b)| b)),
+    });
+    for p in [';', ':', '!', '?', '．', '·'] {
+        let text = format!("{}{p}{}", "测".repeat(36), "测".repeat(10));
+        let body = format!(
+            r#"<w:p><w:r><w:rPr>{FONTS}<w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+        );
+        v.push(Measure {
+            name: format!("P11c 行尾「{p}」 首行字数"),
+            doc: doc(body, false),
+            unit: "字",
+            value: Box::new(|p| Some(p.first()?.lines.first()?.text.chars().count() as f32)),
+        });
+    }
+    v
+}
+
+/// P12：标点挤压（`w:characterSpacingControl`）。一行里标点很多时，一行放得下几个字。
+pub fn punctuation_compression() -> Vec<Measure> {
+    let unit = "测试，内容。标点、";
+    let text = unit.repeat(20);
+    let body = format!(
+        r#"<w:p><w:r><w:rPr>{FONTS}<w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+    );
+    [
+        (
+            "compressPunctuation",
+            "<w:characterSpacingControl w:val=\"compressPunctuation\"/>",
+        ),
+        (
+            "doNotCompress",
+            "<w:characterSpacingControl w:val=\"doNotCompress\"/>",
+        ),
+        ("不写", ""),
+    ]
+    .into_iter()
+    .map(|(label, setting)| Measure {
+        name: format!("P12 标点挤压 {label} 首行字数"),
+        doc: DocxBuilder::new()
+            .body(&body)
+            .settings(&format!("{setting}{COMPAT_15}")),
+        unit: "字",
+        value: Box::new(|p| Some(p.first()?.lines.first()?.text.chars().count() as f32)),
+    })
+    .collect()
+}
+
 pub fn all() -> Vec<Measure> {
     let mut v = empty_paragraphs();
     v.extend(default_size());
@@ -611,5 +712,8 @@ pub fn all() -> Vec<Measure> {
     v.extend(first_baseline());
     v.extend(grid_origin());
     v.extend(page_bottom());
+    v.extend(hanging_punctuation());
+    v.extend(hanging_positions());
+    v.extend(punctuation_compression());
     v
 }

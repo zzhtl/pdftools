@@ -27,6 +27,18 @@ use crate::fonts::{
 /// 0.2em 是对着 LibreOffice 实测出来的（9pt 与 12pt 两个字号交叉验证）。
 const CJK_LATIN_GAP_EM: f32 = 0.2;
 
+/// 可以伸出右边距的句读标点。见 `HangingPunct::Punctuation`。
+const HANGING_PUNCT: &[char] = &[
+    '，', '。', '、', '；', '：', '！', '？', '．', ',', '.', ';', ':', '!', '?',
+];
+
+/// 行尾哪些东西可以悬挂在右边距外。
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct Hang {
+    pub spaces: bool,
+    pub punct: bool,
+}
+
 /// 一个「同字体、同字号、同 script」的可整形单元。
 pub(super) struct Piece {
     pub range: Range<usize>,
@@ -128,23 +140,30 @@ impl ShapedPara {
             .sum()
     }
 
-    /// 行 `[start, end)` 里算行宽的部分到哪里为止。`hang_spaces` 时行尾的半角空格
-    /// （连同其后的换行符）不算：它们悬挂在右边距外。
-    pub fn measured_end(&self, start: usize, end: usize, hang_spaces: bool) -> usize {
-        if !hang_spaces {
-            return end;
-        }
+    /// 行 `[start, end)` 里算行宽的部分到哪里为止：悬挂在右边距外的不算。
+    /// 先是行尾的半角空格（连同其后的换行符），再是紧挨着它们的一个句读标点。
+    pub fn measured_end(&self, start: usize, end: usize, hang: Hang) -> usize {
         let end = end.min(self.text.len());
-        start
-            + self.text[start..end]
-                .trim_end_matches(|c: char| c == ' ' || c.is_control())
-                .len()
+        let mut line = &self.text[start..end];
+        if hang.spaces {
+            line = line.trim_end_matches(|c: char| c == ' ' || c.is_control());
+        }
+        if hang.punct {
+            if let Some(c) = line
+                .chars()
+                .next_back()
+                .filter(|c| HANGING_PUNCT.contains(c))
+            {
+                line = &line[..line.len() - c.len_utf8()];
+            }
+        }
+        start + line.len()
     }
 
     /// 从 `start` 开始，找最后一个装得下的断行点。返回 (断点偏移, 是否是强制断行)。
-    pub fn next_break(&self, start: usize, avail: f32, hang_spaces: bool) -> (usize, bool) {
+    pub fn next_break(&self, start: usize, avail: f32, hang: Hang) -> (usize, bool) {
         let first = self.breaks.partition_point(|(i, _)| *i <= start);
-        let fits = |idx| self.width(start, self.measured_end(start, idx, hang_spaces)) <= avail;
+        let fits = |idx| self.width(start, self.measured_end(start, idx, hang)) <= avail;
         let mut best: Option<usize> = None;
         for &(idx, kind) in &self.breaks[first..] {
             if kind == BreakOpportunity::Mandatory {
@@ -380,14 +399,33 @@ mod tests {
         }
     }
 
+    const SPACES: Hang = Hang {
+        spaces: true,
+        punct: false,
+    };
+    const BOTH: Hang = Hang {
+        spaces: true,
+        punct: true,
+    };
+
     #[test]
     fn trailing_spaces_and_breaks_are_not_measured_when_they_hang() {
         let p = para("ab  cd  \n");
-        assert_eq!(p.measured_end(0, 4, true), 2);
-        assert_eq!(p.measured_end(0, 9, true), 6);
-        assert_eq!(p.measured_end(4, 9, true), 6);
-        assert_eq!(p.measured_end(0, 9, false), 9);
+        assert_eq!(p.measured_end(0, 4, SPACES), 2);
+        assert_eq!(p.measured_end(0, 9, SPACES), 6);
+        assert_eq!(p.measured_end(4, 9, SPACES), 6);
+        assert_eq!(p.measured_end(0, 9, Hang::default()), 9);
         // 全角空格不悬挂：它是一个正常的字。
-        assert_eq!(para("甲\u{3000}").measured_end(0, 6, true), 6);
+        assert_eq!(para("甲\u{3000}").measured_end(0, 6, BOTH), 6);
+    }
+
+    #[test]
+    fn one_sentence_punctuation_mark_hangs() {
+        assert_eq!(para("甲乙，").measured_end(0, 9, BOTH), 6);
+        assert_eq!(para("ab, ").measured_end(0, 4, BOTH), 2);
+        // 只悬挂一个；后引号、后括号不悬挂。
+        assert_eq!(para("甲。。").measured_end(0, 9, BOTH), 6);
+        assert_eq!(para("甲。”").measured_end(0, 9, BOTH), 9);
+        assert_eq!(para("甲，").measured_end(0, 6, SPACES), 6);
     }
 }

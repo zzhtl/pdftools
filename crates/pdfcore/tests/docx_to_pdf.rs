@@ -999,3 +999,31 @@ fn trailing_spaces_hang_past_the_right_margin() {
         "首行（含行尾空格）应当越过右边距一个空格宽，实际 {past}pt"
     );
 }
+
+/// 行尾的句读标点可以伸出右边距：36 个 12pt 汉字正好排满一行（436.5pt），后面的
+/// 逗号留在本行；后引号不行，它不能出现在行首，只好带着前一个字换行。
+#[test]
+fn sentence_punctuation_hangs_past_the_right_margin() {
+    if !require_cjk_font() {
+        return;
+    }
+    let first_line_len = |name: &str, punct: char, ppr: &str| {
+        let text = format!("{}{punct}{}", "测".repeat(36), "测".repeat(10));
+        let body = format!(
+            r#"<w:p><w:pPr>{ppr}</w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+        );
+        let pages = common::pdftext::extract(&convert(&make_docx(name, &body)).value.pdf);
+        pages[0].lines[0].text.chars().count()
+    };
+    assert_eq!(first_line_len("hang_comma.docx", '，', ""), 37);
+    assert_eq!(
+        first_line_len("hang_justify.docx", '。', r#"<w:jc w:val="both"/>"#),
+        37
+    );
+    assert_eq!(first_line_len("hang_quote.docx", '”', ""), 35);
+    // 段落禁止标点溢出时，逗号也只能带着前一个字换行。
+    assert_eq!(
+        first_line_len("hang_off.docx", '，', r#"<w:overflowPunct w:val="0"/>"#),
+        35
+    );
+}

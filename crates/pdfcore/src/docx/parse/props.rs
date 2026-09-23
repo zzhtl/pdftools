@@ -104,6 +104,7 @@ pub(super) fn parse_ppr(r: &mut Rd) -> Result<(PPr, Option<SectPr>)> {
                 "snapToGrid" => ppr.snap_to_grid = Some(on_off(&e)),
                 "autoSpaceDE" => ppr.auto_space_latin = Some(on_off(&e)),
                 "autoSpaceDN" => ppr.auto_space_digits = Some(on_off(&e)),
+                "overflowPunct" => ppr.overflow_punct = Some(on_off(&e)),
                 _ => {}
             },
             Event::End(e) if e.local_name().as_ref() == "pPr" => break,

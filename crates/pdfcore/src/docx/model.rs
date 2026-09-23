@@ -114,6 +114,8 @@ pub struct PPr {
     pub auto_space_latin: Option<bool>,
     /// `w:autoSpaceDN`：中日韩文字与数字之间自动加间距。缺省为 true。
     pub auto_space_digits: Option<bool>,
+    /// `w:overflowPunct`：行尾标点可以伸出右边距。缺省为 true。
+    pub overflow_punct: Option<bool>,
     /// 本段挂了自动编号（`w:numPr`）。
     pub numbering: bool,
     /// `w:pPr/w:rPr`：段落标记自身的格式。它参与 run 的层叠，优先级低于 run 上的直接格式。
@@ -150,6 +152,9 @@ impl PPr {
         }
         if other.auto_space_digits.is_some() {
             self.auto_space_digits = other.auto_space_digits;
+        }
+        if other.overflow_punct.is_some() {
+            self.overflow_punct = other.overflow_punct;
         }
         self.numbering |= other.numbering;
         self.mark_rpr.merge(&other.mark_rpr);

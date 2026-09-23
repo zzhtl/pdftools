@@ -15,7 +15,8 @@ mod para;
 mod text;
 
 pub use calib::{
-    Calib, EmptyPara, FixedBaseline, GridLayout, PageBottom, ParaSpacing, TrailingSpaces,
+    Calib, EmptyPara, FixedBaseline, GridLayout, HangingPunct, PageBottom, ParaSpacing,
+    TrailingSpaces,
 };
 
 use super::ir;
@@ -187,6 +188,7 @@ fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
         // 占位说明不参与网格吸附：它是我们插入的提示，不属于原文排版。
         snap_to_grid: false,
         auto_space: true,
+        overflow_punct: true,
         numbering_dropped: false,
         text,
         spans,
