@@ -1,6 +1,5 @@
 pub mod ir;
 pub mod layout;
-pub(crate) mod legacy;
 pub mod model;
 pub mod numbering;
 pub mod numfmt;

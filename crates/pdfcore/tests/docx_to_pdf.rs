@@ -33,9 +33,7 @@ fn text_of(pdf: &[u8]) -> String {
     raw.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-/// 转换，并顺带确认新引擎按旧规则排出来与重写前的引擎一模一样。
 fn convert(path: &std::path::Path) -> pdfcore::Report<docx_to_pdf::Outcome> {
-    common::assert_same_as_legacy(path);
     docx_to_pdf::run(path, &NoProgress).expect("转换失败")
 }
 
@@ -157,8 +155,7 @@ fn tables_and_nested_tables_are_drawn() {
         ("table_deep.docx", deep, &["最里层"][..]),
     ] {
         let path = make_docx(name, &body);
-        // 不比对重写前的引擎：它把内层表格的行也算作外层的行，占位说明写的行数不同。
-        let report = docx_to_pdf::run(&path, &NoProgress).expect("转换失败");
+        let report = convert(&path);
         assert!(
             !report.warnings.iter().any(|w| w.detail.contains("表格")),
             "{name}：{:?}",
@@ -546,8 +543,7 @@ fn notes_and_columns_are_reported() {
     let body = r#"<w:p><w:r><w:t>见注释</w:t></w:r><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p>
 <w:p><w:pPr><w:sectPr><w:cols w:num="2" w:space="425"/></w:sectPr></w:pPr><w:r><w:t>两栏的节</w:t></w:r></w:p>
 <w:p><w:r><w:t>最后一节</w:t></w:r></w:p>"#;
-    let report =
-        docx_to_pdf::run(&make_docx("notes_columns.docx", body), &NoProgress).expect("转换失败");
+    let report = convert(&make_docx("notes_columns.docx", body));
     let text = text_of(&report.value.pdf);
     assert!(
         text.contains("见注释") && text.contains("两栏的节"),
@@ -562,6 +558,23 @@ fn notes_and_columns_are_reported() {
         details.iter().any(|d| d.starts_with("1 节设置了分栏")),
         "{details:?}"
     );
+}
+
+/// `<w:p/>` 与 `<w:p></w:p>` 是同一个空段落，两种写法排得一样。
+#[test]
+fn self_closing_empty_paragraphs_are_kept() {
+    if !require_cjk_font() {
+        return;
+    }
+    let pages = |bare: &str, name: &str| {
+        let path = common::probes::empty_paragraphs(bare).build(name);
+        common::pdftext::extract(&convert(&path).value.pdf)
+    };
+    let (a, b) = (
+        pages("<w:p/>", "self_closing.docx"),
+        pages("<w:p></w:p>", "open_close.docx"),
+    );
+    common::metrics::same_layout(&a, &b, 1e-3).expect("两种写法排得不一样");
 }
 
 /// 形状测试用的零件：固定 20pt 行距的段落（行高与字体无关）、DrawingML 形状的浮动与
@@ -694,7 +707,7 @@ fn text_boxes_are_drawn() {
         .body(&body)
         .footer("default", &footer)
         .build("text_boxes.docx");
-    let report = docx_to_pdf::run(&path, &NoProgress).expect("转换失败");
+    let report = convert(&path);
     let pdf = &report.value.pdf;
     let pages = common::pdftext::extract(pdf);
     let find = |page: usize, t: &str| {
@@ -870,7 +883,7 @@ fn lines_and_vml_shapes_are_drawn() {
                 ),
             )));
     let path = builder.body(&body).build("shapes.docx");
-    let report = docx_to_pdf::run(&path, &NoProgress).expect("转换失败");
+    let report = convert(&path);
     let pdf = &report.value.pdf;
     let paths = &pdfpaths::extract(pdf)[0];
     let dump = pdfpaths::dump(std::slice::from_ref(paths));
@@ -1112,11 +1125,7 @@ fn nested_tables_and_ragged_rows_follow_word() {
             .settings(&settings)
             .body(&(outer.clone() + &p("表后")))
             .build(&format!("table_nested_{mode}.docx"));
-        // 不比对重写前的引擎：它把内层表格的行也算作外层的行。
-        let pdf = docx_to_pdf::run(&path, &NoProgress)
-            .expect("转换失败")
-            .value
-            .pdf;
+        let pdf = convert(&path).value.pdf;
         let x_of = |text: &str| {
             common::pdftext::extract(&pdf)[0]
                 .lines

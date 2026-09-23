@@ -30,7 +30,7 @@ pub fn run(path: &Path, sink: &dyn ProgressSink) -> Result<Report<Outcome>> {
     run_with(path, sink, &layout::Calib::current())
 }
 
-/// 按指定的排版规则转换。只给测试用：新旧引擎对照、校准前后对比。
+/// 按指定的排版规则转换。只给测试用：校准前后对比。
 #[doc(hidden)]
 pub fn run_with(
     path: &Path,
@@ -130,12 +130,6 @@ fn resolve_pictures(
             .filter(|r| !r.external)
             .map(|r| r.target.clone());
     });
-}
-
-/// 用重写前的排版引擎转换。只给测试做新旧对照用。
-#[doc(hidden)]
-pub fn run_legacy(path: &Path) -> Result<Report<Outcome>> {
-    crate::docx::legacy::run(path)
 }
 
 fn step(done: usize, label: &str) -> Progress {
