@@ -514,3 +514,109 @@ fn last_line_of_paragraph_uses_unsnapped_extra_leading() {
         "段内行距必须明显大于段落边界的推进量，否则说明没有区分末行"
     );
 }
+
+/// 自动编号被丢弃时必须汇总报告，而且只报一条。
+///
+/// 静默丢掉编号，用户拿到的就是一份没有序号的诉讼请求 —— 这正是「诚实失败」
+/// 要防的情形。但也不能逐段报：50 项的列表报 50 条警告等于没报。
+#[test]
+fn dropped_numbering_is_reported_once() {
+    if !require_cjk_font() {
+        return;
+    }
+    let num = r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#;
+    let body: String = (0..5)
+        .map(|i| {
+            format!(
+                r#"<w:p><w:pPr>{num}</w:pPr><w:r><w:rPr><w:rFonts w:eastAsia="宋体"/>
+<w:sz w:val="24"/></w:rPr><w:t>第{i}项条款</w:t></w:r></w:p>"#
+            )
+        })
+        .collect();
+    let report = convert(&make_docx_with_sect("numbering.docx", &body, ""));
+
+    let hits: Vec<_> = report
+        .warnings
+        .iter()
+        .filter(|w| w.detail.contains("自动编号"))
+        .collect();
+    assert_eq!(hits.len(), 1, "编号警告应当只汇总成一条，实际 {hits:?}");
+    assert!(
+        hits[0].detail.contains('5'),
+        "警告里要说清有几段受影响：{}",
+        hits[0].detail
+    );
+
+    // 正文本身不能丢。
+    let text = text_of(&report.value.pdf);
+    assert!(text.contains("第0项条款") && text.contains("第4项条款"));
+}
+
+/// 页眉页脚不渲染，但要报出来。
+#[test]
+fn header_and_footer_are_reported() {
+    if !require_cjk_font() {
+        return;
+    }
+    let path = tmp().join("headref.docx");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let opts: zip::write::FileOptions<'_, ()> =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let doc = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>
+<w:p><w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>正文</w:t></w:r></w:p>
+<w:sectPr><w:headerReference w:type="default" r:id="rId9"/>
+<w:pgSz w:w="11906" w:h="16838"/>
+<w:pgMar w:top="1440" w:right="1588" w:bottom="1440" w:left="1588"/></w:sectPr>
+</w:body></w:document>"#;
+    for (n, c) in [
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", RELS),
+        ("word/document.xml", doc),
+    ] {
+        zip.start_file(n, opts).unwrap();
+        zip.write_all(c.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap();
+
+    let report = convert(&path);
+    assert!(
+        report.warnings.iter().any(|w| w.detail.contains("页眉")),
+        "引用了页眉却没有报出来：{:?}",
+        report.warnings
+    );
+}
+
+/// 中西文边界上已经有空格时，不再叠加自动间距。
+///
+/// 叠加会让行变宽并提前折行 —— 实测曾导致「正文第 1 段。」重复 6 次的段落
+/// 从 1 行变成 2 行，整篇页数多出 50%。
+#[test]
+fn no_extra_gap_when_a_real_space_already_separates() {
+    if !require_cjk_font() {
+        return;
+    }
+    let one_line = |name: &str, txt: &str| {
+        let body = format!(
+            r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/>
+<w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">{txt}</w:t></w:r></w:p>"#
+        );
+        let pdf = convert(&make_docx_with_sect(name, &body, "")).value.pdf;
+        // 一行内所有片段的定位数 = 片段数；行数看不同的 y 值有几个
+        let ys: std::collections::BTreeSet<i32> = text_origins(&pdf)
+            .iter()
+            .map(|(_, y)| (y * 10.0) as i32)
+            .collect();
+        ys.len()
+    };
+
+    // 每段 5 个汉字 + 1 个数字 + 2 个空格，重复 6 次。
+    // 不叠加间距时刚好一行装得下；叠加就会折成两行。
+    let lines = one_line("spaced.docx", &"正文第 1 段。".repeat(6));
+    assert_eq!(
+        lines, 1,
+        "带空格的中西文混排被提前折行了 —— 说明在已有空格的边界上又加了一次自动间距"
+    );
+}

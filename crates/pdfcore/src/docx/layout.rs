@@ -356,9 +356,20 @@ fn build_pieces(para: &ir::Paragraph, book: &mut FontBook) -> (String, Vec<Piece
                 .collect();
             // 与紧邻的上一片文种不同时，插入中西文间距。
             // 间距按两侧较大的字号算，跟 Word 的观感一致。
+            //
+            // 但边界上已经有空白时**不加** —— 空格本身已经把两边分开了，再叠一层
+            // 会让行变宽并提前折行。实测参照：「正文第1段。」每个边界加 2.4pt，
+            // 而「正文第 1 段。」只有空格宽度、没有额外间距。
+            let boundary_spaced = pieces.last().is_some_and(|prev| {
+                text[prev.range.clone()].ends_with(char::is_whitespace)
+                    || text[abs.clone()].starts_with(char::is_whitespace)
+            });
             let gap_before = match pieces.last() {
                 Some(prev)
-                    if para.auto_space && prev.class != class && prev.range.end == abs.start =>
+                    if para.auto_space
+                        && prev.class != class
+                        && prev.range.end == abs.start
+                        && !boundary_spaced =>
                 {
                     CJK_LATIN_GAP_EM * prev.size_pt.max(run.size_pt)
                 }
@@ -399,11 +410,34 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook) -> LaidOut {
         warnings: Vec::new(),
     };
 
+    let mut numbered = 0usize;
     for block in &doc.blocks {
         match block {
-            ir::Block::Para(p) => ctx.place_paragraph(p, book),
+            ir::Block::Para(p) => {
+                if p.numbering_dropped {
+                    numbered += 1;
+                }
+                ctx.place_paragraph(p, book)
+            }
             ir::Block::Unsupported(u) => ctx.place_placeholder(u, book),
         }
+    }
+
+    // 编号与页眉页脚都按文档级汇总，不逐段报 —— 一个 50 项的列表
+    // 报 50 条警告，等于没报。
+    if numbered > 0 {
+        ctx.warnings.push(Warning::new(
+            WarningKind::UnsupportedElement,
+            format!(
+"{numbered} 个段落使用了 Word 的自动编号，本版本不生成编号文字（正文已保留）。需要编号请在 Word 里改成手动输入的序号。"
+            ),
+        ));
+    }
+    if doc.has_header_footer {
+        ctx.warnings.push(Warning::new(
+            WarningKind::UnsupportedElement,
+            "文档设置了页眉或页脚，本版本不渲染".to_string(),
+        ));
     }
 
     ctx.warnings.extend(book.take_warnings());
@@ -547,12 +581,16 @@ impl Ctx<'_> {
             self.new_page();
         }
 
-        // 多出来的行距按比例分配，基线才不会贴着行顶或行底。
-        let baseline_from_top = if natural > 0.0 {
-            ascent * (line_height / natural)
-        } else {
-            ascent
-        };
+        // 基线在行框里的位置。
+        //
+        // 只由**吸附**带来的那部分额外空间加在基线上方（文字坐在网格线上），
+        // 而**倍数**带来的额外行距加在下方 —— 所以这里用 natural 而不是
+        // line_height：实测参照的首基线位置在 1.0 倍和 1.3 倍行距下完全相同
+        // （都是距正文顶 26.55pt），说明倍数不影响基线在行框内的位置。
+        //
+        // 原先按 line_height/natural 等比缩放 ascent，结果基线比参照高 8.6pt，
+        // 整页文字随之上移，看起来上边距小了一截。
+        let baseline_from_top = ascent + (natural - unsnapped).max(0.0);
         let y = self.page.h_pt - self.page.margin_top - self.used - baseline_from_top;
 
         let line_width = width_between(pieces, range.start, range.end);
@@ -693,6 +731,7 @@ fn placeholder_para(text: &str, is_note: bool) -> ir::Paragraph {
         // 占位说明不参与网格吸附：它是我们插入的提示，不属于原文排版。
         snap_to_grid: false,
         auto_space: true,
+        numbering_dropped: false,
         runs: vec![ir::Run {
             text: text.to_string(),
             size_pt: 9.0,

@@ -114,11 +114,12 @@ pub fn split_by_script(text: &str) -> Vec<(std::ops::Range<usize>, ScriptClass)>
         if is_cjk_punctuation(c) {
             return Some(ScriptClass::EastAsian);
         }
-        // ASCII 可见字符（字母、数字、半角标点）一律走西文字体。
+        // ASCII 可见字符（字母、数字、半角标点）走西文字体 —— Word 的
+        // `w:rFonts w:ascii` 管的就是这一段。
         //
-        // 这条是 Word 的规则：`w:rFonts w:ascii` 管的就是 0x00-0x7F 这一段。
-        // 之前把数字当 Common 让它继承前一个汉字，导致「第9条」整体被当成
-        // 中文，既用错了字体，也让中西文之间的自动间距无从插入。
+        // 半角空格**不在其列**：实测参照里，`第 ` 后面那个空格用的是中文字体的
+        // 宽度，`1 ` 后面那个用的是西文字体的宽度，也就是空格跟随**前一个字符**
+        // 的文种。强行一律判给西文，行宽会算错并提前折行。
         if c.is_ascii_graphic() {
             return Some(ScriptClass::Latin);
         }

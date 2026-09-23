@@ -114,7 +114,13 @@ pub fn run(
     }
 
     if doc.page_count() == 0 {
-        return Err(CoreError::Image("所有图片都处理失败了".into()));
+        // 把第一条具体原因带上。只说「都失败了」等于让用户自己猜是格式不对、
+        // 文件损坏还是权限问题。
+        let reason = warnings
+            .first()
+            .map(|w| format!("：{}", w.detail))
+            .unwrap_or_default();
+        return Err(CoreError::Image(format!("所有图片都处理失败了{reason}")));
     }
 
     // 只有真正的拍摄时间才有资格填 /CreationDate。文件系统时间一复制就被刷新，

@@ -86,7 +86,11 @@ pub fn run(
     }
 
     if outcome.items.is_empty() {
-        return Err(CoreError::Image("所有图片都处理失败了".into()));
+        let reason = warnings
+            .first()
+            .map(|w| format!("：{}", w.detail))
+            .unwrap_or_default();
+        return Err(CoreError::Image(format!("所有图片都处理失败了{reason}")));
     }
     Ok(Report::with(outcome, warnings))
 }

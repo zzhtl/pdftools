@@ -106,6 +106,9 @@ pub struct PPr {
     pub auto_space_latin: Option<bool>,
     /// `w:autoSpaceDN`：中日韩文字与数字之间自动加间距。缺省为 true。
     pub auto_space_digits: Option<bool>,
+    /// 本段挂了自动编号（`w:numPr`）。本版本不生成编号文字，正文照常排版，
+    /// 但必须汇总报告出来 —— 静默丢掉编号，用户拿到的就是一份没有序号的诉讼请求。
+    pub numbering: bool,
     /// `w:pPr/w:rPr`：段落标记自身的格式。它参与 run 的层叠，优先级低于 run 上的直接格式。
     pub mark_rpr: RPr,
 }
@@ -141,6 +144,7 @@ impl PPr {
         if other.auto_space_digits.is_some() {
             self.auto_space_digits = other.auto_space_digits;
         }
+        self.numbering |= other.numbering;
         self.mark_rpr.merge(&other.mark_rpr);
     }
 }
@@ -226,6 +230,8 @@ pub struct SectPr {
     pub margin_left: i32,
     pub margin_right: i32,
     pub doc_grid: Option<DocGrid>,
+    /// 本节引用了页眉或页脚。本版本不渲染它们，但必须让用户知道。
+    pub has_header_footer: bool,
 }
 
 impl Default for SectPr {
@@ -239,6 +245,7 @@ impl Default for SectPr {
             margin_left: 1800,
             margin_right: 1800,
             doc_grid: None,
+            has_header_footer: false,
         }
     }
 }

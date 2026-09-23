@@ -279,6 +279,8 @@ fn parse_ppr(r: &mut Rd) -> Result<PPr> {
             }
             Event::Start(e) | Event::Empty(e) => match e.local_name().as_ref() {
                 "pStyle" => ppr.style_id = attr(&e, "val"),
+                // 只标记，不展开 numbering.xml —— 本版本不生成编号文字。
+                "numPr" => ppr.numbering = true,
                 "jc" => {
                     ppr.align = match attr(&e, "val").as_deref() {
                         Some("center") => Some(Align::Center),
@@ -337,6 +339,7 @@ fn parse_sect_pr(r: &mut Rd) -> Result<SectPr> {
                         s.page_h = h;
                     }
                 }
+                "headerReference" | "footerReference" => s.has_header_footer = true,
                 "docGrid" => {
                     if let Some(pitch) = attr_i32(&e, "linePitch") {
                         // 只有这三种 type 才吸附。实测 default / 不写 type 都不吸附。

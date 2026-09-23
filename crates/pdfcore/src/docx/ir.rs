@@ -96,6 +96,8 @@ pub struct Paragraph {
     pub snap_to_grid: bool,
     /// 中日韩文字与西文/数字之间是否自动加间距（`w:autoSpaceDE`/`DN`，缺省 true）。
     pub auto_space: bool,
+    /// 本段挂了自动编号，但编号文字没有生成。
+    pub numbering_dropped: bool,
     pub runs: Vec<Run>,
 }
 
@@ -115,6 +117,8 @@ pub enum Block {
 #[derive(Debug, Clone)]
 pub struct Document {
     pub page: PageGeom,
+    /// 文档引用了页眉或页脚，但本版本不渲染。
+    pub has_header_footer: bool,
     /// 文档的行网格。None 表示没有网格或网格类型不吸附。
     pub grid: Option<Grid>,
     pub blocks: Vec<Block>,
@@ -177,7 +181,12 @@ pub fn build(raw: &RawDocument) -> Document {
             pitch_pt: tw(g.line_pitch),
         });
 
-    Document { page, grid, blocks }
+    Document {
+        page,
+        has_header_footer: s.has_header_footer,
+        grid,
+        blocks,
+    }
 }
 
 /// Word 的默认制表位是 0.74cm。本版本**不实现真正的制表位**，
@@ -252,6 +261,7 @@ fn build_paragraph(ppr: &PPr, runs: Vec<Run>, char_size_pt: f32) -> Paragraph {
         // 两个开关只要有一个开着就加间距：它们分别管西文和数字，
         // 而我们不在字符级区分这两类，统一按「非中日韩」处理。
         auto_space: ppr.auto_space_latin.unwrap_or(true) || ppr.auto_space_digits.unwrap_or(true),
+        numbering_dropped: ppr.numbering,
         runs,
     }
 }
