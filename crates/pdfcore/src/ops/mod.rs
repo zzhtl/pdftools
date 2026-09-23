@@ -8,3 +8,5 @@ pub mod docx_to_pdf;
 pub mod images_compress;
 pub mod images_to_pdf;
 pub mod pdf_compress;
+pub mod pdf_pages;
+pub mod pdf_to_images;

@@ -191,6 +191,18 @@ impl SystemFonts {
         Some(Found { face, family })
     }
 
+    /// 按 PostScript 名找。PDF 里记的多半是它（`SimSun`、`MicrosoftYaHei`、`ArialMT`），
+    /// 与族名（`Microsoft YaHei`）写法不一样。
+    pub fn by_postscript_name(&self, name: &str) -> Option<Found> {
+        let info = self.db.faces().find(|f| f.post_script_name == name)?;
+        let face = self.face(info.id)?;
+        let family = info
+            .families
+            .first()
+            .map_or_else(|| name.to_string(), |(n, _)| n.clone());
+        Some(Found { face, family })
+    }
+
     fn face(&self, id: fontdb::ID) -> Option<Arc<FontFace>> {
         let mut faces = self.faces.lock().unwrap_or_else(|e| e.into_inner());
         faces

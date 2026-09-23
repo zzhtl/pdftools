@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use crate::bail_if_cancelled;
 use crate::error::{CoreError, Report, Result, Warning, WarningKind};
 use crate::imaging::{quality_of, Tier};
-use crate::pdf::read::placement;
+use crate::pdf::read::{load_for_rewrite, placement};
 use crate::progress::{Progress, ProgressSink};
 
 pub struct CompressOutcome {
@@ -138,19 +138,7 @@ pub fn run(
     sink: &dyn ProgressSink,
 ) -> Result<Report<CompressOutcome>> {
     let original_bytes = data.len();
-    let mut doc =
-        Document::load_mem(data).map_err(|e| CoreError::Pdf(format!("无法解析该 PDF：{e}")))?;
-
-    if doc.was_encrypted() || doc.is_encrypted() {
-        return Err(CoreError::Unsupported(
-            "该 PDF 已加密。请先在其他工具里去掉密码保护再来压缩。".into(),
-        ));
-    }
-    if has_signature(&doc) {
-        return Err(CoreError::Unsupported(
-            "该 PDF 带有数字签名。任何改写都会让签名失效，因此不做处理。".into(),
-        ));
-    }
+    let mut doc = load_for_rewrite(data)?;
 
     let mut warnings = Vec::new();
     let quality = quality_of(tier, grayscale);
@@ -287,16 +275,6 @@ fn touch_mod_date(doc: &mut Document) {
     if let Ok(Object::Dictionary(d)) = doc.get_object_mut(info_ref) {
         d.set("ModDate", Object::string_literal(stamp));
     }
-}
-
-fn has_signature(doc: &Document) -> bool {
-    doc.objects.values().any(|o| {
-        o.as_dict()
-            .ok()
-            .and_then(|d| d.get(b"Type").ok())
-            .and_then(|t| t.as_name().ok())
-            == Some(b"Sig".as_ref())
-    })
 }
 
 /// 扫描找到的图片（对象号）逐张读出元数据。

@@ -23,6 +23,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 pdf-writer = "0.15.0"
 lopdf = "0.45.0"
 flate2 = "1"
+# PDF 渲染（转图片、页面缩略图）。纯 Rust；默认特性自带 14 种标准字体与预定义 CMap，
+# 没嵌字体、用预定义编码的 PDF 也能画。
+hayro = "0.7.1"
 
 fontdb = "0.24.0"
 ttf-parser = "0.25.1"
@@ -41,4 +44,3 @@ thiserror = "2"
 lopdf = "0.45.0"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
-hayro = "0.7.1"
