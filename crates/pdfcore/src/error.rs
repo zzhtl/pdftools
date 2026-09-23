@@ -55,7 +55,7 @@ pub struct Warning {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WarningKind {
-    /// docx 里遇到本版本不渲染的元素
+    /// 输入里有本版本没能完整还原的内容：docx 里不渲染的元素、多页 TIFF 的其余页……
     UnsupportedElement,
     /// 请求的字体不可用，换成了别的
     FontSubstituted,

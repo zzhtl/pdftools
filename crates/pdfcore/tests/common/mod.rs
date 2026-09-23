@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 pub mod docx;
+pub mod images;
 pub mod lo;
 pub mod metrics;
 pub mod pdftext;

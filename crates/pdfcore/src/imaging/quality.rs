@@ -192,8 +192,12 @@ pub fn encode_jpeg(img: &DynamicImage, quality: u8, grayscale: bool) -> Result<V
 
     let mut buf = Vec::new();
     let mut enc = jpeg_encoder::Encoder::new(&mut buf, quality);
-    // 优化 Huffman 表基本白送 3-5% 体积。
-    enc.set_optimized_huffman_tables(true);
+    // 不用优化 Huffman 表，尽管它能省不少体积（12 张实拍照片：q58 省 14%，q80 省 7%）：
+    // zune-jpeg 0.5.15（image crate 与 hayro 用的解码器）会把 jpeg-encoder 优化过的表
+    // 与 4:2:0 采样组合编出的部分 JPEG 解成横条纹，libjpeg 解同一份文件却完全正常。
+    // 后果是我们压过的 PDF 再压一次就会被悄悄毁掉。zune-jpeg 0.5.16 已修复（尚未正式发布），
+    // 等 `cargo update` 能拿到它、`own_jpeg_output_decodes_correctly` 在开启时也能通过，再打开。
+    enc.set_optimized_huffman_tables(false);
     // 不用 progressive：它对 PDF 里的 DCTDecode 流没有好处（PDF 不做渐进显示），
     // 却可能让个别老阅读器出问题。
     enc.set_progressive(false);

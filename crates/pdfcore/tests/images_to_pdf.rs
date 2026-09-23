@@ -4,6 +4,8 @@
 //! 这是个二值判定，不给「看起来还行」留模糊空间 —— 「不失真」这个承诺
 //! 要么成立要么不成立。
 
+mod common;
+
 use std::path::PathBuf;
 
 use pdfcore::imaging::Tier;
@@ -182,11 +184,20 @@ fn oversized_images_are_capped_at_the_dpi_limit() {
 /// 这正是曾经把编码选择判错的那类图 —— 用「不同颜色占比」做判据时，
 /// 真实的白墙照片只有约 0.8% 的不同色占比，会被当成图形/截图，
 /// 于是以原始像素塞进 PDF，体积暴涨十几倍。
+///
+/// 带 ±2 的轻微噪点：真实照片都有传感器噪点。数学上完美的无噪渐变
+/// 用无损存储反而更小（实测 Flate 59 KB 对 JPEG 84 KB），那时选无损是对的，
+/// 拿它当「照片」来断言必须走 JPEG 就测错了对象。
 fn smooth_wall(w: u32, h: u32) -> image::RgbImage {
     image::RgbImage::from_fn(w, h, |x, y| {
         let base = 226u8;
         let shade = ((x as f32 / w as f32) * 14.0 + (y as f32 / h as f32) * 8.0) as u8;
-        image::Rgb([base - shade / 2, base - shade / 2, base - shade])
+        let noise = ((x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)) >> 13) as u8 % 5;
+        image::Rgb([
+            base - shade / 2 + noise - 2,
+            base - shade / 2 + noise - 2,
+            base - shade + noise - 2,
+        ])
     })
 }
 
@@ -260,4 +271,167 @@ fn screenshot_is_stored_losslessly() {
         filter, "FlateDecode",
         "截图被存成了 {filter}，应当走无损路径以避免文字边缘的 JPEG 振铃"
     );
+}
+
+/// 我们自己编码出来的 JPEG，必须能被我们自己的解码器正确解回来。
+///
+/// 这不是废话：zune-jpeg 0.5.15（image crate 用的解码器）会把 jpeg-encoder
+/// 「优化 Huffman 表 + 4:2:0」编出的部分 JPEG 解成横条纹，而 libjpeg 解同一份
+/// 文件完全正常。结果是：用户把我们压过的 PDF 再压一次（换档位或转灰度），
+/// 图片会被悄悄毁掉；hayro 渲染我们的输出也会花屏。
+#[test]
+fn own_jpeg_output_decodes_correctly() {
+    let (w, h) = (1190u32, 1488u32);
+    let src = photo(w, h);
+    let mean = |v: &[u8]| v.iter().map(|x| *x as f64).sum::<f64>() / v.len() as f64;
+    let expected = mean(src.as_raw());
+    for q in [58u8, 72, 85, 92] {
+        let jpeg = pdfcore::imaging::encode_jpeg_image(
+            &image::DynamicImage::ImageRgb8(src.clone()),
+            q,
+            false,
+        )
+        .unwrap();
+        let back = image::load_from_memory(&jpeg).unwrap().to_rgb8();
+        let got = mean(back.as_raw());
+        assert!(
+            (got - expected).abs() < 3.0,
+            "质量 {q}：自己编码的 JPEG 解回来平均值 {got:.1}，原图 {expected:.1} —— 解码结果已损坏"
+        );
+    }
+}
+
+/// 所有档位都不能把 JPEG 越压越大。
+///
+/// 「平衡」「极致」档不走原图直通，曾经对不需要降采样的 JPEG 也照样解码再重编码 ——
+/// 源图本身压缩率就高时，结果又大又多损失一代画质。
+#[test]
+fn lossy_tiers_never_grow_a_jpeg() {
+    let dir = tmp();
+    // 800×600 放在 A4 上约 68 DPI，任何档位都不需要降采样；
+    // q10 的源图块效应很重，更高质量的重编码会把块边缘一并保留下来，必然更大。
+    let src = write_jpeg_q(&dir, "small_q10.jpg", 800, 600, 10);
+    let src_len = std::fs::metadata(&src).unwrap().len() as usize;
+    for tier in [Tier::HighQuality, Tier::Balanced, Tier::Extreme] {
+        let report = images_to_pdf::run(
+            std::slice::from_ref(&src),
+            tier,
+            &Default::default(),
+            &NoProgress,
+        )
+        .unwrap();
+        let (filter, len) = single_image_stream(&report.value.pdf);
+        assert!(
+            len <= src_len,
+            "{tier:?}：PDF 里的图 {len} 字节（{filter}），比源文件 {src_len} 字节还大"
+        );
+    }
+}
+
+fn single_image_stream(pdf: &[u8]) -> (String, usize) {
+    let doc = lopdf::Document::load_mem(pdf).unwrap();
+    doc.objects
+        .values()
+        .find_map(|o| match o {
+            lopdf::Object::Stream(s)
+                if s.dict.get(b"Subtype").and_then(lopdf::Object::as_name).ok()
+                    == Some(b"Image".as_ref()) =>
+            {
+                let f = s
+                    .dict
+                    .get(b"Filter")
+                    .and_then(lopdf::Object::as_name)
+                    .map(|n| String::from_utf8_lossy(n).into_owned())
+                    .unwrap_or_default();
+                Some((f, s.content.len()))
+            }
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// PDF 的 DCTDecode 只支持 8 位的基线/渐进式 JPEG。12 位、算术编码、无损 JPEG
+/// 原样直通进去，阅读器打开就是空白或报错 —— 这种文件宁可明说处理不了。
+#[test]
+fn only_8bit_baseline_or_progressive_jpeg_passes_through() {
+    let dir = tmp();
+    let good = write_jpeg_q(&dir, "sof_good.jpg", 640, 480, 90);
+    let bytes = std::fs::read(&good).unwrap();
+    let sof = bytes
+        .windows(2)
+        .position(|w| w == [0xFF, 0xC0])
+        .expect("应当是基线 JPEG");
+
+    let mut twelve_bit = bytes.clone();
+    twelve_bit[sof + 4] = 12; // SOF 里的样本精度
+    let mut arithmetic = bytes.clone();
+    arithmetic[sof + 1] = 0xC9; // SOF9：算术编码
+    let p12 = dir.join("sof_12bit.jpg");
+    let parith = dir.join("sof_arith.jpg");
+    std::fs::write(&p12, &twelve_bit).unwrap();
+    std::fs::write(&parith, &arithmetic).unwrap();
+
+    let report = images_to_pdf::run(
+        &[good.clone(), p12.clone(), parith.clone()],
+        Tier::Lossless,
+        &Default::default(),
+        &NoProgress,
+    )
+    .unwrap();
+    for (path, fidelity) in &report.value.fidelity {
+        if path != &good {
+            assert_ne!(
+                *fidelity,
+                pdfcore::imaging::Fidelity::Passthrough,
+                "{} 不是 8 位基线/渐进式 JPEG，不能原样搬进 PDF",
+                path.display()
+            );
+        }
+    }
+}
+
+/// 多页 TIFF 只转第一页，这必须说出来 —— 静默丢页正是本项目最忌讳的事。
+#[test]
+fn multi_page_tiff_is_reported() {
+    let dir = tmp();
+    let path = dir.join("three_pages.tif");
+    std::fs::write(&path, common::images::tiff_pages(3)).unwrap();
+    let report = images_to_pdf::run(
+        std::slice::from_ref(&path),
+        Tier::Lossless,
+        &Default::default(),
+        &NoProgress,
+    )
+    .unwrap();
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.detail.contains("3 页") && w.detail.contains("第一页")),
+        "多页 TIFF 丢了后面的页却没有提示：{:?}",
+        report.warnings
+    );
+}
+
+/// 能拖进来的扩展名，必须是真的解得开的格式。avif / exr / hdr / dds 的解码器
+/// 没有编进来：放进列表只会让用户在转换时才看到「解码失败」。
+#[test]
+fn accepted_extensions_match_compiled_decoders() {
+    use pdfcore::imaging::probe::looks_like_image;
+    use std::path::Path;
+    for ext in [
+        "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "ico", "tga", "pnm", "ppm",
+        "pgm", "pbm", "qoi", "JPG",
+    ] {
+        assert!(
+            looks_like_image(Path::new(&format!("a.{ext}"))),
+            ".{ext} 应当被接受"
+        );
+    }
+    for ext in ["avif", "exr", "hdr", "dds", "ff", "heic", "pdf", "txt"] {
+        assert!(
+            !looks_like_image(Path::new(&format!("a.{ext}"))),
+            ".{ext} 的解码器没有编进来，不该被当成图片接受"
+        );
+    }
 }

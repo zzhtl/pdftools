@@ -5,7 +5,10 @@
 pub mod probe;
 mod quality;
 
-pub use quality::{encode_jpeg as encode_jpeg_image, resize as resize_image, ImageQuality, Tier};
+pub use quality::{
+    encode_jpeg as encode_jpeg_image, estimate_flate_len, resize as resize_image, ImageQuality,
+    Tier, LOSSLESS_TOLERANCE,
+};
 
 /// PDF 压缩场景下的质量参数。
 ///
@@ -61,6 +64,8 @@ pub struct PreparedImage {
     /// 页面尺寸（点）。已按下文的规则定好，且已考虑方向带来的宽高互换。
     pub page_w_pt: f32,
     pub page_h_pt: f32,
+    /// 多页 TIFF 被丢掉的页数。解码器只读第一页，调用方必须把这件事告诉用户。
+    pub dropped_pages: usize,
     /// 仍需由 PDF 变换矩阵施加的 EXIF 方向。
     ///
     /// 走直通路径时像素没有被旋转过，方向靠内容流里的矩阵来纠正 ——
@@ -228,6 +233,13 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
 
     let bytes = std::fs::read(path).map_err(|e| CoreError::io(path, e))?;
     let container = probe::sniff(&bytes);
+    let dropped_pages = if container == probe::Container::Tiff {
+        probe::tiff_page_count(&bytes)
+            .unwrap_or(1)
+            .saturating_sub(1)
+    } else {
+        0
+    };
 
     // 先靠元数据决定「要不要解码」。对上百个文件逐个全量解码再决定，是本末倒置。
     let exif_raw = read_exif(&bytes);
@@ -241,13 +253,16 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
     // 如果为了摆正而重新编码，「绝不失真」这个承诺对它们就失效了。
     //
     // CMYK（4 分量）仍然不行：PDF 里要写 /DeviceCMYK 并处理 Adobe APP14 的反相约定，
-    // 判错了输出是偏色而不是报错，不赌。
-    let passthrough: Option<(u32, u32, bool)> = (container == probe::Container::Jpeg
-        && quality.allow_passthrough)
+    // 判错了输出是偏色而不是报错，不赌。12 位、算术编码等 PDF 不支持的 JPEG 同样不行。
+    //
+    // `jpeg_src` 与档位无关：即使这一档不主动直通，「重编码后不比原图小就退回原图」
+    // 这条护栏也要用到它。
+    let jpeg_src: Option<(u32, u32, bool)> = (container == probe::Container::Jpeg)
         .then(|| probe::jpeg_info(&bytes))
         .flatten()
-        .filter(|i| i.components == 1 || i.components == 3)
+        .filter(|i| i.embeddable_in_pdf() && (i.components == 1 || i.components == 3))
         .map(|i| (i.width, i.height, i.components == 1));
+    let passthrough = jpeg_src.filter(|_| quality.allow_passthrough);
 
     // 页面按**显示后**的宽高算：旋转 90/270 时宽高互换。
     let page_of = |w: u32, h: u32| {
@@ -276,6 +291,7 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
                 fidelity: Fidelity::Passthrough,
                 page_w_pt: page_w,
                 page_h_pt: page_h,
+                dropped_pages,
                 orientation,
             });
         }
@@ -312,28 +328,6 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
         // 截图和线稿的 flate 体积远小于 JPEG，会自然选到无损；
         // 照片的无损体积是 JPEG 的十几倍，会自然选到 JPEG。不需要任何魔法阈值。
         let jpeg = quality::encode_jpeg(&img, quality.jpeg_quality, quality.grayscale)?;
-
-        // 护栏：降采样 + 重编码之后反而比原文件更大，就退回原图直通。
-        //
-        // 这不是假想情况：源文件本就是高压缩率的 JPEG，我们把它解开、缩小、
-        // 再以更高质量编回去，像素少了但字节多了。此时「压缩」既没省空间，
-        // 还白白损失一代画质。原图直通在两个维度上都更优。
-        if let Some((pw, ph, pgray)) = passthrough {
-            if jpeg.len() >= bytes.len() {
-                let (page_w, page_h) = page_of(pw, ph);
-                return Ok(PreparedImage {
-                    color: ColorData::Jpeg { bytes, gray: pgray },
-                    alpha: None,
-                    width: pw,
-                    height: ph,
-                    fidelity: Fidelity::Passthrough,
-                    page_w_pt: page_w,
-                    page_h_pt: page_h,
-                    orientation,
-                });
-            }
-        }
-
         let raw = raw_color(&img, quality.grayscale);
         let ColorData::Raw {
             bytes: raw_bytes,
@@ -344,8 +338,32 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
         };
         let components = if *gray { 1 } else { 3 };
         let flate_est = quality::estimate_flate_len(raw_bytes, w as usize * components);
+        let use_flate = (flate_est as f32) <= jpeg.len() as f32 * quality::LOSSLESS_TOLERANCE;
 
-        if (flate_est as f32) <= jpeg.len() as f32 * quality::LOSSLESS_TOLERANCE {
+        // 护栏（所有档位）：降采样 + 重编码之后不比原文件小，就退回原图直通。
+        //
+        // 这不是假想情况：源文件本就是高压缩率的 JPEG，我们把它解开、缩小、
+        // 再以更高质量编回去，像素少了但字节多了。此时「压缩」既没省空间，
+        // 还白白损失一代画质。原图直通在两个维度上都更优 —— 哪怕这一档本不主动直通。
+        let chosen_len = if use_flate { flate_est } else { jpeg.len() };
+        if let Some((pw, ph, pgray)) = jpeg_src {
+            if chosen_len >= bytes.len() {
+                let (page_w, page_h) = page_of(pw, ph);
+                return Ok(PreparedImage {
+                    color: ColorData::Jpeg { bytes, gray: pgray },
+                    alpha: None,
+                    width: pw,
+                    height: ph,
+                    fidelity: Fidelity::Passthrough,
+                    page_w_pt: page_w,
+                    page_h_pt: page_h,
+                    dropped_pages,
+                    orientation,
+                });
+            }
+        }
+
+        if use_flate {
             (
                 raw,
                 if rescaled {
@@ -373,6 +391,7 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
         fidelity,
         page_w_pt: page_w,
         page_h_pt: page_h,
+        dropped_pages,
         // 方向已经作用在像素上了。
         orientation: image::metadata::Orientation::NoTransforms,
     })

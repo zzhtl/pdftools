@@ -80,6 +80,15 @@ pub fn run(
         };
 
         fidelity.push((path.clone(), prepared.fidelity));
+        if prepared.dropped_pages > 0 {
+            warnings.push(Warning::new(
+                WarningKind::UnsupportedElement,
+                format!(
+                    "{label} 是多页 TIFF（共 {} 页），本版本只转换第一页",
+                    prepared.dropped_pages + 1
+                ),
+            ));
+        }
         // 手动指定优先于文件里读到的。
         let dated = match manual_times.get(path) {
             Some(when) => Some(DatedFile {
