@@ -48,6 +48,21 @@ jobs:
         run: cargo clippy --workspace --all-targets
 
       - name: 测试
+        id: test
         # 核心逻辑全在 pdfcore 里，它不链接任何 GUI 库，
         # 所以在没有显示器的 runner 上也能完整跑。
-        run: cargo test --workspace
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace 2>&1 | tee test-output.log
+
+      - name: 列出失败的测试
+        # Actions 的日志要登录才能看；把失败的用例和断言信息写成检查注解，
+        # 在提交页和公开 API 里直接可见。
+        if: failure() && steps.test.outcome == 'failure'
+        shell: bash
+        run: |
+          grep -E -A8 '^---- .* stdout ----' test-output.log \
+            | sed -e 's/\x1b\[[0-9;]*m//g' -e 's/\r$//' | head -120 > failures.txt || true
+          body=$(sed -e 's/%/%25/g' failures.txt | awk '{printf "%s%%0A", $0}')
+          echo "::error title=失败的测试 (${{ matrix.os }})::${body}"
