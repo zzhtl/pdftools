@@ -171,6 +171,20 @@ fn exif_capture_time_is_read_and_labelled() {
     assert_eq!(t.when.second, 22);
 }
 
+/// 只读开头的快速读取（界面列表用）与整个读的结果一样：比 2 MB 大的 JPEG 也读得到。
+#[test]
+fn quick_capture_time_matches_the_full_read() {
+    let path = write_jpeg_with_exif("dated_big.jpg", 3000, 2400, 1, "2024:03:15 14:30:22");
+    assert!(
+        std::fs::metadata(&path).unwrap().len() > 2 << 20,
+        "要比 2 MB 大"
+    );
+    let quick = pdfcore::imaging::read_time_quick(&path).expect("读不到时间");
+    let full = pdfcore::imaging::read_time(&path).expect("读不到时间");
+    assert_eq!((quick.source, quick.when), (full.source, full.when));
+    assert_eq!(quick.source, TimeSource::Exif);
+}
+
 /// PDF 的 /CreationDate 必须是**最早一张**照片的拍摄时间。
 #[test]
 fn pdf_creation_date_is_the_earliest_capture_time() {
@@ -636,4 +650,40 @@ fn negative_offset_under_an_hour_keeps_its_sign() {
         text.starts_with("D:20240315143022-00'30"),
         "CreationDate 是 {text}，应当带着 -00'30"
     );
+}
+
+/// EXIF 自带的缩略图（IFD1）原样取出来；没有 IFD1 的取不到。
+#[test]
+fn exif_thumbnail_is_extracted() {
+    let small = common::images::jpeg_q(&image::DynamicImage::ImageRgb8(photo(16, 12)), 80);
+    // 小端 TIFF：IFD0 一个条目（方向）→ IFD1 两个条目（缩略图的偏移与长度）→ JPEG。
+    let (ifd1, jpeg_at) = (26u32, 56u32);
+    let mut tiff = Vec::new();
+    tiff.extend_from_slice(b"II");
+    tiff.extend_from_slice(&42u16.to_le_bytes());
+    tiff.extend_from_slice(&8u32.to_le_bytes());
+    let entry = |tiff: &mut Vec<u8>, tag: u16, kind: u16, value: u32| {
+        tiff.extend_from_slice(&tag.to_le_bytes());
+        tiff.extend_from_slice(&kind.to_le_bytes());
+        tiff.extend_from_slice(&1u32.to_le_bytes());
+        tiff.extend_from_slice(&value.to_le_bytes());
+    };
+    tiff.extend_from_slice(&1u16.to_le_bytes());
+    entry(&mut tiff, 0x0112, 3, 1);
+    tiff.extend_from_slice(&ifd1.to_le_bytes());
+    tiff.extend_from_slice(&2u16.to_le_bytes());
+    entry(&mut tiff, 0x0201, 4, jpeg_at);
+    entry(&mut tiff, 0x0202, 4, small.len() as u32);
+    tiff.extend_from_slice(&0u32.to_le_bytes());
+    assert_eq!(tiff.len() as u32, jpeg_at);
+    tiff.extend_from_slice(&small);
+
+    assert_eq!(
+        pdfcore::imaging::probe::exif_thumbnail(&tiff).as_deref(),
+        Some(small.as_slice())
+    );
+    // 截掉 IFD1：没有缩略图。
+    let mut no_thumb = tiff[..26].to_vec();
+    no_thumb[22..26].copy_from_slice(&0u32.to_le_bytes());
+    assert_eq!(pdfcore::imaging::probe::exif_thumbnail(&no_thumb), None);
 }

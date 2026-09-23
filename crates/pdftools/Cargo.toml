@@ -17,10 +17,11 @@ pdfcore = { path = "../pdfcore" }
 # 关掉默认 features 是为了用 glow 而非 wgpu：丢掉整棵 wgpu/naga/ash 依赖树，
 # 二进制更小，且 OpenGL 在老显卡 / 虚拟机 / 远程桌面上兼容面更宽。
 eframe = { version = "0.36.2", default-features = false, features = [
-    "glow", "default_fonts", "wayland", "x11", "links",
+    "glow", "default_fonts", "wayland", "x11", "links", "persistence",
 ] }
 egui = "0.36.2"
 rfd = "0.17.2"
+serde = { version = "1", features = ["derive"] }
 
 anyhow.workspace = true
 log.workspace = true

@@ -173,6 +173,21 @@ pub fn read_time(path: &Path) -> Option<crate::timestamp::DatedFile> {
     time_of(&bytes, path)
 }
 
+/// 同 [`read_time`]，但 JPEG 只读开头：列表里一下加进上千张照片时，逐张读整个文件
+/// 太慢。JPEG 的 EXIF、XMP、IPTC 都在图像数据之前的 APP 段里（每段不超过 64 KB），
+/// 开头 2 MB 足够；PNG、WebP、TIFF 的元数据可以在文件末尾，照旧整个读。
+pub fn read_time_quick(path: &Path) -> Option<crate::timestamp::DatedFile> {
+    use std::io::Read;
+    let mut head = Vec::new();
+    let ok = std::fs::File::open(path)
+        .and_then(|f| f.take(2 << 20).read_to_end(&mut head))
+        .is_ok();
+    if ok && probe::sniff(&head) == probe::Container::Jpeg {
+        return time_of(&head, path);
+    }
+    read_time(path)
+}
+
 /// 同 [`read_time`]，文件内容已经读进来了（`bytes`，读不到时传空的）。
 pub fn time_of(bytes: &[u8], path: &Path) -> Option<crate::timestamp::DatedFile> {
     use crate::timestamp::{DatedFile, TimeSource, Timestamp};

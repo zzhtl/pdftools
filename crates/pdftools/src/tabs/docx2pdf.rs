@@ -3,29 +3,28 @@
 use std::path::PathBuf;
 
 use pdfcore::ops::docx_to_pdf;
-use pdfcore::Progress;
+use pdfcore::{Progress, ProgressSink};
 
 use crate::app::App;
-use crate::job::{human_size, write_atomic, Done, Job};
+use crate::job::{human_size, run_batch, write_atomic, Done, Job};
 
-use super::{draggable_list, file_label, FileList};
+use super::common::{self, FileList, WORD_EXTENSIONS};
+use super::{file_label, FOOTER};
 
 #[derive(Default)]
 pub struct State {
     pub files: FileList,
+    /// 上次添加文档、保存 PDF 的文件夹。
+    pub open_dir: Option<PathBuf>,
+    pub out_dir: Option<PathBuf>,
 }
 
 impl State {
-    pub fn add_paths(&mut self, paths: Vec<PathBuf>) {
+    /// 返回不认的文件有几个。`.doc` 也收下：转换时会明确告诉用户先另存为 `.docx`。
+    pub fn add_paths(&mut self, paths: Vec<PathBuf>) -> usize {
         self.files.add(paths, |p| {
-            matches!(
-                p.extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.to_ascii_lowercase())
-                    .as_deref(),
-                Some("docx" | "doc")
-            )
-        });
+            common::has_extension(p, WORD_EXTENSIONS) || common::has_extension(p, &["doc"])
+        })
     }
 }
 
@@ -34,21 +33,26 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
 
     ui.horizontal(|ui| {
-        ui.add_enabled_ui(!busy, |ui| {
-            if ui.button("添加 Word 文档…").clicked() {
-                if let Some(picked) = rfd::FileDialog::new()
-                    .add_filter("Word 文档", &["docx"])
-                    .pick_files()
-                {
-                    app.docx.add_paths(picked);
-                }
+        if ui
+            .button("添加 Word 文档…")
+            .on_hover_text("Ctrl+O")
+            .clicked()
+            || common::open_shortcut(ui)
+        {
+            if let Some(picked) =
+                common::pick_files(&mut app.docx.open_dir, "Word 文档", WORD_EXTENSIONS)
+            {
+                app.docx.add_paths(picked);
             }
-            if ui.button("清空").clicked() {
-                app.docx.files.items.clear();
-            }
-        });
+        }
+        if ui.button("按文件名排序").clicked() {
+            app.docx.files.sort_by_name();
+        }
+        if ui.button("清空").clicked() {
+            app.docx.files.clear();
+        }
     });
-    ui.weak("把 .docx 拖进窗口也可以添加。");
+    ui.weak("把 .docx 或装着它们的文件夹拖进窗口也可以添加。");
 
     ui.add_space(4.0);
     egui::CollapsingHeader::new("支持范围（请先看这里）")
@@ -60,7 +64,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             ui.label("✔ 支持：字符与段落格式、样式、行距与行网格、制表位、自动编号、表格（合并单元格、跨页）、图片、文本框与直线、页眉页脚与页码、多节、中西文混排");
             ui.label("✖ 近似或不支持：脚注尾注、分栏（按单栏排）、文字环绕（按上下型排）、组合图形与图表（画成灰框）、竖排文字");
             ui.colored_label(
-                egui::Color32::from_rgb(0x8D, 0x6E, 0x00),
+                crate::theme::palette(ui).note_fg,
                 "遇到排不了或只能近似的内容时，程序会在结果里列出，不会悄悄丢掉。",
             );
         });
@@ -71,19 +75,26 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
 
-    draggable_list(ui, "docx", &mut app.docx.files, !busy, |ui, _i, path| {
-        ui.label(file_label(path));
-    });
+    let height = ui.available_height() - FOOTER;
+    common::file_list(
+        ui,
+        "docx",
+        &mut app.docx.files,
+        height,
+        24.0,
+        |ui, _i, path| {
+            ui.label(file_label(path));
+        },
+    );
 
     ui.separator();
-    let can_run = !busy && !app.docx.files.items.is_empty();
     let single = app.docx.files.items.len() == 1;
     let label = if single {
         "转换为 PDF…"
     } else {
         "批量转换到文件夹…"
     };
-    if ui.add_enabled(can_run, egui::Button::new(label)).clicked() {
+    if common::run_button(ui, label, !busy) {
         start(app, &ctx, single);
     }
 }
@@ -93,52 +104,31 @@ fn start(app: &mut App, ctx: &egui::Context, single: bool) {
 
     // 单个文件让用户直接决定文件名；多个文件只问目录，输出名沿用原名。
     let target: Target = if single {
-        let default = files[0].with_extension("pdf");
-        let Some(out) = rfd::FileDialog::new()
-            .add_filter("PDF", &["pdf"])
-            .set_file_name(file_label(&default))
-            .save_file()
-        else {
-            return;
-        };
-        Target::File(out)
+        let default = file_label(&files[0].with_extension("pdf"));
+        match common::pick_save(&mut app.docx.out_dir, &default, "PDF", &["pdf"]) {
+            Some(out) => Target::File(out),
+            None => return,
+        }
     } else {
-        let Some(dir) = rfd::FileDialog::new().pick_folder() else {
-            return;
-        };
-        Target::Dir(dir)
+        match common::pick_folder(&mut app.docx.out_dir) {
+            Some(dir) => Target::Dir(dir),
+            None => return,
+        }
     };
 
-    app.job = Some(Job::spawn(ctx, move |sink| {
-        let mut pages = 0usize;
-        let mut bytes = 0usize;
-        let mut last_out = None;
+    app.job = Some(Job::spawn(ctx, files.len(), move |worker| {
         let mut namer = pdfcore::fsio::OutputNamer::new(&files);
         if let Target::File(p) = &target {
             if namer.is_input(p) {
                 return Err("输出文件不能是原文档本身，请换一个文件名".into());
             }
         }
-
-        for (i, path) in files.iter().enumerate() {
-            if sink.is_cancelled() {
-                return Err("已取消".into());
-            }
-            sink.emit(Progress::Item {
-                done: i,
-                total: files.len(),
-                label: file_label(path),
-            });
-
-            let report =
-                docx_to_pdf::run(path, sink).map_err(|e| format!("{}：{e}", file_label(path)))?;
+        let (mut pages, mut bytes) = (0usize, 0usize);
+        let batch = run_batch(worker, &files, |path, sink| {
+            let report = docx_to_pdf::run(path, sink)?;
             for w in report.warnings {
-                // 批量转换时，警告要带上是哪个文件的。
-                let mut w = w;
-                w.detail = format!("{}：{}", file_label(path), w.detail);
                 sink.emit(Progress::Warn(w));
             }
-
             let out = match &target {
                 Target::File(p) => p.clone(),
                 // 批量输出不覆盖任何东西：不同目录下的同名文档、目录里原有的 PDF 都会自动改名。
@@ -149,19 +139,27 @@ fn start(app: &mut App, ctx: &egui::Context, single: bool) {
                 ),
             };
             write_atomic(&out, &report.value.pdf)?;
-
             pages += report.value.pages;
             bytes += report.value.pdf.len();
-            last_out = Some(out);
-        }
+            let detail = format!(
+                "{} 页，{}",
+                report.value.pages,
+                human_size(report.value.pdf.len() as u64)
+            );
+            Ok((out, detail))
+        })?;
 
+        let mut summary = format!(
+            "已转换 {} 个文档，共 {pages} 页，{}",
+            batch.succeeded,
+            human_size(bytes as u64)
+        );
+        if batch.failed > 0 {
+            summary += &format!("；{} 个没有转成", batch.failed);
+        }
         Ok(Done {
-            summary: format!(
-                "已转换 {} 个文档，共 {pages} 页，{}",
-                files.len(),
-                human_size(bytes as u64)
-            ),
-            output: last_out,
+            summary,
+            output: batch.last_output,
         })
     }));
 }

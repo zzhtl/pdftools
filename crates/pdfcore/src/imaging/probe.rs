@@ -275,6 +275,21 @@ pub fn is_heif(path: &Path) -> bool {
     )
 }
 
+/// EXIF 里自带的缩略图（IFD1 的 JPEG，相机与手机通常存 160×120 上下）。列表里预览
+/// 用它就够了，不必解开整张大图。`exif_raw` 是 EXIF 的 TIFF 数据。
+pub fn exif_thumbnail(exif_raw: &[u8]) -> Option<Vec<u8>> {
+    let exif = exif::Reader::new().read_raw(exif_raw.to_vec()).ok()?;
+    let uint = |tag| {
+        exif.get_field(tag, exif::In::THUMBNAIL)
+            .and_then(|f| f.value.get_uint(0))
+            .map(|v| v as usize)
+    };
+    let start = uint(exif::Tag::JPEGInterchangeFormat)?;
+    let len = uint(exif::Tag::JPEGInterchangeFormatLength)?;
+    let jpeg = exif.buf().get(start..start.checked_add(len)?)?;
+    jpeg.starts_with(&[0xFF, 0xD8]).then(|| jpeg.to_vec())
+}
+
 /// 从 EXIF 里读拍摄时间。
 ///
 /// 只认 `DateTimeOriginal`（按下快门的时刻）与 `DateTimeDigitized`（数字化的时刻，

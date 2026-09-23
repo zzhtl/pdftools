@@ -65,23 +65,9 @@ pub fn run(
             .to_string_lossy()
             .into_owned();
 
-        match compress_one(path, out_dir, &quality, &mut namer) {
-            Ok((item, dropped_pages)) => {
-                if dropped_pages > 0 {
-                    warnings.push(Warning::new(
-                        WarningKind::UnsupportedElement,
-                        format!(
-                            "{label} 是多页 TIFF（共 {} 页），本版本只处理第一页",
-                            dropped_pages + 1
-                        ),
-                    ));
-                }
-                if item.after >= item.before {
-                    warnings.push(Warning::new(
-                        WarningKind::ImageKeptOriginal,
-                        format!("{label}：压缩后反而更大，已原样复制"),
-                    ));
-                }
+        match compress_file(path, out_dir, &quality, &mut namer) {
+            Ok((item, notes)) => {
+                warnings.extend(notes);
                 outcome.items.push(item);
             }
             Err(e) => warnings.push(Warning::new(
@@ -105,6 +91,39 @@ pub fn run(
         return Err(CoreError::Image(format!("所有图片都处理失败了{reason}")));
     }
     Ok(Report::with(outcome, warnings))
+}
+
+/// 压缩一张图，输出到 `out_dir`（名字由 `namer` 定，什么都不覆盖）。返回结果与要告诉
+/// 用户的事：多页 TIFF 只处理了第一页、压完反而更大所以原样复制。
+pub fn compress_file(
+    path: &Path,
+    out_dir: &Path,
+    quality: &crate::imaging::ImageQuality,
+    namer: &mut OutputNamer,
+) -> Result<(Item, Vec<Warning>)> {
+    let label = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let (item, dropped_pages) = compress_one(path, out_dir, quality, namer)?;
+    let mut warnings = Vec::new();
+    if dropped_pages > 0 {
+        warnings.push(Warning::new(
+            WarningKind::UnsupportedElement,
+            format!(
+                "{label} 是多页 TIFF（共 {} 页），本版本只处理第一页",
+                dropped_pages + 1
+            ),
+        ));
+    }
+    if item.after >= item.before {
+        warnings.push(Warning::new(
+            WarningKind::ImageKeptOriginal,
+            format!("{label}：压缩后反而更大，已原样复制"),
+        ));
+    }
+    Ok((item, warnings))
 }
 
 /// 压缩一张图，返回结果与被丢掉的页数（多页 TIFF 只处理第一页）。

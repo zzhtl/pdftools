@@ -1,28 +1,35 @@
 //! 图片转 PDF。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use pdfcore::imaging::{probe, Fidelity, Tier};
 use pdfcore::ops::images_to_pdf;
-use pdfcore::Progress;
 use pdfcore::{DatedFile, TimeSource, Timestamp};
 
 use crate::app::{tier_selector, App};
 use crate::job::{human_size, write_atomic, Done, Job};
 use crate::thumbs::Thumb;
 
-use super::{draggable_list, file_label, FileList};
+use super::common::{self, FileList};
+use super::{file_label, FOOTER};
 
 pub struct State {
     pub files: FileList,
     pub tier: Tier,
     pub skipped_heif: Vec<String>,
-    /// 每个文件的时间。添加时读一次就缓存 —— 每帧去解 EXIF 会把界面拖垮。
+    /// 每个文件的时间。后台读出来（见 `App::times`）就缓存 —— 每帧去解 EXIF 会把界面
+    /// 拖垮。
     pub times: HashMap<PathBuf, DatedFile>,
+    /// 连文件时间都读不到的（文件没了、没有权限）。记下来就不再反复去读 —— 否则每帧
+    /// 都会重新排队，后台线程和界面一起空转。
+    pub no_time: HashSet<PathBuf>,
     /// 时间输入框的文本缓冲。用户可能正输到一半，此时还解析不出合法时间，
     /// 不能因此把缓存里的值冲掉。
     pub drafts: HashMap<PathBuf, String>,
+    /// 上次添加图片、保存 PDF 的文件夹。
+    pub open_dir: Option<PathBuf>,
+    pub out_dir: Option<PathBuf>,
 }
 
 impl Default for State {
@@ -35,30 +42,37 @@ impl Default for State {
             tier: Tier::Lossless,
             skipped_heif: Vec::new(),
             times: HashMap::new(),
+            no_time: HashSet::new(),
             drafts: HashMap::new(),
+            open_dir: None,
+            out_dir: None,
         }
     }
 }
 
 impl State {
-    pub fn add_paths(&mut self, paths: Vec<PathBuf>) {
+    /// 返回不认的文件有几个（HEIC 单独记名字，给一句有用的提示）。
+    pub fn add_paths(&mut self, paths: Vec<PathBuf>) -> usize {
         // HEIC 单独挑出来给一句有用的提示，而不是等到转换时才报「解码失败」。
+        let mut heif = 0;
         for p in &paths {
             if probe::is_heif(p) {
+                heif += 1;
                 let name = file_label(p);
                 if !self.skipped_heif.contains(&name) {
                     self.skipped_heif.push(name);
                 }
             }
         }
-        self.files.add(paths, probe::looks_like_image);
-        for p in &self.files.items {
-            if !self.times.contains_key(p) {
-                if let Some(t) = pdfcore::imaging::read_time(p) {
-                    self.times.insert(p.clone(), t);
-                }
-            }
-        }
+        self.files.add(paths, probe::looks_like_image) - heif
+    }
+
+    pub fn clear(&mut self) {
+        self.files.clear();
+        self.skipped_heif.clear();
+        self.times.clear();
+        self.no_time.clear();
+        self.drafts.clear();
     }
 
     /// 按时间排序。取证材料通常需要按拍摄先后排列。
@@ -120,39 +134,32 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
 
     ui.horizontal(|ui| {
-        ui.add_enabled_ui(!busy, |ui| {
-            if ui.button("添加图片…").clicked() {
-                if let Some(picked) = rfd::FileDialog::new()
-                    .add_filter(
-                        "图片",
-                        &["jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp"],
-                    )
-                    .pick_files()
-                {
-                    app.images.add_paths(picked);
-                }
+        if ui.button("添加图片…").on_hover_text("Ctrl+O").clicked() || common::open_shortcut(ui)
+        {
+            if let Some(picked) =
+                common::pick_files(&mut app.images.open_dir, "图片", probe::IMAGE_EXTENSIONS)
+            {
+                app.images.add_paths(picked);
             }
-            if ui.button("按文件名排序").clicked() {
-                app.images.files.sort_by_name();
-            }
-            if ui.button("按拍摄时间排序").clicked() {
-                app.images.sort_by_time();
-            }
-            if ui.button("清空").clicked() {
-                app.images.files.items.clear();
-                app.images.skipped_heif.clear();
-                app.images.times.clear();
-            }
-        });
+        }
+        if ui.button("按文件名排序").clicked() {
+            app.images.files.sort_by_name();
+        }
+        if ui.button("按拍摄时间排序").clicked() {
+            app.images.sort_by_time();
+        }
+        if ui.button("清空").clicked() {
+            app.images.clear();
+        }
     });
 
-    ui.weak("把图片拖进窗口也可以添加。列表里上下拖动可调整顺序，顺序即页序。");
+    ui.weak("把图片或装着它们的文件夹拖进窗口也可以添加。列表里上下拖动可调整顺序，顺序即页序。");
     ui.weak("每页的尺寸与比例都跟随该张图片，不会出现白边。");
-    ui.separator();
 
+    let pal = crate::theme::palette(ui);
     if !app.images.skipped_heif.is_empty() {
         ui.colored_label(
-            egui::Color32::from_rgb(0xC0, 0x50, 0x20),
+            pal.caution,
             format!(
                 "已忽略 {} 个 HEIC/HEIF 文件（本程序不支持该格式）：{}。\
                  请先在系统相册里导出为 JPEG。",
@@ -160,20 +167,19 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 app.images.skipped_heif.join("、")
             ),
         );
-        ui.separator();
     }
 
     ui.separator();
-    tier_selector(ui, &mut app.images.tier, !busy);
+    tier_selector(ui, &mut app.images.tier, true);
     if app.images.tier.is_lossy() {
         ui.colored_label(
-            egui::Color32::from_rgb(0xC0, 0x50, 0x20),
+            pal.caution,
             "注意：该档位会对超过 DPI 上限的图片重新采样，不再是逐像素无损。\
              要绝对保真请选「无损」。",
         );
     } else {
         ui.colored_label(
-            egui::Color32::from_rgb(0x2E, 0x7D, 0x32),
+            pal.ok,
             "当前为无损：JPEG 原始字节直接搬入 PDF（含横拍照片，旋转由 PDF 变换矩阵完成，\
              不重新编码），其余格式逐像素无损存储。",
         );
@@ -186,118 +192,137 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
 
     // 缺拍摄时间是常态而不是异常（微信、网盘转发都会剥掉），
     // 所以要主动说清楚，并给出补救办法，而不是让用户自己去发现。
-    let missing = app.images.missing_capture_time();
+    // 还在后台读的时候先不说，免得把没读完的都算成缺。
+    let missing = if app.times.pending() > 0 {
+        ui.weak(format!(
+            "正在读取拍摄时间…（还剩 {} 张）",
+            app.times.pending()
+        ));
+        0
+    } else {
+        app.images.missing_capture_time()
+    };
     if missing > 0 {
         egui::Frame::new()
-            .fill(egui::Color32::from_rgb(0xFF, 0xF4, 0xE5))
+            .fill(pal.note_bg)
             .inner_margin(8.0)
             .corner_radius(4.0)
             .show(ui, |ui| {
                 ui.colored_label(
-                    egui::Color32::from_rgb(0x8A, 0x4B, 0x00),
+                    pal.note_fg,
                     format!(
                         "有 {missing} 张图片读不到拍摄时间（EXIF / XMP / IPTC 里都没有）。经微信、网盘或「清除元数据」处理过的照片通常都是这样。"
                     ),
                 );
                 ui.colored_label(
-                    egui::Color32::from_rgb(0x8A, 0x4B, 0x00),
+                    pal.note_fg,
                     "文件时间不能代替拍摄时间（复制一次就被刷新），所以不会写进 PDF。可以在下面每一行里直接填写真实拍摄时间，或改用手机相册里的原图。",
                 );
                 // 这条容易被误解成「填了就把照片修好了」，必须说在前面。
                 ui.colored_label(
-                    egui::Color32::from_rgb(0x8A, 0x4B, 0x00),
+                    pal.note_fg,
                     "注意：手动填写只影响本次生成的 PDF，不会修改图片文件本身 —— 图片的 EXIF 仍然没有拍摄时间。",
                 );
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!busy, egui::Button::new("把第一张的时间套用到全部"))
-                        .on_hover_text("同一场拍摄的照片通常共用一个时间")
-                        .clicked()
-                    {
-                        app.images.apply_first_time_to_all();
-                    }
-                });
+                if ui
+                    .button("把第一张的时间套用到全部")
+                    .on_hover_text("同一场拍摄的照片通常共用一个时间")
+                    .clicked()
+                {
+                    app.images.apply_first_time_to_all();
+                }
             });
-        ui.add_space(4.0);
     }
+    ui.add_space(4.0);
 
     let thumbs = &mut app.thumbs;
     let times = &mut app.images.times;
+    let no_time = &app.images.no_time;
     let drafts = &mut app.images.drafts;
-    draggable_list(ui, "img", &mut app.images.files, !busy, |ui, _i, path| {
-        match thumbs.get(path) {
-            Thumb::Ready(tex) => {
-                ui.add(egui::Image::new(&tex).max_height(48.0).max_width(64.0));
-            }
-            Thumb::Pending => {
-                ui.add_sized([64.0, 48.0], egui::Spinner::new());
-            }
-            Thumb::Failed => {
-                ui.add_sized([64.0, 48.0], egui::Label::new("无法预览"));
-            }
-        }
-        ui.label(file_label(path));
-
-        // 时间放在每一行里，而且可以直接改。
-        //
-        // 只读地显示一个文件时间是不够的：那不是拍摄时间，复制一次就变，
-        // 而用户往往知道真实的拍摄时刻。给一个输入框，是这些已被剥掉
-        // 时间信息的照片唯一能拿到正确时间的办法。
-        let current = times.get(path).copied();
-        let draft = drafts
-            .entry(path.clone())
-            .or_insert_with(|| current.map(|t| t.when.display()).unwrap_or_default());
-        let parsed = Timestamp::parse_user_input(draft);
-        let bad = !draft.trim().is_empty() && parsed.is_none();
-
-        let edit = egui::TextEdit::singleline(draft)
-            .desired_width(150.0)
-            .text_color_opt(bad.then_some(egui::Color32::from_rgb(0xC6, 0x28, 0x28)));
-        let resp = ui.add_enabled(!busy, edit);
-        if resp.changed() {
-            if let Some(when) = parsed {
-                if current.map(|c| c.when) != Some(when) {
-                    times.insert(
-                        path.clone(),
-                        DatedFile {
-                            when,
-                            source: TimeSource::Manual,
-                        },
+    let height = ui.available_height() - FOOTER;
+    common::file_list(
+        ui,
+        "img",
+        &mut app.images.files,
+        height,
+        52.0,
+        |ui, _i, path| {
+            match thumbs.get(path) {
+                Thumb::Ready(tex) => {
+                    ui.add_sized(
+                        [64.0, 48.0],
+                        egui::Image::new(&tex).max_height(48.0).max_width(64.0),
                     );
                 }
+                Thumb::Pending => {
+                    ui.add_sized([64.0, 48.0], egui::Spinner::new());
+                }
+                Thumb::Failed => {
+                    ui.add_sized([64.0, 48.0], egui::Label::new("无法预览"));
+                }
             }
-        }
+            ui.add_sized([180.0, 20.0], egui::Label::new(file_label(path)).truncate());
 
-        match current {
-            Some(t) if t.source.is_capture_time() => {
-                ui.colored_label(egui::Color32::from_rgb(0x2E, 0x7D, 0x32), t.source.label());
+            // 时间放在每一行里，而且可以直接改。
+            //
+            // 只读地显示一个文件时间是不够的：那不是拍摄时间，复制一次就变，
+            // 而用户往往知道真实的拍摄时刻。给一个输入框，是这些已被剥掉
+            // 时间信息的照片唯一能拿到正确时间的办法。
+            let current = times.get(path).copied();
+            let draft = drafts
+                .entry(path.clone())
+                .or_insert_with(|| current.map(|t| t.when.display()).unwrap_or_default());
+            // 后台刚读出时间时，还没动过的输入框跟着更新。
+            if draft.is_empty() {
+                if let Some(t) = current {
+                    *draft = t.when.display();
+                }
             }
-            Some(t) => {
-                ui.colored_label(egui::Color32::from_rgb(0xC0, 0x50, 0x20), t.source.label());
-            }
-            None => {
-                ui.colored_label(egui::Color32::from_rgb(0xC6, 0x28, 0x28), "无时间");
-            }
-        }
-    });
-    let keep = app.images.files.items.clone();
-    app.thumbs.retain(&keep);
+            let parsed = Timestamp::parse_user_input(draft);
+            let bad = !draft.trim().is_empty() && parsed.is_none();
 
-    ui.add_space(6.0);
-    let can_run = !busy && !app.images.files.items.is_empty();
-    if ui
-        .add_enabled(can_run, egui::Button::new("生成 PDF…"))
-        .clicked()
-    {
+            let edit = egui::TextEdit::singleline(draft)
+                .desired_width(150.0)
+                .text_color_opt(bad.then_some(pal.error));
+            let resp = ui.add(edit);
+            if resp.changed() {
+                if let Some(when) = parsed {
+                    if current.map(|c| c.when) != Some(when) {
+                        times.insert(
+                            path.clone(),
+                            DatedFile {
+                                when,
+                                source: TimeSource::Manual,
+                            },
+                        );
+                    }
+                }
+            }
+
+            match current {
+                Some(t) if t.source.is_capture_time() => {
+                    ui.colored_label(pal.ok, t.source.label());
+                }
+                Some(t) => {
+                    ui.colored_label(pal.caution, t.source.label());
+                }
+                None if no_time.contains(path) => {
+                    ui.colored_label(pal.error, "无时间");
+                }
+                None => {
+                    ui.weak("读取中…");
+                }
+            }
+        },
+    );
+
+    ui.separator();
+    if common::run_button(ui, "生成 PDF…", !busy) {
         start(app, &ctx);
     }
 }
 
 fn start(app: &mut App, ctx: &egui::Context) {
-    let Some(out) = rfd::FileDialog::new()
-        .add_filter("PDF", &["pdf"])
-        .set_file_name("合并.pdf")
-        .save_file()
+    let Some(out) = common::pick_save(&mut app.images.out_dir, "合并.pdf", "PDF", &["pdf"])
     else {
         return;
     };
@@ -306,14 +331,14 @@ fn start(app: &mut App, ctx: &egui::Context) {
     let tier = app.images.tier;
     let manual = app.images.manual_times();
 
-    app.job = Some(Job::spawn(ctx, move |sink| {
+    app.job = Some(Job::spawn(ctx, 0, move |worker| {
         if pdfcore::fsio::OutputNamer::new(&paths).is_input(&out) {
             return Err("输出文件不能是某张原图本身，请换一个文件名".into());
         }
-        let report = images_to_pdf::run(&paths, tier, &manual, sink).map_err(|e| e.to_string())?;
+        let report = images_to_pdf::run(&paths, tier, &manual, worker)?;
         // 把核心层收集到的警告转发给界面。静默丢弃是不允许的。
         for w in report.warnings {
-            sink.emit(Progress::Warn(w));
+            worker.warn(w);
         }
         write_atomic(&out, &report.value.pdf)?;
 

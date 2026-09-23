@@ -4,7 +4,10 @@
 mod app;
 mod fonts_ui;
 mod job;
+mod loader;
+mod prefs;
 mod tabs;
+mod theme;
 mod thumbs;
 
 use std::sync::OnceLock;
@@ -52,7 +55,7 @@ fn main() -> eframe::Result {
             log::debug!("启动：窗口与 GL 上下文就绪 {:?}", since_start());
             let font = fonts_ui::install(&cc.egui_ctx);
             log::debug!("启动：界面字体装好 {:?}", since_start());
-            let mut app = app::App::new(cc, font);
+            let mut app = app::App::new(&cc.egui_ctx, font, cc.storage);
             app.open_paths(initial);
             log::debug!("启动：命令行文件入列 {:?}", since_start());
             Ok(Box::new(app))
