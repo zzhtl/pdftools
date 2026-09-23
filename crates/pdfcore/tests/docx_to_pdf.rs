@@ -2024,3 +2024,41 @@ fn kerning_follows_w_kern() {
         "写了 w:kern 要调整（AV、TA 靠得更近）：{xs:?}"
     );
 }
+
+/// 字符网格：公文版心（A4、左 28mm 右 26mm）、三号字、`w:charSpace="-849"`，
+/// 格宽 16 - 849/4096 = 15.79pt，每行正好 28 字。
+#[test]
+fn character_grid_gives_28_characters_per_line() {
+    if !require_cjk_font() {
+        return;
+    }
+    let text = "一二三四五六七八九十".repeat(5) + "一二三四五六";
+    let path = DocxBuilder::new()
+        .styles(r#"<w:docDefaults><w:rPrDefault><w:rPr/></w:rPrDefault><w:pPrDefault/></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:sz w:val="32"/></w:rPr></w:style>"#)
+        .sect(r#"<w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="2098" w:right="1474" w:bottom="1984" w:left="1588" w:header="851" w:footer="992" w:gutter="0"/>"#)
+        .sect_extra(r#"<w:docGrid w:type="linesAndChars" w:linePitch="579" w:charSpace="-849"/>"#)
+        .body(&format!(
+            r#"<w:p><w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+        ))
+        .build("char_grid.docx");
+    let pages = common::pdftext::extract(&convert(&path).value.pdf);
+    let lines = &pages[0].lines;
+    let counts: Vec<usize> = lines.iter().map(|l| l.text.chars().count()).collect();
+    assert_eq!(
+        counts,
+        [28, 28],
+        "{:?}",
+        lines.iter().map(|l| &l.text).collect::<Vec<_>>()
+    );
+    let xs: Vec<f32> = lines[0]
+        .frags
+        .iter()
+        .flat_map(|f| &f.glyphs)
+        .map(|(_, x)| *x)
+        .collect();
+    let pitch = (xs[27] - xs[0]) / 27.0;
+    assert!(
+        (pitch - (16.0 - 849.0 / 4096.0)).abs() < 0.01,
+        "格宽 {pitch}"
+    );
+}

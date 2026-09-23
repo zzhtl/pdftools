@@ -36,6 +36,20 @@ pub struct Calib {
     pub header_footer: HeaderFooter,
     pub kerning: Kerning,
     pub line_gap: LineGap,
+    pub char_grid: CharGrid,
+}
+
+/// 字符网格（`w:docGrid w:type="linesAndChars"`，公文按它排成每行 28 字）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CharGrid {
+    /// 不认，汉字按自己的字宽排。
+    Ignored,
+    /// 按 Word 的规则：格宽 = Normal 样式的字号 + `w:charSpace`/4096 磅，汉字与全角
+    /// 标点每个占整格（字号比格宽略大时仍占一格，明显更大时占两格），西文按原宽。
+    /// 公文的三号字、`w:charSpace="-849"` 算出来格宽 15.79pt，版心 156mm 正好 28 格。
+    ///
+    /// LibreOffice 在这里不能当参照：它把比格宽稍大的字放进两格，公文每行只排 14 字。
+    Cells,
 }
 
 /// 字体的行间距（hhea 的 lineGap，Liberation Serif 每 em 约 0.04）放在字的上面还是下面。
@@ -401,6 +415,7 @@ impl Calib {
             header_footer: HeaderFooter::Drawn,
             kerning: Kerning::Word,
             line_gap: LineGap::Above,
+            char_grid: CharGrid::Cells,
         }
     }
 
@@ -432,6 +447,7 @@ impl Calib {
             header_footer: HeaderFooter::Warned,
             kerning: Kerning::Always,
             line_gap: LineGap::Below,
+            char_grid: CharGrid::Ignored,
         }
     }
 }

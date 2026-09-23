@@ -536,6 +536,10 @@ pub struct DocGrid {
     /// 是否真的吸附。`w:type` 为 lines / linesAndChars / snapToChars 时吸附，
     /// 为 default 或缺省时不吸附 —— 后两种很常见，一律吸附会把行距撑大一倍。
     pub snaps: bool,
+    /// 还有字符网格（`w:type` 为 linesAndChars / snapToChars）。
+    pub chars: bool,
+    /// `w:charSpace`：字符网格的格宽比 Normal 样式的字号多出多少，单位 1/4096 磅。
+    pub char_space: Option<i32>,
 }
 
 /// `w:sectPr`：一节的页面设置。单位 twips。

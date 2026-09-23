@@ -16,7 +16,7 @@ mod script;
 mod text;
 
 pub use calib::{
-    AutoSpace, Breaks, Calib, Cascade, CharClass, Decor, EmptyPara, FixedBaseline, Flow,
+    AutoSpace, Breaks, Calib, Cascade, CharClass, CharGrid, Decor, EmptyPara, FixedBaseline, Flow,
     GridLayout, HangingIndent, HangingPunct, HeaderFooter, Justify, Kerning, LineGap, ListNumbers,
     Overflow, PageBottom, PageBreakBefore, ParaSpacing, RunFormat, Sections, Tabs, Theme,
     TrailingSpaces,
@@ -175,6 +175,7 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
             left: section.page.margin_left,
             width: section.page.content_width(),
             default_tab_stop: doc.default_tab_stop,
+            char_pitch: section.char_pitch,
             calib,
         };
         measured.extend(doc.blocks[section.blocks.clone()].iter().map(|block| {
@@ -280,6 +281,7 @@ fn story_boxes(
         left: section.page.margin_left,
         width: section.page.content_width(),
         default_tab_stop: doc.default_tab_stop,
+        char_pitch: None,
         calib,
     };
     let mut measured: Vec<Measured> = blocks
@@ -641,6 +643,7 @@ mod tests {
                 left: 0.0,
                 width: 400.0,
                 default_tab_stop: 36.0,
+                char_pitch: None,
                 calib: &calib,
             };
             let b = para::measure(&p, &env, &mut book);

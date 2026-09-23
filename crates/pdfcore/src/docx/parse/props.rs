@@ -354,9 +354,15 @@ pub(super) fn parse_sect_pr(r: &mut Rd) -> Result<SectPr> {
                             attr(&e, "type").as_deref(),
                             Some("lines" | "linesAndChars" | "snapToChars")
                         );
+                        let chars = matches!(
+                            attr(&e, "type").as_deref(),
+                            Some("linesAndChars" | "snapToChars")
+                        );
                         s.doc_grid = Some(DocGrid {
                             line_pitch: pitch,
                             snaps,
+                            chars,
+                            char_space: attr_i32(&e, "charSpace"),
                         });
                     }
                 }

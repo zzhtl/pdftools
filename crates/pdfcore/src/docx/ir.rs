@@ -17,7 +17,9 @@
 
 use std::ops::Range;
 
-use super::layout::{Calib, Cascade, HeaderFooter, ListNumbers, RunFormat, Sections, Theme};
+use super::layout::{
+    Calib, Cascade, CharGrid, HeaderFooter, ListNumbers, RunFormat, Sections, Theme,
+};
 use super::model::{
     self, BreakKind, FieldChar, FontRef, LineRule, NumSuffix, PPr, RPr, RunItem, ThemeScript,
 };
@@ -402,6 +404,8 @@ pub struct Section {
     pub page: PageGeom,
     /// 本节的行网格。None 表示没有网格或网格类型不吸附。
     pub grid: Option<Grid>,
+    /// 字符网格的格宽（点）。None 是没有字符网格。
+    pub char_pitch: Option<f32>,
     /// 本节从哪里开始。第一节总是从第一页开始。
     pub start: SectionStart,
     /// 本节的块在 [`Document::blocks`] 里的区间。
@@ -444,6 +448,7 @@ impl Section {
                 .map(|g| Grid {
                     pitch_pt: tw(g.line_pitch),
                 }),
+            char_pitch: None,
             start: s.start,
             blocks,
             title_page: s.title_page,
@@ -511,9 +516,23 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
     // 页眉页脚：本节没写的那一类沿用上一节的。
     let hf_on = calib.header_footer == HeaderFooter::Drawn;
     let (mut headers, mut footers) = (HeaderSet::default(), HeaderSet::default());
+    // 字符网格的格宽以 Normal 样式的字号为基准。
+    let normal_pt = resolver
+        .mark(&resolver.paragraph(&PPr::default()))
+        .size_half_pt
+        .map(half_pt)
+        .unwrap_or(calib.default_size_pt);
     let mut sections = Vec::with_capacity(ends.len());
     for (sp, range) in ends {
         let mut section = Section::from_model(sp, range);
+        if calib.char_grid == CharGrid::Cells {
+            section.char_pitch = sp
+                .doc_grid
+                .filter(|g| g.chars)
+                .and_then(|g| g.char_space)
+                .map(|cs| normal_pt + cs as f32 / 4096.0)
+                .filter(|p| *p > 0.0);
+        }
         if hf_on {
             headers = header_set(&headers, &sp.headers, &ctx);
             footers = header_set(&footers, &sp.footers, &ctx);

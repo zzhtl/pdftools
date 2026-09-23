@@ -20,6 +20,8 @@ pub(super) struct Env<'a> {
     pub width: f32,
     /// 默认制表位的间距（点）。
     pub default_tab_stop: f32,
+    /// 字符网格的格宽（点），见 [`CharGrid::Cells`](super::calib::CharGrid)。
+    pub char_pitch: Option<f32>,
     pub calib: &'a Calib,
 }
 
@@ -128,7 +130,7 @@ impl ParaBox {
 }
 
 pub(super) fn measure(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> ParaBox {
-    let shaped = text::shape(para, book, env.calib);
+    let shaped = text::shape(para, book, env.calib, env.char_pitch);
     let body = if !shaped.pieces.is_empty() {
         ParaBody::Lines(break_lines(para, &shaped, env, book))
     } else {

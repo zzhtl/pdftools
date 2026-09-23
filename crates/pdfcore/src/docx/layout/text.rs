@@ -348,7 +348,13 @@ pub(super) fn is_page_break(c: char) -> bool {
     c == ir::PAGE_BREAK || c == ir::COLUMN_BREAK
 }
 
-pub(super) fn shape(para: &ir::Paragraph, book: &mut FontBook, calib: &Calib) -> ShapedPara {
+/// `char_pitch`：字符网格的格宽，汉字与全角标点按整格排。
+pub(super) fn shape(
+    para: &ir::Paragraph,
+    book: &mut FontBook,
+    calib: &Calib,
+    char_pitch: Option<f32>,
+) -> ShapedPara {
     let typed_breaks = calib.breaks == Breaks::Typed;
     let tab_stops = calib.tabs == Tabs::Stops;
     let mut text = String::with_capacity(para.text.len());
@@ -443,7 +449,17 @@ pub(super) fn shape(para: &ir::Paragraph, book: &mut FontBook, calib: &Calib) ->
                 // 字符间距加在每个字（cluster）的最后一个字形之后；记下到每个字形为止
                 // 有几个字的末尾，量宽度时一次减法就够。不折算成字体单位：
                 // 宋体每 em 只有 256 个单位，取整后每个字会差出 0.016pt。
-                let letter_ends = if style.char_spacing != 0.0 {
+                // 字符网格：汉字、全角标点（一个 em 宽）撑满整格。字号比格宽略大时
+                // 仍占一格（公文的三号字就比格宽大 0.2pt），明显更大时占两格。
+                let grid_extra = match char_pitch {
+                    Some(p) if east && !is_unpainted(&text[part.clone()]) => {
+                        let cells = (style.size_pt / p - 0.05).ceil().max(1.0);
+                        cells * p - style.size_pt
+                    }
+                    _ => 0.0,
+                };
+                let letter_spacing = style.char_spacing + grid_extra;
+                let letter_ends = if letter_spacing != 0.0 {
                     let g = &shaped.glyphs;
                     std::iter::once(0)
                         .chain((0..g.len()).scan(0u32, |n, i| {
@@ -497,7 +513,7 @@ pub(super) fn shape(para: &ir::Paragraph, book: &mut FontBook, calib: &Calib) ->
                     synthetic_bold: font.synthetic_bold,
                     synthetic_italic: font.synthetic_italic,
                     size_pt: size,
-                    letter_spacing: style.char_spacing,
+                    letter_spacing,
                     letter_ends,
                     metrics_size_pt: style.size_pt,
                     rise,
