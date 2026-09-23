@@ -29,6 +29,11 @@ const REL_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/rela
 /// 而 LibreOffice 在缺了它时按另一套规则排段落间距 —— 参照就不像真实文档了。
 const DEFAULT_SETTINGS: &str = r#"<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat>"#;
 
+/// 默认的 `styles.xml`：只有一个不带任何属性的 Normal。真实文档都有样式部件，
+/// 而 LibreOffice 在缺了它时不开孤行控制（有样式部件、只是没写 `w:widowControl`
+/// 时是开着的）。
+const DEFAULT_STYLES: &str = r#"<w:docDefaults><w:rPrDefault><w:rPr/></w:rPrDefault><w:pPrDefault/></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>"#;
+
 /// 现有用例一直用的页面：A4，上下 1 英寸，左右 2.8cm。
 const DEFAULT_SECT: &str = r#"<w:pgSz w:w="11906" w:h="16838"/>
 <w:pgMar w:top="1440" w:right="1588" w:bottom="1440" w:left="1588"/>"#;
@@ -81,7 +86,7 @@ impl DocxBuilder {
             sect_refs: String::new(),
             sect: DEFAULT_SECT.to_string(),
             sect_extra: String::new(),
-            styles: None,
+            styles: Some(DEFAULT_STYLES.to_string()),
             numbering: None,
             settings: Some(DEFAULT_SETTINGS.to_string()),
             theme: None,
