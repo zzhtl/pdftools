@@ -184,6 +184,7 @@ pub(super) fn parse_rpr(r: &mut Rd) -> Result<RPr> {
                 "position" => rpr.position = attr_i32(&e, "val"),
                 "caps" => rpr.caps = Some(on_off(&e)),
                 "smallCaps" => rpr.small_caps = Some(on_off(&e)),
+                "kern" => rpr.kern = attr_i32(&e, "val").map(|v| v.max(0) as u32),
                 "vanish" => rpr.vanish = Some(on_off(&e)),
                 _ => {}
             },

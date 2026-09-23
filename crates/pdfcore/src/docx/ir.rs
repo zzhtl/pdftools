@@ -127,6 +127,8 @@ pub struct RunStyle {
     pub link: Option<String>,
     /// 页码类域的结果文字：排版时代入真实的数。
     pub field: Option<Field>,
+    /// 做字距调整（`w:kern` 的阈值不超过字号）。
+    pub kern: bool,
 }
 
 /// 页码类的域。同一个域的结果可能分在几个 span 里，靠 `id` 认出是同一个。
@@ -899,7 +901,17 @@ fn run_style(rpr: &RPr, fonts: &FontNames, calib: &Calib) -> RunStyle {
         },
         link: None,
         field: None,
+        kern: rpr
+            .kern
+            .is_some_and(|k| k > 0 && size_half_pt(rpr, calib) >= k as f32),
     }
+}
+
+/// 字号，半磅。
+fn size_half_pt(rpr: &RPr, calib: &Calib) -> f32 {
+    rpr.size_half_pt
+        .map(|v| v as f32)
+        .unwrap_or(calib.default_size_pt * 2.0)
 }
 
 fn paragraph(

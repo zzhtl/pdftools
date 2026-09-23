@@ -34,6 +34,18 @@ pub struct Calib {
     pub list_numbers: ListNumbers,
     pub sections: Sections,
     pub header_footer: HeaderFooter,
+    pub kerning: Kerning,
+}
+
+/// 字距调整（字体里的 kern 对，如 AV、To、11）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kerning {
+    /// 一律调整。
+    Always,
+    /// run 写了 `w:kern`、字号又达到它给的阈值时才调整。对照 LibreOffice：没写
+    /// `w:kern` 时不调整，写了就调整，与我们调整的结果一致；但 LibreOffice 不看阈值，
+    /// 字号不到阈值也调整，这一点按 Word 的规则。
+    Word,
 }
 
 /// 页眉页脚与页码域。
@@ -373,6 +385,7 @@ impl Calib {
             list_numbers: ListNumbers::Rendered,
             sections: Sections::Each,
             header_footer: HeaderFooter::Drawn,
+            kerning: Kerning::Word,
         }
     }
 
@@ -402,6 +415,7 @@ impl Calib {
             list_numbers: ListNumbers::Dropped,
             sections: Sections::Last,
             header_footer: HeaderFooter::Warned,
+            kerning: Kerning::Always,
         }
     }
 }

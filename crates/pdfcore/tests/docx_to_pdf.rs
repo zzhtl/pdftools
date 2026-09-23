@@ -1991,3 +1991,36 @@ fn sections_have_their_own_pages() {
     );
     assert!((left(3, "最后一节") - 79.4).abs() < 0.01);
 }
+
+/// 字距调整只在 run 写了 `w:kern`、字号又达到它给的阈值时才做（Word 的规则）。
+#[test]
+fn kerning_follows_w_kern() {
+    let para = |kern: &str| {
+        format!(
+            r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/>{kern}<w:sz w:val="24"/></w:rPr><w:t>AVATAR</w:t></w:r></w:p>"#
+        )
+    };
+    let body = [
+        para(""),
+        para(r#"<w:kern w:val="2"/>"#),
+        para(r#"<w:kern w:val="48"/>"#),
+    ]
+    .concat();
+    let pages = common::pdftext::extract(&convert(&make_docx("kerning.docx", &body)).value.pdf);
+    let xs: Vec<Vec<f32>> = pages[0]
+        .lines
+        .iter()
+        .map(|l| {
+            l.frags
+                .iter()
+                .flat_map(|f| &f.glyphs)
+                .map(|(_, x)| *x)
+                .collect()
+        })
+        .collect();
+    assert_eq!(xs[0], xs[2], "字号不到阈值，与没写 w:kern 一样不调整");
+    assert!(
+        xs[1].last() < xs[0].last(),
+        "写了 w:kern 要调整（AV、TA 靠得更近）：{xs:?}"
+    );
+}

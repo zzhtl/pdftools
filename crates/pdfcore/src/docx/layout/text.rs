@@ -14,11 +14,11 @@ use std::ops::Range;
 
 use unicode_linebreak::{linebreaks, BreakOpportunity};
 
-use super::calib::{AutoSpace, Breaks, Calib, CharClass, Tabs};
+use super::calib::{AutoSpace, Breaks, Calib, CharClass, Kerning, Tabs};
 use super::script;
 use crate::docx::ir;
 use crate::fonts::{
-    attaches_to_previous, cluster_texts, pua, shape_run, split_by_script, FontBook, FontId,
+    attaches_to_previous, cluster_texts, pua, shape_run_with, split_by_script, FontBook, FontId,
     Resolved, ScriptClass, ShapedGlyph, ShapedRun,
 };
 
@@ -435,7 +435,8 @@ pub(super) fn shape(para: &ir::Paragraph, book: &mut FontBook, calib: &Calib) ->
                 let shaped = if is_unpainted(&text[part.clone()]) {
                     ShapedRun::empty()
                 } else {
-                    shape_run(face, &text[part.clone()], class.to_rustybuzz())
+                    let kern = calib.kerning == Kerning::Always || style.kern;
+                    shape_run_with(face, &text[part.clone()], class.to_rustybuzz(), kern)
                 };
                 // 字符间距加在每个字（cluster）的最后一个字形之后；记下到每个字形为止
                 // 有几个字的末尾，量宽度时一次减法就够。不折算成字体单位：

@@ -50,16 +50,27 @@ impl ShapedRun {
     }
 }
 
-/// 对一段**同字体、同 script** 的文本整形。
+/// 对一段**同字体、同 script** 的文本整形，做字距调整。
 ///
 /// 解析好的字体与整形计划都缓存在 [`FontFace`] 里，这里只做真正的整形。
 pub fn shape_run(face: &FontFace, text: &str, script: rustybuzz::Script) -> ShapedRun {
+    shape_run_with(face, text, script, true)
+}
+
+/// 同 [`shape_run`]，`kern` 为假时不做字距调整（Word 只在 run 写了 `w:kern`
+/// 时才调整）。
+pub fn shape_run_with(
+    face: &FontFace,
+    text: &str,
+    script: rustybuzz::Script,
+    kern: bool,
+) -> ShapedRun {
     let mut buf = rustybuzz::UnicodeBuffer::new();
     buf.push_str(text);
     buf.set_direction(rustybuzz::Direction::LeftToRight);
     buf.set_script(script);
 
-    let plan = face.plan(script);
+    let plan = face.plan(script, kern);
     let out = rustybuzz::shape_with_plan(face.shaper(), &plan, buf);
     let infos = out.glyph_infos();
     let positions = out.glyph_positions();

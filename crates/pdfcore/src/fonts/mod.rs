@@ -14,8 +14,8 @@ pub mod system;
 
 pub use book::{FontBook, FontId, Resolved};
 pub use shape::{
-    attaches_to_previous, cluster_texts, shape_run, split_by_script, ScriptClass, ShapedGlyph,
-    ShapedRun,
+    attaches_to_previous, cluster_texts, shape_run, shape_run_with, split_by_script, ScriptClass,
+    ShapedGlyph, ShapedRun,
 };
 pub use subset::{subset_font, GidMap, SubsetFont};
 
@@ -45,6 +45,9 @@ pub enum Embedding {
     Restricted,
 }
 
+/// 按（文种, 是否字距调整）缓存的整形计划。
+type Plans = Mutex<Vec<((rustybuzz::Script, bool), Arc<rustybuzz::ShapePlan>)>>;
+
 /// 一个具体的字体面（face）。`.ttc` 里有多个 face，所以 index 是必需的。
 ///
 /// 解析好的整形器（含 GSUB/GPOS 查找表）与整形计划都缓存在这里：每整形一段文字就
@@ -60,7 +63,7 @@ pub struct FontFace {
     /// PostScript 名，写进 PDF 的 BaseFont。
     pub postscript_name: String,
     /// 按文种缓存的整形计划。
-    plans: Mutex<Vec<(rustybuzz::Script, Arc<rustybuzz::ShapePlan>)>>,
+    plans: Plans,
 }
 
 // 字体面要在批量转换的工作线程之间共享。
@@ -200,19 +203,25 @@ impl FontFace {
     }
 
     /// 某个文种的整形计划（从左到右）。第一次用到时编排，之后复用。
-    pub(crate) fn plan(&self, script: rustybuzz::Script) -> Arc<rustybuzz::ShapePlan> {
+    /// `kern` 为假时关掉字距调整（OpenType 的 `kern` 特性，连同旧式 kern 表）。
+    pub(crate) fn plan(&self, script: rustybuzz::Script, kern: bool) -> Arc<rustybuzz::ShapePlan> {
         let mut plans = self.plans.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((_, p)) = plans.iter().find(|(s, _)| *s == script) {
+        if let Some((_, p)) = plans.iter().find(|(k, _)| *k == (script, kern)) {
             return p.clone();
         }
+        let no_kern = [rustybuzz::Feature::new(
+            rustybuzz::ttf_parser::Tag::from_bytes(b"kern"),
+            0,
+            ..,
+        )];
         let plan = Arc::new(rustybuzz::ShapePlan::new(
             &self.rb,
             rustybuzz::Direction::LeftToRight,
             Some(script),
             None,
-            &[],
+            if kern { &[] } else { &no_kern },
         ));
-        plans.push((script, plan.clone()));
+        plans.push(((script, kern), plan.clone()));
         plan
     }
 

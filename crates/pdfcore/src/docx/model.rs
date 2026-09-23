@@ -70,6 +70,8 @@ pub struct RPr {
     pub position: Option<i32>,
     pub caps: Option<bool>,
     pub small_caps: Option<bool>,
+    /// `w:kern`：字号达到这么多（半磅）才做字距调整；0 是不调整。
+    pub kern: Option<u32>,
 }
 
 /// `w:rFonts` 里一个字体槽写的是什么。
@@ -167,7 +169,8 @@ impl RPr {
             vert_align,
             position,
             caps,
-            small_caps
+            small_caps,
+            kern
         );
     }
 }

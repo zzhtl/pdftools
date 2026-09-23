@@ -17,7 +17,7 @@ mod text;
 
 pub use calib::{
     AutoSpace, Breaks, Calib, Cascade, CharClass, Decor, EmptyPara, FixedBaseline, Flow,
-    GridLayout, HangingIndent, HangingPunct, HeaderFooter, Justify, ListNumbers, Overflow,
+    GridLayout, HangingIndent, HangingPunct, HeaderFooter, Justify, Kerning, ListNumbers, Overflow,
     PageBottom, PageBreakBefore, ParaSpacing, RunFormat, Sections, Tabs, Theme, TrailingSpaces,
 };
 
@@ -589,6 +589,7 @@ fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
         position_pt: 0.0,
         link: None,
         field: None,
+        kern: false,
     };
     let spans = vec![ir::Span {
         range: 0..text.len(),
