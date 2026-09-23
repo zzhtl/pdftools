@@ -111,6 +111,8 @@ pub(super) struct Paginator {
     lines: Vec<usize>,
     /// 当前页上上下型环绕的图挡住的横条（与 `used` 同一个量法），碰到的行挪到下面。
     bands: Vec<(f32, f32)>,
+    /// 当前页是为了整段挪过来才开的（与下段同页、段中不分页）：页首这一段不加段前距。
+    moved: bool,
 }
 
 /// 一段的浮动对象放在了哪一页、放之前各层有多少东西：段落挪到下一页时撤回。
@@ -156,6 +158,7 @@ impl Paginator {
             heights: Vec::new(),
             lines: vec![0],
             bands: Vec::new(),
+            moved: false,
         }
     }
 
@@ -194,6 +197,7 @@ impl Paginator {
             heights: Vec::new(),
             lines: vec![0],
             bands: Vec::new(),
+            moved: false,
         }
     }
 
@@ -249,6 +253,7 @@ impl Paginator {
         self.bands.clear();
         self.used = 0.0;
         self.last_after = 0.0;
+        self.moved = false;
     }
 
     /// 开始新的一节。见 [`Sections::Each`](super::calib::Sections::Each)。
@@ -320,6 +325,7 @@ impl Paginator {
         }
         if self.used + need > self.frame.capacity + FIT_TOLERANCE {
             self.new_page();
+            self.moved = true;
         }
     }
 
@@ -341,20 +347,22 @@ impl Paginator {
                 > self.frame.capacity + FIT_TOLERANCE
         {
             self.new_page();
+            self.moved = true;
         }
         // 上一段留着的框：同一组就接着用（段距算在框里），否则先收口。
         let continuing = matches!((&self.open, &para.decor), (Some(o), Some(d)) if o.decor == *d);
         if !continuing {
             self.close_box();
         }
-        // 段前距在页首也照常生效。
+        // 段前距在文档开头、分页符之后的页首也照常生效。
         //
         // 在页首吃掉段前距是 HTML 的习惯，LibreOffice 并不这么做：同一份文档，
         // 参照的首行基线距正文顶 40.3pt，而吃掉段前距只有 24.1pt，整页内容整体上移一截。
-        if self.collapse_spacing {
-            self.used += (para.space_before - self.last_after).max(0.0);
-        } else {
-            self.used += para.space_before;
+        // 放不下而换页时则不加：自然分页时段前距加在了上一页（首行放不下才换页），
+        // 整段挪过来的（与下段同页、段中不分页）也一样，LibreOffice 实测。
+        let moved = std::mem::take(&mut self.moved) && self.at_page_top();
+        if !moved {
+            self.used += self.gap_before(para, self.last_after);
         }
 
         match &para.body {

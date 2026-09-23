@@ -2903,6 +2903,36 @@ fn keep_next_keep_lines_widows_and_contextual_spacing() {
     let body = filler(32) + &para(r#"<w:widowControl w:val="0"/>"#, &three_lines);
     assert_eq!(page_of("no_widow.docx", &body, "三行段落"), 0);
 
+    // 挪到下一页的段落在页首不加段前距（与自然分页一样）：首行与第 1 页的首行一样高。
+    let spaced_before = |ppr: &str, text: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:spacing w:before="120" w:after="0" w:line="400" w:lineRule="exact"/>{ppr}</w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    };
+    for (name, body) in [
+        (
+            "moved_keep_next.docx",
+            filler(33) + &spaced_before("<w:keepNext/>", "标题") + &para("", "正文"),
+        ),
+        (
+            "moved_keep_lines.docx",
+            filler(32)
+                + &spaced_before(r#"<w:keepLines/><w:widowControl w:val="0"/>"#, &three_lines),
+        ),
+        (
+            "moved_widow.docx",
+            filler(32) + &spaced_before("", &three_lines),
+        ),
+    ] {
+        let pages = common::pdftext::extract(&convert(&make_docx(name, &body)).value.pdf);
+        assert!(
+            (pages[1].lines[0].y - pages[0].lines[0].y).abs() < 0.01,
+            "{name}：{:?} vs {:?}",
+            pages[1].lines[0],
+            pages[0].lines[0]
+        );
+    }
+
     // 同一样式的相邻段落之间不加段距。
     let spaced = |ctx: &str| {
         (0..3)
