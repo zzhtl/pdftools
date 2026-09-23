@@ -515,6 +515,8 @@ pub enum RunItem {
     FieldChar(FieldChar),
     /// `w:instrText`：域代码（`PAGE \* MERGEFORMAT`）。
     FieldCode(String),
+    /// `w:footnoteReference` / `w:endnoteReference`：脚注、尾注的引用。本版本不排注释。
+    NoteReference,
 }
 
 /// `w:drawing` 等画出来的东西。
@@ -890,6 +892,8 @@ pub struct SectPr {
     /// `w:headerReference`：各类页眉的关系 id。
     pub headers: HeaderRefs,
     pub footers: HeaderRefs,
+    /// `w:cols`：分几栏（`@w:num`，或各栏分别写宽度时 `w:col` 的个数）。0 是没写。
+    pub columns: u32,
 }
 
 /// 一节从哪里开始（`w:sectPr/w:type`）。
@@ -935,6 +939,7 @@ impl Default for SectPr {
             page_number_format: None,
             headers: HeaderRefs::default(),
             footers: HeaderRefs::default(),
+            columns: 0,
         }
     }
 }

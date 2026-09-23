@@ -537,6 +537,33 @@ fn floating_images_are_positioned() {
     );
 }
 
+/// 排不了的脚注、尾注与分栏：照常输出，但要说清楚，不能悄悄丢掉。
+#[test]
+fn notes_and_columns_are_reported() {
+    if !require_cjk_font() {
+        return;
+    }
+    let body = r#"<w:p><w:r><w:t>见注释</w:t></w:r><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p>
+<w:p><w:pPr><w:sectPr><w:cols w:num="2" w:space="425"/></w:sectPr></w:pPr><w:r><w:t>两栏的节</w:t></w:r></w:p>
+<w:p><w:r><w:t>最后一节</w:t></w:r></w:p>"#;
+    let report =
+        docx_to_pdf::run(&make_docx("notes_columns.docx", body), &NoProgress).expect("转换失败");
+    let text = text_of(&report.value.pdf);
+    assert!(
+        text.contains("见注释") && text.contains("两栏的节"),
+        "{text}"
+    );
+    let details: Vec<&str> = report.warnings.iter().map(|w| w.detail.as_str()).collect();
+    assert!(
+        details.iter().any(|d| d.starts_with("1 处脚注")),
+        "{details:?}"
+    );
+    assert!(
+        details.iter().any(|d| d.starts_with("1 节设置了分栏")),
+        "{details:?}"
+    );
+}
+
 /// 形状测试用的零件：固定 20pt 行距的段落（行高与字体无关）、DrawingML 形状的浮动与
 /// 行内写法（包在 `mc:AlternateContent` 里，Fallback 是一个带字的 VML 框，画出来就错了）。
 mod shapes {

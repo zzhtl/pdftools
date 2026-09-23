@@ -169,6 +169,28 @@ fn breaks_keep_their_kind() {
     );
 }
 
+/// 脚注、尾注的引用记下来（本版本不排注释，要给警告）；分栏数取 `@w:num`，各栏分别
+/// 写宽度时数 `w:col`。
+#[test]
+fn note_references_and_columns() {
+    let doc = body(
+        r#"<w:p><w:r><w:t>正文</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:endnoteReference w:id="2"/></w:r></w:p>
+<w:p><w:pPr><w:sectPr><w:cols w:num="2" w:space="425"/></w:sectPr></w:pPr></w:p>
+<w:sectPr><w:cols w:equalWidth="0"><w:col w:w="3000"/><w:col w:w="2000"/><w:col w:w="1000"/></w:cols></w:sectPr>"#,
+    );
+    let items: Vec<&RunItem> = paras(&doc)[0].runs.iter().flat_map(|r| &r.items).collect();
+    assert_eq!(
+        items,
+        vec![
+            &RunItem::Text("正文".into()),
+            &RunItem::NoteReference,
+            &RunItem::NoteReference
+        ]
+    );
+    assert_eq!(paras(&doc)[1].section.as_ref().map(|s| s.columns), Some(2));
+    assert_eq!(doc.section.columns, 3);
+}
+
 #[test]
 fn html_paragraph_spacing_switch() {
     let on = parse_settings(

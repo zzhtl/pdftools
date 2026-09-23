@@ -654,6 +654,10 @@ pub struct Document {
     pub missing_objects: usize,
     /// 画不准的形状（圆角、旋转、其他几何形状）有几个。
     pub approximated_shapes: usize,
+    /// 脚注、尾注的引用有几处（本版本不排注释）。
+    pub notes: usize,
+    /// 设置了分栏的节有几个（本版本按单栏排）。
+    pub multi_column_sections: usize,
     /// 文字绕着图走的环绕按上下型近似排了几个。
     pub approximated_wraps: usize,
     pub blocks: Vec<Block>,
@@ -675,6 +679,7 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
         calib,
         missing: Default::default(),
         shapes: Default::default(),
+        notes: Default::default(),
         approximated: Default::default(),
     };
     let mut blocks = Vec::with_capacity(doc.body.len());
@@ -696,6 +701,7 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
         }
     }
     ends.push((&doc.section, start..blocks.len()));
+    let multi_column_sections = ends.iter().filter(|(sp, _)| sp.columns > 1).count();
 
     // 页眉页脚：本节没写的那一类沿用上一节的。
     let hf_on = calib.header_footer == HeaderFooter::Drawn;
@@ -742,6 +748,8 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
             .unwrap_or_default(),
         missing_objects: ctx.missing.get(),
         approximated_shapes: ctx.shapes.get(),
+        notes: ctx.notes.get(),
+        multi_column_sections,
         approximated_wraps: ctx.approximated.get(),
         blocks,
     }
@@ -789,6 +797,8 @@ struct Ctx<'a> {
     missing: std::cell::Cell<usize>,
     /// 画不准的形状有几个。
     shapes: std::cell::Cell<usize>,
+    /// 脚注、尾注的引用有几处。
+    notes: std::cell::Cell<usize>,
     /// 按上下型近似排的环绕（四周型、紧密型、穿越型）有几个。
     approximated: std::cell::Cell<usize>,
 }
@@ -932,6 +942,7 @@ fn push_paragraph(
                     }
                 }
                 RunItem::FieldChar(_) | RunItem::FieldCode(_) => {}
+                RunItem::NoteReference => ctx.notes.set(ctx.notes.get() + 1),
                 // 符号用它自己的字体。符号字体（Symbol、Wingdings）里的码位
                 // 写成单字节时，实际在私用区 U+F0xx。
                 RunItem::Sym { .. } if !full => {}

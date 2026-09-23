@@ -305,6 +305,7 @@ fn parse_tab(e: &quick_xml::events::BytesStart) -> Option<TabDef> {
 
 pub(super) fn parse_sect_pr(r: &mut Rd) -> Result<SectPr> {
     let mut s = SectPr::default();
+    let mut cols = 0u32;
     loop {
         match r.read_event().map_err(xml_err)? {
             Event::Start(e) if e.local_name().as_ref() == "sectPrChange" => {
@@ -343,6 +344,12 @@ pub(super) fn parse_sect_pr(r: &mut Rd) -> Result<SectPr> {
                     }
                 }
                 "titlePg" => s.title_page = on_off(&e),
+                "cols" => {
+                    let num = attr_i32(&e, "num").unwrap_or(1).max(1) as u32;
+                    s.columns = s.columns.max(num);
+                }
+                // 各栏宽度不等时逐栏写出。
+                "col" => cols += 1,
                 "pgNumType" => {
                     s.page_number_start = attr_i32(&e, "start");
                     s.page_number_format = attr(&e, "fmt");
@@ -393,6 +400,7 @@ pub(super) fn parse_sect_pr(r: &mut Rd) -> Result<SectPr> {
             _ => {}
         }
     }
+    s.columns = s.columns.max(cols);
     Ok(s)
 }
 

@@ -281,6 +281,7 @@ fn parse_run(r: &mut Rd, level: usize) -> Result<Run> {
                     })),
                 "cr" => run.items.push(RunItem::Break(BreakKind::Line)),
                 "noBreakHyphen" => run.items.push(RunItem::NoBreakHyphen),
+                "footnoteReference" | "endnoteReference" => run.items.push(RunItem::NoteReference),
                 "fldChar" => run.items.extend(field_char(&e).map(RunItem::FieldChar)),
                 "sym" => {
                     if let Some(code) =

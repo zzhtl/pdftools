@@ -284,6 +284,21 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
             ),
         ));
     }
+    if doc.notes > 0 {
+        warnings.push(Warning::new(
+            WarningKind::UnsupportedElement,
+            format!(
+                "{} 处脚注、尾注本版本不排：正文里的注释编号与注释的内容都没有画",
+                doc.notes
+            ),
+        ));
+    }
+    if doc.multi_column_sections > 0 {
+        warnings.push(Warning::new(
+            WarningKind::UnsupportedElement,
+            format!("{} 节设置了分栏，本版本按单栏排", doc.multi_column_sections),
+        ));
+    }
     if doc.approximated_wraps > 0 {
         warnings.push(Warning::new(
             WarningKind::UnsupportedElement,
