@@ -168,8 +168,6 @@ pub(super) fn parse_rpr(r: &mut Rd) -> Result<RPr> {
                         .or_else(|| theme("hAnsiTheme"))
                         .or_else(|| named("hAnsi"));
                     rpr.font_east_asia = theme("eastAsiaTheme").or_else(|| named("eastAsia"));
-                    rpr.legacy_font_ascii = attr(&e, "ascii").or_else(|| attr(&e, "hAnsi"));
-                    rpr.legacy_font_east_asia = attr(&e, "eastAsia");
                     rpr.hint_east_asia = attr(&e, "hint").map(|h| h == "eastAsia");
                 }
                 "spacing" => rpr.spacing = attr_i32(&e, "val"),
@@ -209,7 +207,6 @@ pub(super) fn parse_ppr(r: &mut Rd) -> Result<(PPr, Option<SectPr>)> {
             // 修订前的旧格式，理由同 rPrChange。
             Event::Start(e) if e.local_name().as_ref() == "pPrChange" => skip(r, "pPrChange")?,
             Event::Start(e) | Event::Empty(e) => match e.local_name().as_ref() {
-                "numPr" => ppr.numbering = true,
                 // `w:numPr` 的两个子元素，在 `w:pPr` 里不会出现在别处。
                 "numId" => ppr.num_id = attr_i32(&e, "val"),
                 "ilvl" => ppr.num_ilvl = attr_i32(&e, "val"),
@@ -321,7 +318,6 @@ pub(super) fn parse_sect_pr(r: &mut Rd) -> Result<SectPr> {
                     }
                 }
                 kind @ ("headerReference" | "footerReference") => {
-                    s.has_header_footer = true;
                     let refs = if kind == "headerReference" {
                         &mut s.headers
                     } else {

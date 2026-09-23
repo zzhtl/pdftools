@@ -8,20 +8,13 @@
 //! 分开以后，「一段放不下时拆在哪」「keepNext 要不要整段挪走」这类判断只读测量结果，
 //! 不需要回滚已经画到页面上的东西；表格单元格、页眉页脚也用同一套测量。
 
-mod calib;
 mod metrics;
 mod paginate;
 mod para;
+mod rules;
 mod script;
 mod table;
 mod text;
-
-pub use calib::{
-    AutoSpace, Breaks, Calib, Cascade, CharClass, CharGrid, Decor, EmptyPara, FixedBaseline, Flow,
-    GridLayout, HangingIndent, HangingPunct, HeaderFooter, Images, Justify, Kerning, LineGap,
-    ListNumbers, Overflow, PageBottom, PageBreakBefore, ParaSpacing, RunFormat, Sections, Tables,
-    Tabs, Theme, TrailingSpaces,
-};
 
 use super::ir;
 use crate::error::{Warning, WarningKind};
@@ -172,9 +165,8 @@ pub struct LaidOut {
 
 const PLACEHOLDER_COLOR: [u8; 3] = [0x88, 0x88, 0x88];
 
-pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut {
-    let collapse = doc.html_paragraph_spacing && calib.para_spacing == ParaSpacing::HtmlCollapse;
-    let hf_on = calib.header_footer == HeaderFooter::Drawn;
+pub fn layout(doc: &ir::Document, book: &mut FontBook) -> LaidOut {
+    let collapse = doc.html_paragraph_spacing;
     // 页眉页脚先用域的缓存值量出高度，定下各类页面的正文区；真实的页码要等全文
     // 排完才知道，那时再代入重排页眉页脚，正文不再跟着动。
     let heights: Vec<[Hf; 3]> = doc
@@ -183,8 +175,8 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
         .map(|s| {
             [PageKind::Default, PageKind::First, PageKind::Even].map(|kind| {
                 let mut height = |set: &ir::HeaderSet| {
-                    let blocks = pick_story(set, kind).filter(|_| hf_on)?;
-                    let boxes = story_boxes(blocks, s, doc, book, calib, collapse, &|_| None);
+                    let blocks = pick_story(set, kind)?;
+                    let boxes = story_boxes(blocks, s, doc, book, collapse, &|_| None);
                     Some(stack(&boxes, collapse).1)
                 };
                 (height(&s.headers), height(&s.footers))
@@ -196,15 +188,15 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
         .iter()
         .zip(&heights)
         .map(|(s, [default, first, even])| paginate::Frames {
-            default: frame(s, calib, *default),
-            first: frame(s, calib, *first),
-            even: frame(s, calib, *even),
-            title_page: hf_on && s.title_page,
-            even_odd: hf_on && doc.even_and_odd_headers,
+            default: frame(s, *default),
+            first: frame(s, *first),
+            even: frame(s, *even),
+            title_page: s.title_page,
+            even_odd: doc.even_and_odd_headers,
         })
         .collect();
     let first = &doc.sections[0];
-    let mut pages = paginate::Paginator::new(frames[0], first.page_number_start, collapse, calib);
+    let mut pages = paginate::Paginator::new(frames[0], first.page_number_start, collapse);
     let mut warnings = Vec::new();
 
     // 先把所有块量好，放的时候才能往后看（与下段同页要知道下一段有多高）。
@@ -218,7 +210,6 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
             default_tab_stop: doc.default_tab_stop,
             char_pitch: section.char_pitch,
             punct_hangs: true,
-            calib,
         };
         measured.extend(
             doc.blocks[section.blocks.clone()]
@@ -226,16 +217,9 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
                 .map(|block| measure_block(block, &env, book, collapse, &|_| None)),
         );
     }
-    if calib.flow == Flow::Word {
-        contextual_spacing(&doc.blocks, &mut measured);
-    }
+    contextual_spacing(&doc.blocks, &mut measured);
     join_boxes(&mut measured);
 
-    let numbered = doc
-        .blocks
-        .iter()
-        .filter(|b| matches!(b, ir::Block::Para(p) if p.numbering_dropped))
-        .count();
     for (si, section) in doc.sections.iter().enumerate() {
         if si > 0 {
             pages.start_section(frames[si], section.start, section.page_number_start, si);
@@ -247,16 +231,7 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
         }
     }
 
-    // 编号与页眉页脚都按文档级汇总，不逐段报 —— 一个 50 项的列表
-    // 报 50 条警告，等于没报。
-    if numbered > 0 {
-        warnings.push(Warning::new(
-            WarningKind::UnsupportedElement,
-            format!(
-"{numbered} 个段落使用了 Word 的自动编号，本版本不生成编号文字（正文已保留）。需要编号请在 Word 里改成手动输入的序号。"
-            ),
-        ));
-    }
+    // 排不了的内容按文档汇总，不逐段报 —— 一个 50 项的列表报 50 条警告，等于没报。
     if !doc.num_format_fallbacks.is_empty() {
         warnings.push(Warning::new(
             WarningKind::UnsupportedElement,
@@ -308,25 +283,8 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
             ),
         ));
     }
-    if doc.has_header_footer && !hf_on {
-        warnings.push(Warning::new(
-            WarningKind::UnsupportedElement,
-            "文档设置了页眉或页脚，本版本不渲染".to_string(),
-        ));
-    }
-
     let mut pages = pages.finish();
-    if hf_on {
-        draw_headers_footers(
-            doc,
-            &mut pages,
-            &heights,
-            book,
-            calib,
-            collapse,
-            &mut warnings,
-        );
-    }
+    draw_headers_footers(doc, &mut pages, &heights, book, collapse, &mut warnings);
 
     warnings.extend(book.take_warnings());
     LaidOut { pages, warnings }
@@ -351,7 +309,6 @@ fn story_boxes(
     section: &ir::Section,
     doc: &ir::Document,
     book: &mut FontBook,
-    calib: &Calib,
     collapse: bool,
     value: &dyn Fn(&ir::Field) -> Option<String>,
 ) -> Vec<Measured> {
@@ -362,7 +319,6 @@ fn story_boxes(
         default_tab_stop: doc.default_tab_stop,
         char_pitch: None,
         punct_hangs: true,
-        calib,
     };
     measure_blocks(blocks, &env, book, collapse, value)
 }
@@ -411,9 +367,7 @@ fn measure_blocks(
         .iter()
         .map(|block| measure_block(block, env, book, collapse, value))
         .collect();
-    if env.calib.flow == Flow::Word {
-        contextual_spacing(blocks, &mut measured);
-    }
+    contextual_spacing(blocks, &mut measured);
     join_boxes(&mut measured);
     for m in &mut measured {
         match m {
@@ -487,7 +441,6 @@ fn draw_headers_footers(
     pages: &mut [Page],
     heights: &[[Hf; 3]],
     book: &mut FontBook,
-    calib: &Calib,
     collapse: bool,
     warnings: &mut Vec<Warning>,
 ) {
@@ -520,7 +473,7 @@ fn draw_headers_footers(
             let Some(blocks) = pick_story(set, kind) else {
                 continue;
             };
-            let boxes = story_boxes(blocks, s, doc, book, calib, collapse, &value);
+            let boxes = story_boxes(blocks, s, doc, book, collapse, &value);
             let (ops, height) = stack(&boxes, collapse);
             grew |= height > frozen.unwrap_or(0.0) + 1.0;
             let dy = if is_header {
@@ -653,12 +606,12 @@ fn join_boxes(measured: &mut [Measured]) {
 
 /// 一类页面的版面。`hf` 是这类页面上页眉、页脚的高度（没有就是 None）：页眉的
 /// 底边低过上边距时正文从页眉底下开始，页脚的顶边高过下边距时正文排到页脚顶为止。
-fn frame(section: &ir::Section, calib: &Calib, (header, footer): Hf) -> paginate::Frame {
+fn frame(section: &ir::Section, (header, footer): Hf) -> paginate::Frame {
     let p = &section.page;
     let top = header.map_or(p.margin_top, |h| p.margin_top.max(p.header_dist + h));
     let bottom = footer.map_or(p.margin_bottom, |h| p.margin_bottom.max(p.footer_dist + h));
     let height = (p.h_pt - top - bottom).max(1.0);
-    let (origin, capacity) = grid_area(height, section.grid, calib);
+    let (origin, capacity) = grid_area(height, section.grid);
     paginate::Frame {
         page: *p,
         origin: top - p.margin_top + origin,
@@ -666,10 +619,11 @@ fn frame(section: &ir::Section, calib: &Calib, (header, footer): Hf) -> paginate
     }
 }
 
-/// 正文能用的竖向区间：(离正文区顶端的偏移, 高度)。见 [`GridLayout::Centered`]。
-fn grid_area(height: f32, grid: Option<ir::Grid>, calib: &Calib) -> (f32, f32) {
-    match (grid, calib.grid) {
-        (Some(g), GridLayout::Centered) if g.pitch_pt > 0.0 && g.pitch_pt <= height => {
+/// 正文能用的竖向区间：(离正文区顶端的偏移, 高度)。网格在版心里上下居中，见
+/// `rules` 模块「行网格」一节。
+fn grid_area(height: f32, grid: Option<ir::Grid>) -> (f32, f32) {
+    match grid {
+        Some(g) if g.pitch_pt > 0.0 && g.pitch_pt <= height => {
             let area = (height / g.pitch_pt).floor() * g.pitch_pt;
             ((height - area) / 2.0, area)
         }
@@ -734,7 +688,6 @@ fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
         borders: ir::Borders::default(),
         shading: None,
         style_id: None,
-        numbering_dropped: false,
         number: None,
         text,
         spans,
@@ -749,34 +702,29 @@ mod tests {
     use super::*;
 
     /// 西文字体的行间距算在字的上面：基线离行顶「上伸 + 行间距」。
-    /// 重写前的规则把它算在下面。
     #[test]
     fn line_gap_sits_above_the_text() {
         let mut book = FontBook::new();
         let p = placeholder_para("Abc".into(), false);
-        for (calib, above) in [(Calib::current(), true), (Calib::legacy(), false)] {
-            let env = para::Env {
-                grid: None,
-                left: 0.0,
-                width: 400.0,
-                default_tab_stop: 36.0,
-                char_pitch: None,
-                punct_hangs: true,
-                calib: &calib,
-            };
-            let b = para::measure(&p, &env, &mut book, &mut |_, _, _, _| Vec::new());
-            let para::ParaBody::Lines(lines) = &b.body else {
-                panic!("应当有一行字");
-            };
-            let font = book.resolve(None, false, false, false).unwrap();
-            let m = book.face(font.id).metrics();
-            let gap = if above { m.line_gap as f32 } else { 0.0 };
-            let want = (m.ascender as f32 + gap) * 9.0 / m.upem as f32;
-            assert!(
-                (lines[0].baseline - want).abs() < 1e-3,
-                "{} vs {want}",
-                lines[0].baseline
-            );
-        }
+        let env = para::Env {
+            grid: None,
+            left: 0.0,
+            width: 400.0,
+            default_tab_stop: 36.0,
+            char_pitch: None,
+            punct_hangs: true,
+        };
+        let b = para::measure(&p, &env, &mut book, &mut |_, _, _, _| Vec::new());
+        let para::ParaBody::Lines(lines) = &b.body else {
+            panic!("应当有一行字");
+        };
+        let font = book.resolve(None, false, false, false).unwrap();
+        let m = book.face(font.id).metrics();
+        let want = (m.ascender as f32 + m.line_gap as f32) * 9.0 / m.upem as f32;
+        assert!(
+            (lines[0].baseline - want).abs() < 1e-3,
+            "{} vs {want}",
+            lines[0].baseline
+        );
     }
 }

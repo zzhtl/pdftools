@@ -14,12 +14,11 @@ use std::ops::Range;
 
 use unicode_linebreak::{linebreaks, BreakOpportunity};
 
-use super::calib::{AutoSpace, Breaks, Calib, CharClass, Kerning, Tabs};
 use super::script;
 use crate::docx::ir;
 use crate::fonts::{
-    attaches_to_previous, cluster_texts, pua, shape_run_with, split_by_script, FontBook, FontId,
-    Resolved, ScriptClass, ShapedGlyph, ShapedRun,
+    attaches_to_previous, cluster_texts, pua, shape_run_with, FontBook, FontId, Resolved,
+    ScriptClass, ShapedGlyph, ShapedRun,
 };
 
 /// 中日韩文字与西文/数字相邻时插入的间距，单位 em。
@@ -147,11 +146,11 @@ impl Piece {
         &self.shaped.glyphs[r]
     }
 
-    /// 基线离行顶多远。`gap_above`：字体的行间距算在上面（[`LineGap::Above`](super::calib::LineGap)）。
-    pub fn ascent_pt(&self, book: &FontBook, gap_above: bool) -> f32 {
+    /// 基线离行顶多远：上伸加上字体的行间距（算在字的上面，见 `rules` 模块「西文
+    /// 字体的行间距」一节）。
+    pub fn ascent_pt(&self, book: &FontBook) -> f32 {
         let m = book.face(self.metrics_font).metrics();
-        let gap = if gap_above { m.line_gap as f32 } else { 0.0 };
-        (m.ascender as f32 + gap) * self.metrics_size_pt / m.upem as f32
+        (m.ascender as f32 + m.line_gap as f32) * self.metrics_size_pt / m.upem as f32
     }
 
     pub fn natural_line_pt(&self, book: &FontBook) -> f32 {
@@ -290,7 +289,7 @@ impl ShapedPara {
 
     /// 从 `start` 开始，找最后一个装得下的断行点。返回 (断点偏移, 是否是强制断行)。
     /// `x0` 是本行起点（从正文区左缘量起），有制表符时要靠它定位。
-    /// `char_boundary`：一整串不可断的内容放不下时，在字符边界上断开（否则整串越过右边距）。
+    /// 一整串不可断的内容放不下时，在字符边界上断开，把这一行排满。
     pub fn next_break(
         &self,
         start: usize,
@@ -298,7 +297,6 @@ impl ShapedPara {
         hang: Hang,
         x0: f32,
         rules: &TabRules,
-        char_boundary: bool,
     ) -> (usize, bool) {
         let first = self.breaks.partition_point(|(i, _)| *i <= start);
         let fits = |idx| {
@@ -332,7 +330,6 @@ impl ShapedPara {
         match best {
             Some(b) => (b, false),
             // 一个不可断的整体比行还宽（超长 URL、连续数字）。
-            None if !char_boundary => (next, false),
             None => {
                 // 放得下的最后一个字符边界；组合符号不能和前一个字拆开。
                 // 一个字都放不下时也放一个，否则永远排不出去。
@@ -366,25 +363,18 @@ pub(super) fn is_page_break(c: char) -> bool {
 pub(super) fn shape(
     para: &ir::Paragraph,
     book: &mut FontBook,
-    calib: &Calib,
     char_pitch: Option<f32>,
 ) -> ShapedPara {
-    let typed_breaks = calib.breaks == Breaks::Typed;
-    let tab_stops = calib.tabs == Tabs::Stops;
     let mut text = String::with_capacity(para.text.len());
     let mut spans: Vec<(Range<usize>, &ir::RunStyle)> = Vec::with_capacity(para.spans.len());
     for span in &para.spans {
         let start = text.len();
         let symbol = symbol_font_of(&span.style, book);
         for c in para.text[span.range.clone()].chars() {
+            // 制表符是不绘制的控制字符，排版时跳到制表位；分页符、分栏符本身就是
+            // 强制断行点（UAX #14 的 BK），也不绘制。
             text.push(match c {
-                // 旧规则：制表符当一个全角空格。否则它是不绘制的控制字符，
-                // 排版时跳到制表位。
-                '\t' if !tab_stops => '\u{3000}',
                 ir::LINE_BREAK => '\n',
-                // 分页符、分栏符本身就是强制断行点（UAX #14 的 BK），也不绘制；
-                // 旧规则把它们都当换行。
-                ir::PAGE_BREAK | ir::COLUMN_BREAK if !typed_breaks => '\n',
                 c => symbol
                     .and_then(|family| pua::symbol_to_unicode(family, c))
                     .unwrap_or(c),
@@ -394,24 +384,11 @@ pub(super) fn shape(
     }
 
     // 按字再切：中文用 eastAsia 字体，西文用 ascii 字体。
-    let classes = match calib.char_class {
-        CharClass::Blocks => {
-            let hints: Vec<_> = spans
-                .iter()
-                .map(|(r, st)| (r.clone(), st.hint_east_asia))
-                .collect();
-            script::classify(&text, &hints)
-        }
-        // 旧规则在每个 run 内部单独切。
-        CharClass::Legacy => spans
-            .iter()
-            .flat_map(|(span, _)| {
-                split_by_script(&text[span.clone()])
-                    .into_iter()
-                    .map(|(r, c)| (span.start + r.start..span.start + r.end, c))
-            })
-            .collect(),
-    };
+    let hints: Vec<_> = spans
+        .iter()
+        .map(|(r, st)| (r.clone(), st.hint_east_asia))
+        .collect();
+    let classes = script::classify(&text, &hints);
 
     let mut pieces: Vec<Piece> = Vec::new();
     // 已经排过几个行内对象：文字里第 k 个替身是第 k 个对象。
@@ -508,8 +485,7 @@ pub(super) fn shape(
                     let shaped = if is_unpainted(&text[part.clone()]) {
                         ShapedRun::empty()
                     } else {
-                        let kern = calib.kerning == Kerning::Always || style.kern;
-                        shape_run_with(face, &text[part.clone()], class.to_rustybuzz(), kern)
+                        shape_run_with(face, &text[part.clone()], class.to_rustybuzz(), style.kern)
                     };
                     // 字符间距加在每个字（cluster）的最后一个字形之后；记下到每个字形为止
                     // 有几个字的末尾，量宽度时一次减法就够。不折算成字体单位：
@@ -542,25 +518,18 @@ pub(super) fn shape(
                         .into_iter()
                         .map(|(_, t)| t)
                         .collect();
-                    // 与紧邻的上一片之间插入中西文间距，加在哪里见 [`AutoSpace`]。
+                    // 与紧邻的上一片之间插入中西文间距，加在哪里见 `rules` 模块「中西文间距」一节。
                     // 间距按两侧较大的字号算，跟 Word 的观感一致。回退字体切出来的片段
                     // 与主字体同文种，不会在它们之间加间距。
                     //
                     // 边界上已经有空白时**不加** —— 空格本身已经把两边分开了，再叠一层
                     // 会让行变宽并提前折行。实测参照：「正文第1段。」每个边界加 2.4pt，
                     // 而「正文第 1 段。」只有空格宽度、没有额外间距。
-                    let spaced = |prev: &Piece| match calib.auto_space {
-                        AutoSpace::Legacy => {
-                            prev.class != class
-                                && !text[prev.range.clone()].ends_with(char::is_whitespace)
-                                && !text[part.clone()].starts_with(char::is_whitespace)
-                        }
-                        AutoSpace::Letters => {
-                            let before = text[prev.range.clone()].chars().next_back();
-                            let after = text[part.clone()].chars().next();
-                            matches!((before, after), (Some(b), Some(a))
+                    let spaced = |prev: &Piece| {
+                        let before = text[prev.range.clone()].chars().next_back();
+                        let after = text[part.clone()].chars().next();
+                        matches!((before, after), (Some(b), Some(a))
                             if autospaced((b, prev.class), (a, class)))
-                        }
                     };
                     let gap_before = match pieces.last() {
                         Some(prev)
@@ -628,7 +597,7 @@ fn split_objects(text: &str, range: Range<usize>) -> Vec<(Range<usize>, bool)> {
     out
 }
 
-/// 相邻两个字之间要不要加中西文间距（[`AutoSpace::Letters`]）：一边是汉字、假名、
+/// 相邻两个字之间要不要加中西文间距：一边是汉字、假名、
 /// 谚文，另一边是用西文字体的字母或数字。
 fn autospaced((a, a_class): (char, ScriptClass), (b, b_class): (char, ScriptClass)) -> bool {
     let ideograph = |c: char, class| class == ScriptClass::EastAsian && c.is_alphabetic();

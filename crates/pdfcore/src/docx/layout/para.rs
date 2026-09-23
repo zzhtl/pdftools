@@ -2,10 +2,6 @@
 
 use std::ops::Range;
 
-use super::calib::{
-    Calib, Decor, EmptyPara, Flow, HangingIndent, HangingPunct, Justify, LineGap, Overflow,
-    TrailingSpaces,
-};
 use super::metrics::{line_box, LineContent};
 use super::paginate::StoryPage;
 use super::text::{self, Hang, Piece, ShapedPara, TabRules};
@@ -111,7 +107,6 @@ fn shape_ops(
             default_tab_stop: env.default_tab_stop,
             char_pitch: None,
             punct_hangs: true,
-            calib: env.calib,
         };
         // 放不下时：放得下的行照画；接着的一行顶端还在文字区里就也画，裁到文字区
         // 底边为止；再往后的不画（LibreOffice 实测）。第二页高度为 0：每页只放一行。
@@ -148,19 +143,18 @@ fn shape_ops(
     ops
 }
 
-/// 测量环境：一栏的横向位置与宽度，以及排版规则。
-pub(super) struct Env<'a> {
+/// 测量环境：一栏的横向位置与宽度，以及它在哪里（正文、单元格、文本框）带来的差别。
+pub(super) struct Env {
     pub grid: Option<Grid>,
     /// 栏左边缘的绝对 x（PDF 坐标）。
     pub left: f32,
     pub width: f32,
     /// 默认制表位的间距（点）。
     pub default_tab_stop: f32,
-    /// 字符网格的格宽（点），见 [`CharGrid::Cells`](super::calib::CharGrid)。
+    /// 字符网格的格宽（点），见 `rules` 模块「字符网格」一节。
     pub char_pitch: Option<f32>,
-    /// 行尾标点能伸出栏外。单元格里不能，见 [`Tables::Drawn`](super::calib::Tables)。
+    /// 行尾标点能伸出栏外。单元格里不能，见 `rules` 模块「行尾标点悬挂」一节。
     pub punct_hangs: bool,
-    pub calib: &'a Calib,
 }
 
 /// 排好的一行。`ops` 的 x 是绝对坐标，y 相对于本行基线。
@@ -176,7 +170,7 @@ pub(super) struct Line {
 }
 
 pub(super) enum ParaBody {
-    /// 没有任何文字的段落。按旧规则它不参与放不放得下的判断。
+    /// 量不出行高的空段落（系统里一个字体都没有）：高度按字号估，不参与放不放得下的判断。
     Empty {
         height: f32,
     },
@@ -215,7 +209,7 @@ struct Objects {
 }
 
 /// 段落边框与底纹围成的框。横向位置在测量时就定了；纵向由分页决定 ——
-/// 框在哪一页开、哪一页收，跨页时两边各自收口。见 [`Decor::Boxes`]。
+/// 框在哪一页开、哪一页收，跨页时两边各自收口。见 `rules` 模块「段落边框与底纹」一节。
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ParaDecor {
     /// 框的左、右外沿（绝对 x）。
@@ -246,8 +240,7 @@ impl ParaDecor {
 
 fn decor(para: &ir::Paragraph, env: &Env) -> Option<ParaDecor> {
     let b = para.borders;
-    if env.calib.decor == Decor::Ignored || (b == ir::Borders::default() && para.shading.is_none())
-    {
+    if b == ir::Borders::default() && para.shading.is_none() {
         return None;
     }
     // 左边框从缩进（悬挂缩进时是首行的位置）往外：先隔开距离，再是线。
@@ -304,7 +297,7 @@ pub(super) fn measure(
     book: &mut FontBook,
     story: &mut MeasureStory,
 ) -> ParaBox {
-    let shaped = text::shape(para, book, env.calib, env.char_pitch);
+    let shaped = text::shape(para, book, env.char_pitch);
     let body = if !shaped.pieces.is_empty() {
         let objects = Objects {
             drawn: para
@@ -314,32 +307,26 @@ pub(super) fn measure(
                 .collect(),
             // 只有图的行，行距倍数多出来的部分按段落标记的字体算。
             marks: (!para.objects.is_empty())
-                .then(|| mark_metrics(para, env, book))
+                .then(|| mark_metrics(para, book))
                 .flatten(),
         };
         ParaBody::Lines(break_lines(para, &shaped, env, book, &objects))
     } else {
-        match env.calib.empty_para {
-            EmptyPara::MarkLine => match mark_line(para, env, book) {
-                Some(line) => ParaBody::Lines(vec![line]),
-                // 系统里一个字体都没有，量不出行高。
-                None => ParaBody::Empty {
-                    height: legacy_empty_height(para),
-                },
-            },
-            EmptyPara::Legacy => ParaBody::Empty {
-                height: legacy_empty_height(para),
+        match mark_line(para, env, book) {
+            Some(line) => ParaBody::Lines(vec![line]),
+            // 系统里一个字体都没有，量不出行高。
+            None => ParaBody::Empty {
+                height: estimated_empty_height(para),
             },
         }
     };
-    let flow = env.calib.flow == Flow::Word;
     ParaBox {
         space_before: para.space_before,
         space_after: para.space_after,
         page_break_before: para.page_break_before,
-        keep_next: flow && para.keep_next,
-        keep_lines: flow && para.keep_lines,
-        widow_control: flow && para.widow_control,
+        keep_next: para.keep_next,
+        keep_lines: para.keep_lines,
+        widow_control: para.widow_control,
         decor: decor(para, env),
         joins_next: false,
         body,
@@ -355,7 +342,8 @@ pub(super) fn measure(
     }
 }
 
-fn legacy_empty_height(para: &ir::Paragraph) -> f32 {
+/// 没有字体可量时，空段落的高度按字号估一个。
+fn estimated_empty_height(para: &ir::Paragraph) -> f32 {
     let base = para.spans.first().map(|s| s.style.size_pt).unwrap_or(10.5) * 1.2;
     match para.line {
         LineSpacing::Multiple(m) => base * m,
@@ -366,30 +354,27 @@ fn legacy_empty_height(para: &ir::Paragraph) -> f32 {
 
 /// 段落标记的自然行高与上伸：按标记的西文字体、字号算，与正文片段同一算法
 /// （`Piece::natural_line_pt` / `ascent_pt`）。
-fn mark_metrics(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> Option<(f32, f32)> {
+fn mark_metrics(para: &ir::Paragraph, book: &mut FontBook) -> Option<(f32, f32)> {
     let mark = &para.mark;
     let font = book.resolve(mark.font_latin.as_deref(), false, mark.bold, mark.italic)?;
     let m = book.face(font.id).metrics();
     let upem = m.upem as f32;
     let unsnapped = (m.default_line_height() * mark.size_pt / upem).max(1.0);
-    let gap = if env.calib.line_gap == LineGap::Above {
-        m.line_gap as f32
-    } else {
-        0.0
-    };
-    Some((unsnapped, (m.ascender as f32 + gap) * mark.size_pt / upem))
+    // 西文字体的行间距算在字的上面，见 `rules` 模块「西文字体的行间距」一节。
+    let ascent = (m.ascender as f32 + m.line_gap as f32) * mark.size_pt / upem;
+    Some((unsnapped, ascent))
 }
 
-/// 空段落的那一行：只有段落标记，行高按标记的西文字体、字号算，见 [`EmptyPara::MarkLine`]。
+/// 空段落的那一行：只有段落标记，行高按标记的西文字体、字号算，见 `rules` 模块
+/// 「空段落」一节。
 fn mark_line(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> Option<Line> {
-    let (unsnapped, ascent) = mark_metrics(para, env, book)?;
+    let (unsnapped, ascent) = mark_metrics(para, book)?;
     let b = line_box(
         LineContent::text(unsnapped, ascent),
         env.grid,
         para.snap_to_grid,
         para.line,
         true,
-        env.calib,
     );
     Some(Line {
         height: b.height,
@@ -403,10 +388,8 @@ fn mark_line(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> Option<Lin
 /// 行尾哪些东西可以悬挂在右边距外。
 fn hang(para: &ir::Paragraph, env: &Env) -> Hang {
     Hang {
-        spaces: env.calib.trailing_spaces == TrailingSpaces::Hang,
-        punct: para.overflow_punct
-            && env.punct_hangs
-            && env.calib.hanging_punct == HangingPunct::Punctuation,
+        spaces: true,
+        punct: para.overflow_punct && env.punct_hangs,
     }
 }
 
@@ -419,11 +402,11 @@ fn tab_rules<'a>(para: &'a ir::Paragraph, env: &Env) -> TabRules<'a> {
 }
 
 /// 一行的起点相对左缩进的偏移：首行缩进，或者悬挂缩进往左伸出的量。
-fn first_line_offset(para: &ir::Paragraph, sp: &ShapedPara, is_first: bool, calib: &Calib) -> f32 {
-    match (is_first, calib.hanging_indent) {
-        (false, _) => 0.0,
-        (true, HangingIndent::Legacy) => para.first_line.max(0.0),
-        (true, HangingIndent::Outdent) => para.first_line + number_shift(para, sp),
+fn first_line_offset(para: &ir::Paragraph, sp: &ShapedPara, is_first: bool) -> f32 {
+    if is_first {
+        para.first_line + number_shift(para, sp)
+    } else {
+        0.0
     }
 }
 
@@ -443,8 +426,8 @@ fn number_shift(para: &ir::Paragraph, sp: &ShapedPara) -> f32 {
 }
 
 /// 一行的起点，从正文区左缘量起。
-fn line_start(para: &ir::Paragraph, sp: &ShapedPara, is_first: bool, calib: &Calib) -> f32 {
-    para.indent_left + first_line_offset(para, sp, is_first, calib)
+fn line_start(para: &ir::Paragraph, sp: &ShapedPara, is_first: bool) -> f32 {
+    para.indent_left + first_line_offset(para, sp, is_first)
 }
 
 fn break_lines(
@@ -454,29 +437,19 @@ fn break_lines(
     book: &FontBook,
     objects: &Objects,
 ) -> Vec<Line> {
-    let avail_first = env.width - para.indent_left - para.indent_right + para.first_line.min(0.0);
-    let avail_rest = env.width - para.indent_left - para.indent_right;
-    let first_indent = para.first_line.max(0.0);
+    let avail = env.width - para.indent_left - para.indent_right;
     let rules = tab_rules(para, env);
 
     let mut lines = Vec::new();
     let mut start = 0usize;
     let mut is_first = true;
     while start < sp.text.len() {
-        let avail = match (is_first, env.calib.hanging_indent) {
-            (false, _) => avail_rest,
-            (true, HangingIndent::Legacy) => avail_first - first_indent,
-            (true, HangingIndent::Outdent) => {
-                avail_rest - first_line_offset(para, sp, true, env.calib)
-            }
-        };
         let (end, mandatory) = sp.next_break(
             start,
-            avail,
+            avail - first_line_offset(para, sp, is_first),
             hang(para, env),
-            line_start(para, sp, is_first, env.calib),
+            line_start(para, sp, is_first),
             &rules,
-            env.calib.overflow == Overflow::CharBoundary,
         );
         let is_last = end >= sp.text.len();
         let mut l = line(
@@ -528,9 +501,7 @@ fn line(
             .map(|p| p.natural_line_pt(book))
             .fold(0.0f32, f32::max)
             .max(1.0);
-        let ascent = text()
-            .map(|p| p.ascent_pt(book, env.calib.line_gap == LineGap::Above))
-            .fold(0.0f32, f32::max);
+        let ascent = text().map(|p| p.ascent_pt(book)).fold(0.0f32, f32::max);
         LineContent {
             unsnapped,
             ascent,
@@ -547,28 +518,21 @@ fn line(
             has_text: false,
         }
     };
-    let metrics = line_box(
-        content,
-        env.grid,
-        para.snap_to_grid,
-        para.line,
-        is_last,
-        env.calib,
-    );
+    let metrics = line_box(content, env.grid, para.snap_to_grid, para.line, is_last);
 
     // 悬挂在右边距外的行尾空格、标点不参与对齐。
     let measured = range.start..sp.measured_end(range.start, range.end, hang(para, env));
     let rules = tab_rules(para, env);
     let has_tabs = sp.tabs.iter().any(|t| range.contains(t));
     let line_width = if has_tabs {
-        let x0 = line_start(para, sp, is_first, env.calib);
+        let x0 = line_start(para, sp, is_first);
         sp.advance(measured.start, measured.end, x0, &rules) - x0
     } else {
         sp.width(measured.start, measured.end)
     };
     let content_left = env.left + para.indent_left;
     let avail = env.width - para.indent_left - para.indent_right;
-    let indent = first_line_offset(para, sp, is_first, env.calib);
+    let indent = first_line_offset(para, sp, is_first);
 
     let mut x = match para.align {
         Align::Left | Align::Justify => content_left + indent,
@@ -581,11 +545,7 @@ fn line(
     let slack = (para.align == Align::Justify && !suppress_justify && !has_tabs)
         .then_some(avail - indent - line_width)
         .filter(|s| *s > 0.0);
-    let mut extras = match env.calib.justify {
-        Justify::Legacy => legacy_extras(sp, active, &range, &measured, slack),
-        Justify::Gaps => gap_extras(active, &range, &measured, slack),
-    }
-    .into_iter();
+    let mut extras = gap_extras(active, &range, &measured, slack).into_iter();
 
     // 跳制表位要知道当前 x 离正文区左缘多远；居中、右对齐的偏移整体加在后面。
     let shift = x - (content_left + indent);
@@ -767,55 +727,8 @@ fn decorate(ops: &mut Vec<PaintOp>, u: ir::Underline, x: f32, w: f32, size: f32,
     }
 }
 
-/// 重写前的两端对齐：含半角空格的行不拉开，其余的行平均分给每个字形之后。
-/// 返回与 `active` 一一对应、每片每个字形之后的额外推进。
-fn legacy_extras(
-    sp: &ShapedPara,
-    active: &[Piece],
-    range: &Range<usize>,
-    measured: &Range<usize>,
-    slack: Option<f32>,
-) -> Vec<Vec<f32>> {
-    let mut char_spacing = 0.0f32;
-    if let Some(slack) = slack {
-        if !sp.text[measured.clone()].contains(' ') {
-            let glyphs: usize = active
-                .iter()
-                .map(|p| p.glyphs_between(measured.start, measured.end).len())
-                .sum();
-            if glyphs > 1 {
-                char_spacing = slack / (glyphs - 1) as f32;
-            }
-        }
-    }
-    // 行尾有悬挂的内容时，它紧挨着最后一个可见的字伸出边距：
-    // 从最后一个可见的字起不再加字距，否则悬挂的标点会离开前一个字。
-    let hanging_from = (measured.end < range.end)
-        .then(|| sp.text[..measured.end].char_indices().next_back())
-        .flatten()
-        .map(|(i, _)| i);
-    active
-        .iter()
-        .map(|piece| {
-            let glyphs = piece.glyphs_between(range.start, range.end);
-            match hanging_from {
-                None => vec![char_spacing; glyphs.len()],
-                Some(from) => glyphs
-                    .iter()
-                    .map(|g| {
-                        if piece.range.start + g.cluster as usize >= from {
-                            0.0
-                        } else {
-                            char_spacing
-                        }
-                    })
-                    .collect(),
-            }
-        })
-        .collect()
-}
-
-/// 见 [`Justify::Gaps`]。只在行内可见的部分里分；悬挂的空格、标点不分，
+/// 两端对齐把剩余空间分给哪些间隙，见 `rules` 模块「两端对齐」一节。
+/// 只在行内可见的部分里分；悬挂的空格、标点不分，
 /// 最后一个可见字形之后也不分。
 fn gap_extras(
     active: &[Piece],

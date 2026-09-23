@@ -27,16 +27,6 @@ impl std::fmt::Debug for Outcome {
 }
 
 pub fn run(path: &Path, sink: &dyn ProgressSink) -> Result<Report<Outcome>> {
-    run_with(path, sink, &layout::Calib::current())
-}
-
-/// 按指定的排版规则转换。只给测试用：校准前后对比。
-#[doc(hidden)]
-pub fn run_with(
-    path: &Path,
-    sink: &dyn ProgressSink,
-    calib: &layout::Calib,
-) -> Result<Report<Outcome>> {
     sink.emit(Progress::Started { total: 4 });
 
     let pkg = package::open(path)?;
@@ -86,9 +76,9 @@ pub fn run_with(
     sink.emit(step(2, "解析内容"));
     bail_if_cancelled!(sink);
 
-    let doc = ir::build(&raw, calib);
+    let doc = ir::build(&raw);
     let mut book = crate::fonts::FontBook::new();
-    let laid = layout::layout(&doc, &mut book, calib);
+    let laid = layout::layout(&doc, &mut book);
     sink.emit(step(3, "排版"));
     bail_if_cancelled!(sink);
 

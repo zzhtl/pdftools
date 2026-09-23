@@ -7,7 +7,7 @@
 //! PDFTOOLS_ORACLE_BLESS=1 PDFTOOLS_CORPUS=... cargo test -p pdfcore --test oracle corpus -- --ignored --nocapture
 //! # 构造探针
 //! cargo test -p pdfcore --test oracle probes -- --ignored --nocapture
-//! # 校准测量（单条规则的具体数值：参照 / 旧规则 / 当前规则）
+//! # 校准测量（单条规则的具体数值：参照 / 我们 / 差）
 //! cargo test -p pdfcore --test oracle calibrate -- --ignored --nocapture
 //! ```
 //!
@@ -337,33 +337,27 @@ fn calibrate() {
         .map(|(i, m)| m.doc.build(&format!("calib_{i:02}.docx")))
         .collect();
     let refs = lo.convert(&paths).expect("LibreOffice 转换失败");
-    let legacy = pdfcore::docx::layout::Calib::legacy();
-    let current = pdfcore::docx::layout::Calib::current();
 
     println!("\n== 校准测量（LibreOffice 参照，locale {}）", lo.locale());
     println!(
-        "{:<34}{:>10}{:>10}{:>10}{:>10}",
-        "测量", "参照", "旧规则", "当前", "当前-参照"
+        "{:<34}{:>10}{:>10}{:>10}",
+        "测量", "参照", "我们", "我们-参照"
     );
     let show = |v: Option<f32>| v.map_or("—".to_string(), |v| format!("{v:.2}"));
     for (m, (doc, reference)) in measures.iter().zip(paths.iter().zip(&refs)) {
         let measure = |pdf: &[u8]| (m.value)(&extract(pdf));
-        let ours = |calib| {
-            measure(
-                &docx_to_pdf::run_with(doc, &NoProgress, calib)
-                    .expect("转换失败")
-                    .value
-                    .pdf,
-            )
-        };
         let r = measure(&std::fs::read(reference).unwrap());
-        let (old, now) = (ours(&legacy), ours(&current));
+        let now = measure(
+            &docx_to_pdf::run(doc, &NoProgress)
+                .expect("转换失败")
+                .value
+                .pdf,
+        );
         let diff = r.zip(now).map(|(r, n)| n - r);
         println!(
-            "{:<34}{:>10}{:>10}{:>10}{:>10} {}",
+            "{:<34}{:>10}{:>10}{:>10} {}",
             m.name,
             show(r),
-            show(old),
             show(now),
             show(diff),
             m.unit

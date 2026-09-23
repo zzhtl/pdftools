@@ -53,10 +53,6 @@ pub struct RPr {
     /// 中日韩字体：`w:eastAsiaTheme` / `w:eastAsia`。一个 run 需要两个字体，
     /// 少了哪个都会让身份证号或者汉字其中之一显示成错的样子。
     pub font_east_asia: Option<FontRef>,
-    /// 重写前的读法：只认字体名（`w:ascii`，缺省 `w:hAnsi`），逐个属性覆盖。
-    /// 只给 [`Theme::Ignored`](crate::docx::layout::Theme::Ignored) 用。
-    pub legacy_font_ascii: Option<String>,
-    pub legacy_font_east_asia: Option<String>,
     /// `w:rFonts/@w:hint` 是不是 `eastAsia`：归属不明的字符（引号、破折号、①……）
     /// 用东亚字体。
     pub hint_east_asia: Option<bool>,
@@ -161,8 +157,6 @@ impl RPr {
             color,
             font_ascii,
             font_east_asia,
-            legacy_font_ascii,
-            legacy_font_east_asia,
             hint_east_asia,
             spacing,
             vanish,
@@ -238,8 +232,6 @@ pub struct PPr {
     pub borders: ParaBorders,
     /// `w:shd`：段落底纹。`Some(None)` 是明确写了没有底纹。
     pub shading: Option<Option<[u8; 3]>>,
-    /// 本段挂了自动编号（写了 `w:numPr`，不管指向哪里）。重写前只认这一点。
-    pub numbering: bool,
     /// `w:numPr/w:numId`：用哪个编号定义。0 是明确取消样式带来的编号。
     pub num_id: Option<i32>,
     /// `w:numPr/w:ilvl`：第几级（0 起）。
@@ -308,7 +300,6 @@ impl PPr {
         if other.shading.is_some() {
             self.shading = other.shading;
         }
-        self.numbering |= other.numbering;
         if other.num_id.is_some() {
             self.num_id = other.num_id;
         }
@@ -875,8 +866,6 @@ pub struct SectPr {
     pub margin_left: i32,
     pub margin_right: i32,
     pub doc_grid: Option<DocGrid>,
-    /// 本节引用了页眉或页脚。
-    pub has_header_footer: bool,
     /// `w:pgMar/@w:header`：页眉顶端离纸张上边的距离。
     pub header_dist: i32,
     /// `w:pgMar/@w:footer`：页脚底端离纸张下边的距离。
@@ -930,7 +919,6 @@ impl Default for SectPr {
             margin_left: 1800,
             margin_right: 1800,
             doc_grid: None,
-            has_header_footer: false,
             header_dist: 720,
             footer_dist: 720,
             start: SectionStart::NextPage,

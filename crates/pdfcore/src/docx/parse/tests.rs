@@ -217,14 +217,12 @@ fn theme_fonts_take_precedence_within_one_rfonts() {
         runs[0].rpr.font_east_asia,
         Some(FontRef::Name("Song B".into()))
     );
-    assert_eq!(runs[0].rpr.legacy_font_ascii.as_deref(), Some("Serif A"));
     assert_eq!(runs[0].rpr.hint_east_asia, Some(true));
     assert_eq!(runs[1].rpr.font_ascii, theme(false, ThemeScript::Latin));
     assert_eq!(
         runs[1].rpr.font_east_asia,
         theme(false, ThemeScript::EastAsia)
     );
-    assert_eq!(runs[1].rpr.legacy_font_ascii, None);
     assert_eq!(runs[2].rpr.font_ascii, Some(FontRef::Name("Sans C".into())));
     assert_eq!(runs[2].rpr.hint_east_asia, Some(false));
 }

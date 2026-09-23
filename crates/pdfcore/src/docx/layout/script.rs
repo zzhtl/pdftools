@@ -1,4 +1,4 @@
-//! 每个字用西文字体还是东亚字体（[`CharClass::Blocks`](super::CharClass::Blocks)）。
+//! 每个字用西文字体还是东亚字体，规则见 `rules` 模块「西文字体还是东亚字体」一节。
 //!
 //! 按 Unicode 区段定归属，区段表与 LibreOffice 一致；标点、符号这类没有归属的字
 //! 跟随整段里前一个有归属的字。`w:hint="eastAsia"` 按 Word 的规则处理

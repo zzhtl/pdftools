@@ -12,10 +12,8 @@
 //!
 //! 现实中的文件会出现 `basedOn` 成环，所以回溯必须带访问集合。
 //!
-//! 重写前的实现有两处与规范不符，按 `Cascade::Legacy` 保留以便对照：
-//! 设了 `w:pStyle` 仍把 Normal 叠上去；段落标记的格式（6）被套到每个 run 上，
-//! 而它本来只管段落标记自己。按规范（`Cascade::Spec`）时，开关属性（粗体、斜体……）
-//! 在段落样式与字符样式之间取异或：两边都开就是关。
+//! 设了 `w:pStyle` 就不再叠 Normal；段落标记的格式（6）只管段落标记自己，不套到
+//! run 上。开关属性（粗体、斜体……）在段落样式与字符样式之间取异或：两边都开就是关。
 
 use std::collections::{HashMap, HashSet};
 
@@ -30,19 +28,13 @@ pub struct TableLayer {
 
 pub struct Resolver<'a> {
     styles: &'a Styles,
-    spec: bool,
     /// 编号定义。给了才让编号级别的缩进、制表位参与层叠。
     numbering: Option<&'a Numbering>,
 }
 
 impl<'a> Resolver<'a> {
-    /// `spec`：按规范层叠；否则复刻重写前的做法。
-    pub fn new(styles: &'a Styles, spec: bool, numbering: Option<&'a Numbering>) -> Self {
-        Self {
-            styles,
-            spec,
-            numbering,
-        }
+    pub fn new(styles: &'a Styles, numbering: Option<&'a Numbering>) -> Self {
+        Self { styles, numbering }
     }
 
     /// 段落用的样式链：写了 `w:pStyle` 就是它，没写才是默认段落样式。
@@ -69,9 +61,6 @@ impl<'a> Resolver<'a> {
 
     /// 同 [`mark`](Self::mark)，`table`：段落在表格里时表格样式给的格式。
     pub fn mark_in(&self, para: &PPr, table: Option<&TableLayer>) -> RPr {
-        if !self.spec {
-            return self.run(para, &RPr::default());
-        }
         let mut out = self.styles.doc_default_rpr.clone();
         if let Some(t) = table {
             out.merge(&t.rpr);
@@ -114,56 +103,39 @@ impl<'a> Resolver<'a> {
     /// Normal 自己写了段距时表格样式的段距不起作用，只写在 docDefaults 里时起作用。
     pub fn paragraph_in(&self, direct: &PPr, table: Option<&TableLayer>) -> PPr {
         let mut out = self.styles.doc_default_ppr.clone();
-        if self.spec {
-            if let Some(t) = table {
-                out.cascade(&t.ppr);
-            }
-            let chain = self.paragraph_chain(direct.style_id.as_deref());
-            // 编号级别的缩进、制表位插在层叠的哪一层（LibreOffice 实测）：编号直接写在
-            // 段落上时在样式之后；来自样式时在写着编号的那个样式之前、它的基样式之后
-            // —— 那个样式自己的缩进优先，基样式里的（常见的「首行缩进 2 字符」）不优先。
-            let defining = chain.iter().rposition(|st| st.ppr.num_id.is_some());
-            let at = match direct.num_id {
-                Some(_) => chain.len(),
-                None => defining.unwrap_or(chain.len()),
-            };
-            let level = self.numbering.and_then(|n| {
-                let id = direct
-                    .num_id
-                    .or_else(|| chain.iter().rev().find_map(|st| st.ppr.num_id))?;
-                let ilvl = direct
-                    .num_ilvl
-                    .or_else(|| chain.iter().rev().find_map(|st| st.ppr.num_ilvl))
-                    .unwrap_or(0);
-                let (_, level) = n.level(self.styles, id, u8::try_from(ilvl).ok()?)?;
-                Some(&level.ppr)
-            });
-            for (i, st) in chain.iter().enumerate() {
-                if let (true, Some(l)) = (i == at, level) {
-                    out.cascade(l);
-                }
-                out.cascade(&st.ppr);
-            }
-            if let (true, Some(l)) = (at == chain.len(), level) {
+        if let Some(t) = table {
+            out.cascade(&t.ppr);
+        }
+        let chain = self.paragraph_chain(direct.style_id.as_deref());
+        // 编号级别的缩进、制表位插在层叠的哪一层（LibreOffice 实测）：编号直接写在
+        // 段落上时在样式之后；来自样式时在写着编号的那个样式之前、它的基样式之后
+        // —— 那个样式自己的缩进优先，基样式里的（常见的「首行缩进 2 字符」）不优先。
+        let defining = chain.iter().rposition(|st| st.ppr.num_id.is_some());
+        let at = match direct.num_id {
+            Some(_) => chain.len(),
+            None => defining.unwrap_or(chain.len()),
+        };
+        let level = self.numbering.and_then(|n| {
+            let id = direct
+                .num_id
+                .or_else(|| chain.iter().rev().find_map(|st| st.ppr.num_id))?;
+            let ilvl = direct
+                .num_ilvl
+                .or_else(|| chain.iter().rev().find_map(|st| st.ppr.num_ilvl))
+                .unwrap_or(0);
+            let (_, level) = n.level(self.styles, id, u8::try_from(ilvl).ok()?)?;
+            Some(&level.ppr)
+        });
+        for (i, st) in chain.iter().enumerate() {
+            if let (true, Some(l)) = (i == at, level) {
                 out.cascade(l);
             }
-            out.cascade(direct);
-            return out;
+            out.cascade(&st.ppr);
         }
-
-        if let Some(def) = &self.styles.default_paragraph_style {
-            if Some(def.as_str()) != direct.style_id.as_deref() {
-                for st in self.chain(&self.styles.paragraph, def) {
-                    out.merge(&st.ppr);
-                }
-            }
+        if let (true, Some(l)) = (at == chain.len(), level) {
+            out.cascade(l);
         }
-        if let Some(id) = &direct.style_id {
-            for st in self.chain(&self.styles.paragraph, id) {
-                out.merge(&st.ppr);
-            }
-        }
-        out.merge(direct);
+        out.cascade(direct);
         out
     }
 
@@ -175,40 +147,18 @@ impl<'a> Resolver<'a> {
     /// 同 [`run`](Self::run)，`table` 见 [`paragraph_in`](Self::paragraph_in)。
     pub fn run_in(&self, para: &PPr, direct: &RPr, table: Option<&TableLayer>) -> RPr {
         let mut out = self.styles.doc_default_rpr.clone();
-        if self.spec {
-            if let Some(t) = table {
-                out.merge(&t.rpr);
-            }
-            let from_para = Self::rpr_of(&self.paragraph_chain(para.style_id.as_deref()));
-            let from_char = direct
-                .style_id
-                .as_deref()
-                .map(|id| Self::rpr_of(&self.chain(&self.styles.character, id)))
-                .unwrap_or_default();
-            out.merge(&from_para);
-            out.merge(&from_char);
-            toggle(&mut out, &from_para, &from_char);
-            out.merge(direct);
-            return out;
+        if let Some(t) = table {
+            out.merge(&t.rpr);
         }
-
-        if let Some(def) = &self.styles.default_paragraph_style {
-            for st in self.chain(&self.styles.paragraph, def) {
-                out.merge(&st.rpr);
-            }
-        }
-        if let Some(id) = &para.style_id {
-            for st in self.chain(&self.styles.paragraph, id) {
-                out.merge(&st.rpr);
-            }
-        }
-        // 段落标记自身的格式，优先级在字符样式之下。
-        out.merge(&para.mark_rpr);
-        if let Some(id) = &direct.style_id {
-            for st in self.chain(&self.styles.character, id) {
-                out.merge(&st.rpr);
-            }
-        }
+        let from_para = Self::rpr_of(&self.paragraph_chain(para.style_id.as_deref()));
+        let from_char = direct
+            .style_id
+            .as_deref()
+            .map(|id| Self::rpr_of(&self.chain(&self.styles.character, id)))
+            .unwrap_or_default();
+        out.merge(&from_para);
+        out.merge(&from_char);
+        toggle(&mut out, &from_para, &from_char);
         out.merge(direct);
         out
     }
@@ -291,30 +241,19 @@ mod tests {
     #[test]
     fn a_paragraph_style_does_not_pull_in_normal() {
         let s = styles();
-        let r = Resolver::new(&s, true, None);
+        let r = Resolver::new(&s, None);
         let ppr = r.paragraph(&PPr {
             style_id: Some("Title".into()),
             ..Default::default()
         });
         assert_eq!(ppr.space_after_twips, None);
         assert_eq!(r.run(&ppr, &RPr::default()).size_half_pt, None);
-        // 旧做法会把 Normal 叠进来。
-        let legacy = Resolver::new(&s, false, None);
-        assert_eq!(
-            legacy
-                .paragraph(&PPr {
-                    style_id: Some("Title".into()),
-                    ..Default::default()
-                })
-                .space_after_twips,
-            Some(200)
-        );
     }
 
     #[test]
     fn the_paragraph_mark_formats_only_the_mark() {
         let s = styles();
-        let r = Resolver::new(&s, true, None);
+        let r = Resolver::new(&s, None);
         let ppr = r.paragraph(&PPr {
             mark_rpr: RPr {
                 size_half_pt: Some(48),
@@ -329,7 +268,7 @@ mod tests {
     #[test]
     fn toggles_cancel_between_paragraph_and_character_styles() {
         let s = styles();
-        let r = Resolver::new(&s, true, None);
+        let r = Resolver::new(&s, None);
         let ppr = r.paragraph(&PPr {
             style_id: Some("Title".into()),
             ..Default::default()
@@ -370,7 +309,7 @@ mod tests {
         let numbering = parse_numbering(
             r#"<w:numbering xmlns:w="w"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="840" w:hanging="840"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#,
         );
-        let resolver = Resolver::new(&styles, true, Some(&numbering));
+        let resolver = Resolver::new(&styles, Some(&numbering));
         // (左, 首行, 首行字符, 悬挂)
         let indent = |ppr: &str| {
             let doc = parse_document(

@@ -17,9 +17,6 @@
 
 use std::ops::Range;
 
-use super::layout::{
-    Calib, Cascade, CharGrid, HeaderFooter, Images, ListNumbers, RunFormat, Sections, Tables, Theme,
-};
 use super::model::{
     self, BreakKind, FieldChar, FontRef, LineRule, NumSuffix, PPr, RPr, RunItem, ThemeScript,
 };
@@ -400,8 +397,6 @@ pub struct Paragraph {
     pub shading: Option<[u8; 3]>,
     /// 段落样式（没写 `w:pStyle` 时是默认段落样式）。判断「同一样式的相邻段落」用。
     pub style_id: Option<String>,
-    /// 本段挂了自动编号，但编号文字没有生成。
-    pub numbering_dropped: bool,
     /// 段首的编号（已经写在 `text` 开头）。
     pub number: Option<NumberLabel>,
     pub text: String,
@@ -520,7 +515,7 @@ pub struct Table {
     /// 0 是不知道宽度的列（没写网格，单元格也没写宽度），排版时平分版心剩下的宽度。
     pub columns: Vec<f32>,
     /// 左对齐时，第一条列边界离版心左边多远。由 `w:tblInd` 按兼容模式折算，
-    /// 见 [`Tables::Drawn`]。
+    /// 见排版 `rules` 模块「表格」一节。
     pub indent: f32,
     /// 表格在版心里的对齐（`w:jc`）。
     pub align: Align,
@@ -639,12 +634,10 @@ impl Section {
 pub struct Document {
     /// 至少一节，按顺序首尾相接地覆盖全部块。
     pub sections: Vec<Section>,
-    /// 文档引用了页眉或页脚，但本版本不渲染。
-    pub has_header_footer: bool,
     /// 偶数页用单独的页眉页脚（`w:evenAndOddHeaders`）。
     pub even_and_odd_headers: bool,
     /// 相邻两段的段后距与段前距取较大值而不是相加（HTML 的规矩）。
-    /// 文档没有设置 `w:doNotUseHTMLParagraphAutoSpacing` 时为真，见 `Calib::para_spacing`。
+    /// 文档没有设置 `w:doNotUseHTMLParagraphAutoSpacing` 时为真，见排版 `rules` 模块「段距」一节。
     pub html_paragraph_spacing: bool,
     /// 默认制表位的间距（点）。`settings.xml` 没写时是 Word 的缺省 36pt。
     pub default_tab_stop: f32,
@@ -663,20 +656,19 @@ pub struct Document {
     pub blocks: Vec<Block>,
 }
 
-pub fn build(doc: &model::Document, calib: &Calib) -> Document {
-    let numbering = (calib.list_numbers == ListNumbers::Rendered).then_some(&doc.numbering);
-    let resolver = Resolver::new(&doc.styles, calib.cascade == Cascade::Spec, numbering);
-    let mut lists = numbering.map(|n| Lists::new(n, &doc.styles));
-    let fonts = FontNames::new(doc, calib);
+/// docDefaults、样式、直接格式都没写 `w:sz` 时的字号，见排版 `rules` 模块「字号」一节。
+pub const DEFAULT_SIZE_PT: f32 = 10.0;
+
+pub fn build(doc: &model::Document) -> Document {
+    let resolver = Resolver::new(&doc.styles, Some(&doc.numbering));
+    let mut lists = Some(Lists::new(&doc.numbering, &doc.styles));
+    let fonts = FontNames::new(doc);
     // 段落里的 `w:sectPr` 结束一节；最后一节的设置在 body 末尾。
-    // 重写前只用最后一节排全文。
-    let each = calib.sections == Sections::Each;
 
     let ctx = Ctx {
         doc,
         resolver: &resolver,
         fonts: &fonts,
-        calib,
         missing: Default::default(),
         shapes: Default::default(),
         notes: Default::default(),
@@ -689,57 +681,43 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
         match block {
             model::Block::Para(p) => {
                 push_paragraph(&mut blocks, p, &ctx, lists.as_mut(), None);
-                if let (true, Some(sp)) = (each, &p.section) {
+                if let Some(sp) = &p.section {
                     ends.push((sp, start..blocks.len()));
                     start = blocks.len();
                 }
             }
-            model::Block::Table(t) if calib.tables == Tables::Drawn => {
-                blocks.push(table(t, &ctx, &mut lists, false))
-            }
-            model::Block::Table(t) => blocks.push(Block::Placeholder(table_placeholder(t))),
+            model::Block::Table(t) => blocks.push(table(t, &ctx, &mut lists, false)),
         }
     }
     ends.push((&doc.section, start..blocks.len()));
     let multi_column_sections = ends.iter().filter(|(sp, _)| sp.columns > 1).count();
 
     // 页眉页脚：本节没写的那一类沿用上一节的。
-    let hf_on = calib.header_footer == HeaderFooter::Drawn;
     let (mut headers, mut footers) = (HeaderSet::default(), HeaderSet::default());
     // 字符网格的格宽以 Normal 样式的字号为基准。
     let normal_pt = resolver
         .mark(&resolver.paragraph(&PPr::default()))
         .size_half_pt
         .map(half_pt)
-        .unwrap_or(calib.default_size_pt);
+        .unwrap_or(DEFAULT_SIZE_PT);
     let mut sections = Vec::with_capacity(ends.len());
     for (sp, range) in ends {
         let mut section = Section::from_model(sp, range);
-        if calib.char_grid == CharGrid::Cells {
-            section.char_pitch = sp
-                .doc_grid
-                .filter(|g| g.chars)
-                .and_then(|g| g.char_space)
-                .map(|cs| normal_pt + cs as f32 / 4096.0)
-                .filter(|p| *p > 0.0);
-        }
-        if hf_on {
-            headers = header_set(&headers, &sp.headers, &ctx);
-            footers = header_set(&footers, &sp.footers, &ctx);
-            section.headers = headers.clone();
-            section.footers = footers.clone();
-        }
+        section.char_pitch = sp
+            .doc_grid
+            .filter(|g| g.chars)
+            .and_then(|g| g.char_space)
+            .map(|cs| normal_pt + cs as f32 / 4096.0)
+            .filter(|p| *p > 0.0);
+        headers = header_set(&headers, &sp.headers, &ctx);
+        footers = header_set(&footers, &sp.footers, &ctx);
+        section.headers = headers.clone();
+        section.footers = footers.clone();
         sections.push(section);
     }
-    let has_header_footer = doc.section.has_header_footer
-        || (each
-            && doc.body.iter().any(|b| {
-                matches!(b, model::Block::Para(p) if p.section.as_ref().is_some_and(|s| s.has_header_footer))
-            }));
 
     Document {
         sections,
-        has_header_footer,
         even_and_odd_headers: doc.settings.even_and_odd_headers,
         html_paragraph_spacing: !doc.settings.no_html_paragraph_spacing,
         default_tab_stop: doc.settings.default_tab_stop.map(tw).unwrap_or(36.0),
@@ -778,10 +756,7 @@ fn story_blocks(story: &model::Story, ctx: &Ctx) -> Vec<Block> {
     for block in story {
         match block {
             model::Block::Para(p) => push_paragraph(&mut out, p, ctx, None, None),
-            model::Block::Table(t) if ctx.calib.tables == Tables::Drawn => {
-                out.push(table(t, ctx, &mut None, false))
-            }
-            model::Block::Table(t) => out.push(Block::Placeholder(table_placeholder(t))),
+            model::Block::Table(t) => out.push(table(t, ctx, &mut None, false)),
         }
     }
     out
@@ -792,7 +767,6 @@ struct Ctx<'a> {
     doc: &'a model::Document,
     resolver: &'a Resolver<'a>,
     fonts: &'a FontNames<'a>,
-    calib: &'a Calib,
     /// 画成灰框的对象有几个。
     missing: std::cell::Cell<usize>,
     /// 画不准的形状有几个。
@@ -815,7 +789,6 @@ fn push_paragraph(
         doc,
         resolver,
         fonts,
-        calib,
         ..
     } = *ctx;
     let ppr = resolver.paragraph_in(&p.ppr, table);
@@ -824,28 +797,21 @@ fn push_paragraph(
     let mut drawings = Vec::new();
     let mut objects = Vec::new();
     let mut floats = Vec::new();
-    let images = calib.images == Images::Inline;
-    // 页码类域的结果文字标上记号，排版时代入真实的数。重写前不认域，结果照原样显示。
-    let fields_on = calib.header_footer == HeaderFooter::Drawn;
+    // 页码类域的结果文字标上记号，排版时代入真实的数。
     let mut fields = OpenFields::default();
     for run in &p.runs {
         let rpr = resolver.run_in(&ppr, &run.rpr, table);
-        let full = calib.run_format == RunFormat::Full;
         // 隐藏文字不显示，也不占位置。
-        if full && rpr.vanish == Some(true) {
+        if rpr.vanish == Some(true) {
             continue;
         }
-        let mut style = run_style(&rpr, fonts, calib);
-        if full {
-            // 只做外部链接；文档内的书签跳转还没做。
-            style.link = match &run.link {
-                Some(model::LinkRef::Rel(id)) => doc.hyperlinks.get(id).cloned(),
-                _ => None,
-            };
-        }
-        if fields_on {
-            style.field = fields.current();
-        }
+        let mut style = run_style(&rpr, fonts);
+        // 只做外部链接；文档内的书签跳转还没做。
+        style.link = match &run.link {
+            Some(model::LinkRef::Rel(id)) => doc.hyperlinks.get(id).cloned(),
+            _ => None,
+        };
+        style.field = fields.current();
         let run_has_text = run.items.iter().any(|i| matches!(i, RunItem::Text(_)));
         // 一个 run 先切成若干（文字, 格式）小块：符号、小型大写的小写字母要换格式。
         // 同格式的相邻小块合成一个 span；不同 run 之间不合并。
@@ -860,7 +826,7 @@ fn push_paragraph(
         };
         for item in &run.items {
             match item {
-                RunItem::Text(t) if full && rpr.small_caps == Some(true) => {
+                RunItem::Text(t) if rpr.small_caps == Some(true) => {
                     // 小写字母换成缩小的大写，其余照旧。
                     let mut rest = t.as_str();
                     while let Some(c) = rest.chars().next() {
@@ -877,16 +843,14 @@ fn push_paragraph(
                         rest = tail;
                     }
                 }
-                RunItem::Text(t) if full && rpr.caps == Some(true) => {
-                    push(t.to_uppercase(), &style)
-                }
+                RunItem::Text(t) if rpr.caps == Some(true) => push(t.to_uppercase(), &style),
                 RunItem::Text(t) => push(t.clone(), &style),
                 RunItem::Tab => push("\t".into(), &style),
                 RunItem::Break(BreakKind::Line) => push(LINE_BREAK.into(), &style),
                 RunItem::Break(BreakKind::Page) => push(PAGE_BREAK.into(), &style),
                 RunItem::Break(BreakKind::Column) => push(COLUMN_BREAK.into(), &style),
                 RunItem::NoBreakHyphen => push("\u{2011}".into(), &style),
-                RunItem::Drawing(d) if images && d.inline => {
+                RunItem::Drawing(d) if d.inline => {
                     // 零大小的图看不见，也不占位置。
                     if let Some((cx, cy)) = shown_size(d) {
                         objects.push(InlineObject {
@@ -897,7 +861,7 @@ fn push_paragraph(
                         push(OBJECT.to_string(), &style);
                     }
                 }
-                RunItem::Drawing(d) if images && d.anchor.is_some() => {
+                RunItem::Drawing(d) if d.anchor.is_some() => {
                     if let (Some(a), Some((cx, cy))) = (&d.anchor, shown_size(d)) {
                         let wrap = match a.wrap {
                             model::WrapKind::None => Wrap::None,
@@ -921,10 +885,10 @@ fn push_paragraph(
                     }
                 }
                 RunItem::Drawing(d) => drawings.push(d.alt.clone()),
-                RunItem::FieldChar(FieldChar::Begin) if fields_on => fields.begin(),
-                RunItem::FieldCode(code) if fields_on => fields.code(code),
-                RunItem::FieldChar(FieldChar::Separate) if fields_on => fields.separate(),
-                RunItem::FieldChar(FieldChar::End) if fields_on => {
+                RunItem::FieldChar(FieldChar::Begin) => fields.begin(),
+                RunItem::FieldCode(code) => fields.code(code),
+                RunItem::FieldChar(FieldChar::Separate) => fields.separate(),
+                RunItem::FieldChar(FieldChar::End) => {
                     // 没有结果文字的页码域（有的生成器不写缓存值）：补一个占位的字，
                     // 排版时照样代入。
                     if let Some(f) = fields.end() {
@@ -941,11 +905,9 @@ fn push_paragraph(
                         }
                     }
                 }
-                RunItem::FieldChar(_) | RunItem::FieldCode(_) => {}
                 RunItem::NoteReference => ctx.notes.set(ctx.notes.get() + 1),
                 // 符号用它自己的字体。符号字体（Symbol、Wingdings）里的码位
                 // 写成单字节时，实际在私用区 U+F0xx。
-                RunItem::Sym { .. } if !full => {}
                 RunItem::Sym { font, code } => {
                     let symbolic = font
                         .as_deref()
@@ -988,10 +950,9 @@ fn push_paragraph(
         .size_half_pt
         .map(half_pt)
         .or_else(|| spans.first().map(|s| s.style.size_pt))
-        .unwrap_or(calib.default_size_pt);
+        .unwrap_or(DEFAULT_SIZE_PT);
 
     // 编号写在段首，格式是段落标记的格式叠上编号级别的格式。
-    let dropped = lists.is_none() && ppr.numbering;
     let label = lists.and_then(|l| {
         let ilvl = u8::try_from(ppr.num_ilvl.unwrap_or(0)).ok()?;
         l.next(ppr.num_id?, ilvl)
@@ -1000,7 +961,7 @@ fn push_paragraph(
         Some(label) if !label.text.is_empty() || label.suffix != NumSuffix::Nothing => {
             let mut rpr = mark_rpr.clone();
             rpr.merge(&label.rpr);
-            let style = run_style(&rpr, fonts, calib);
+            let style = run_style(&rpr, fonts);
             let len = label.text.len();
             let mut prefix = label.text;
             match label.suffix {
@@ -1028,11 +989,10 @@ fn push_paragraph(
         _ => (text, spans, None),
     };
 
-    let mark = run_style(&mark_rpr, fonts, calib);
+    let mark = run_style(&mark_rpr, fonts);
     let mut para = paragraph(&ppr, text, spans, mark, char_size);
     para.objects = objects;
     para.floats = floats;
-    para.numbering_dropped = dropped;
     para.number = number;
     para.style_id = ppr
         .style_id
@@ -1143,12 +1103,10 @@ struct FontNames<'a> {
     theme: &'a model::Theme,
     /// 东亚主题字体取主题里哪个文种的字体（`Hans` 之类），来自 `w:themeFontLang`。
     east_asia_script: Option<&'static str>,
-    /// 不认主题字体时照旧只看字体名。
-    legacy: bool,
 }
 
 impl<'a> FontNames<'a> {
-    fn new(doc: &'a model::Document, calib: &Calib) -> Self {
+    fn new(doc: &'a model::Document) -> Self {
         Self {
             theme: &doc.theme,
             east_asia_script: doc
@@ -1156,21 +1114,14 @@ impl<'a> FontNames<'a> {
                 .theme_font_lang_east_asia
                 .as_deref()
                 .and_then(east_asia_script),
-            legacy: calib.theme == Theme::Ignored,
         }
     }
 
     fn latin(&self, rpr: &RPr) -> Option<String> {
-        if self.legacy {
-            return rpr.legacy_font_ascii.clone();
-        }
         self.name(rpr.font_ascii.as_ref()?)
     }
 
     fn east_asia(&self, rpr: &RPr) -> Option<String> {
-        if self.legacy {
-            return rpr.legacy_font_east_asia.clone();
-        }
         self.name(rpr.font_east_asia.as_ref()?)
     }
 
@@ -1214,68 +1165,42 @@ fn east_asia_script(lang: &str) -> Option<&'static str> {
     }
 }
 
-fn run_style(rpr: &RPr, fonts: &FontNames, calib: &Calib) -> RunStyle {
-    let full = calib.run_format == RunFormat::Full;
+fn run_style(rpr: &RPr, fonts: &FontNames) -> RunStyle {
     let color = rpr.color.unwrap_or([0, 0, 0]);
     RunStyle {
-        size_pt: rpr
-            .size_half_pt
-            .map(half_pt)
-            .unwrap_or(calib.default_size_pt),
+        size_pt: rpr.size_half_pt.map(half_pt).unwrap_or(DEFAULT_SIZE_PT),
         bold: rpr.bold.unwrap_or(false),
         italic: rpr.italic.unwrap_or(false),
         underline: rpr
             .underline
             .filter(|u| u.style != UnderlineStyle::None)
-            .map(|u| match calib.run_format {
-                RunFormat::Full => Underline {
-                    style: u.style,
-                    color: u.color.unwrap_or(color),
-                },
-                // 重写前只有单线，颜色跟文字走。
-                RunFormat::Legacy => Underline {
-                    style: UnderlineStyle::Single,
-                    color,
-                },
+            .map(|u| Underline {
+                style: u.style,
+                color: u.color.unwrap_or(color),
             }),
         strike: rpr.strike.unwrap_or(false),
-        double_strike: full && rpr.double_strike.unwrap_or(false),
-        background: if full {
-            rpr.highlight.flatten().or(rpr.shading.flatten())
-        } else {
-            None
-        },
+        double_strike: rpr.double_strike.unwrap_or(false),
+        background: rpr.highlight.flatten().or(rpr.shading.flatten()),
         color,
         font_latin: fonts.latin(rpr),
         font_east_asia: fonts.east_asia(rpr),
         hint_east_asia: rpr.hint_east_asia.unwrap_or(false),
-        char_spacing: match calib.run_format {
-            RunFormat::Full => rpr.spacing.map(tw).unwrap_or(0.0),
-            RunFormat::Legacy => 0.0,
-        },
-        vert_align: if full {
-            rpr.vert_align.unwrap_or_default()
-        } else {
-            VertAlign::Baseline
-        },
-        position_pt: if full {
-            rpr.position.map(|v| v as f32 / 2.0).unwrap_or(0.0)
-        } else {
-            0.0
-        },
+        char_spacing: rpr.spacing.map(tw).unwrap_or(0.0),
+        vert_align: rpr.vert_align.unwrap_or_default(),
+        position_pt: rpr.position.map(|v| v as f32 / 2.0).unwrap_or(0.0),
         link: None,
         field: None,
         kern: rpr
             .kern
-            .is_some_and(|k| k > 0 && size_half_pt(rpr, calib) >= k as f32),
+            .is_some_and(|k| k > 0 && size_half_pt(rpr) >= k as f32),
     }
 }
 
 /// 字号，半磅。
-fn size_half_pt(rpr: &RPr, calib: &Calib) -> f32 {
+fn size_half_pt(rpr: &RPr) -> f32 {
     rpr.size_half_pt
         .map(|v| v as f32)
-        .unwrap_or(calib.default_size_pt * 2.0)
+        .unwrap_or(DEFAULT_SIZE_PT * 2.0)
 }
 
 fn paragraph(
@@ -1355,7 +1280,6 @@ fn paragraph(
         borders: Borders::from_model(&ppr.borders),
         shading: ppr.shading.flatten(),
         style_id: None,
-        numbering_dropped: false,
         number: None,
         text,
         spans,
@@ -1813,7 +1737,7 @@ mod tests {
 
     /// 各段第一个 span 的（西文, 东亚）字体。docDefaults 用正文主题字体；
     /// 段落样式 `Named` 写的是字体名。
-    fn fonts(paras: &[&str], lang: Option<&str>, calib: &Calib) -> Vec<Fonts> {
+    fn fonts(paras: &[&str], lang: Option<&str>) -> Vec<Fonts> {
         let styles = parse::parse_styles(
             r#"<w:styles xmlns:w="w"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia"/></w:rPr></w:rPrDefault></w:docDefaults>
 <w:style w:type="paragraph" w:styleId="Named"><w:rPr><w:rFonts w:ascii="Style Latin" w:eastAsia="Style Song"/></w:rPr></w:style></w:styles>"#,
@@ -1831,7 +1755,7 @@ mod tests {
         )
         .unwrap();
         doc.theme = parse::parse_theme(THEME);
-        build(&doc, calib)
+        build(&doc)
             .blocks
             .iter()
             .map(|b| match b {
@@ -1861,7 +1785,6 @@ mod tests {
         let got = fonts(
             &[PLAIN, RUN_NAME, RUN_BOTH, RUN_MAJOR_EA, NAMED_THEME_RUN],
             Some("zh-CN"),
-            &Calib::current(),
         );
         assert_eq!(
             got,
@@ -1880,19 +1803,15 @@ mod tests {
 
     #[test]
     fn east_asian_theme_font_follows_the_theme_font_language() {
-        let calib = Calib::current();
         assert_eq!(
-            fonts(&[PLAIN, RUN_MAJOR_EA], Some("ja-JP"), &calib),
+            fonts(&[PLAIN, RUN_MAJOR_EA], Some("ja-JP")),
             [
                 pair(Some("Minor Latin"), Some("Minor Jpan")),
                 // 主题里没有这个文种的字体、`a:ea` 又是空的：解析不出来。
                 pair(Some("Minor Latin"), None),
             ]
         );
-        assert_eq!(
-            fonts(&[PLAIN], None, &calib),
-            [pair(Some("Minor Latin"), None)]
-        );
+        assert_eq!(fonts(&[PLAIN], None), [pair(Some("Minor Latin"), None)]);
         assert_eq!(east_asia_script("zh-TW"), Some("Hant"));
         assert_eq!(east_asia_script("zh-Hant-HK"), Some("Hant"));
         assert_eq!(east_asia_script("ZH-cn"), Some("Hans"));
@@ -1900,25 +1819,7 @@ mod tests {
         assert_eq!(east_asia_script("en-US"), None);
     }
 
-    /// 旧规则不认主题字体，字体名逐个属性覆盖。
-    #[test]
-    fn legacy_rules_ignore_theme_fonts() {
-        assert_eq!(
-            fonts(
-                &[PLAIN, RUN_BOTH, NAMED_THEME_RUN],
-                Some("zh-CN"),
-                &Calib::legacy()
-            ),
-            [
-                pair(None, None),
-                pair(Some("Run Latin"), None),
-                pair(Some("Style Latin"), Some("Style Song")),
-            ]
-        );
-    }
-
     /// 页码类域的结果标上记号；没有结果的补一个占位字；别的域照常显示。
-    /// 重写前的规则不认域。
     #[test]
     fn page_fields_are_marked() {
         let run = |inner: &str| format!("<w:r>{inner}</w:r>");
@@ -1948,16 +1849,14 @@ mod tests {
             Default::default(),
         )
         .unwrap();
-        let spans = |calib: &Calib| {
-            let Block::Para(p) = &build(&doc, calib).blocks[0] else {
-                unreachable!()
-            };
-            p.spans
-                .iter()
-                .map(|s| (p.text[s.range.clone()].to_string(), s.style.field))
-                .collect::<Vec<_>>()
+        let Block::Para(p) = &build(&doc).blocks[0] else {
+            unreachable!()
         };
-        let got = spans(&Calib::current());
+        let got: Vec<_> = p
+            .spans
+            .iter()
+            .map(|s| (p.text[s.range.clone()].to_string(), s.style.field))
+            .collect();
         let page = Field {
             id: 0,
             kind: FieldKind::Page,
@@ -1976,12 +1875,6 @@ mod tests {
                 ("1".to_string(), Some(pages)),
                 ("今天".to_string(), None),
             ]
-        );
-        let legacy = spans(&Calib::legacy());
-        assert!(legacy.iter().all(|(_, f)| f.is_none()));
-        assert_eq!(
-            legacy.iter().map(|(t, _)| t.as_str()).collect::<String>(),
-            "第1今天"
         );
     }
 
@@ -2005,7 +1898,7 @@ mod tests {
                 )),
             );
         }
-        let ir = build(&doc, &Calib::current());
+        let ir = build(&doc);
         let text = |b: &Option<Vec<Block>>| match b.as_deref() {
             Some([Block::Para(p)]) => p.text.clone(),
             _ => String::new(),
@@ -2068,7 +1961,7 @@ mod tests {
                 )),
             )
             .unwrap();
-            match build(&doc, &Calib::current()).blocks.into_iter().next() {
+            match build(&doc).blocks.into_iter().next() {
                 Some(Block::Table(t)) => t,
                 _ => panic!("第一块应当是表格"),
             }
@@ -2124,7 +2017,7 @@ mod tests {
             Default::default(),
         )
         .unwrap();
-        let ir = build(&doc, &Calib::current());
+        let ir = build(&doc);
         assert!(
             matches!(ir.blocks.first(), Some(Block::Placeholder(p)) if p.text == ["甲"]),
             "{:?}",
@@ -2182,7 +2075,7 @@ mod tests {
             Default::default(),
         )
         .unwrap();
-        let ir = build(&doc, &Calib::current());
+        let ir = build(&doc);
         let tables: Vec<&Table> = ir
             .blocks
             .iter()

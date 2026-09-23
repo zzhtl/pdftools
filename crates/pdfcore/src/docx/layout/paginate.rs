@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-use super::calib::{Calib, PageBreakBefore};
 use super::para::{Line, ParaBody, ParaBox, ParaDecor};
 use super::table::{Frag, TableBox};
 use super::{Measured, Page, PageKind, PaintOp};
@@ -98,7 +97,6 @@ pub(super) struct Paginator {
     collapse_spacing: bool,
     /// 当前页上刚加过的段后距。取较大值时，下一段的段前距只补差额。
     last_after: f32,
-    page_break_before: PageBreakBefore,
     /// 正在画的段落框。同一组的段落共用一个框；换页时在旧页收口，新页上重新开。
     open: Option<OpenBox>,
     /// 排「故事」时第 i 页的高度（超出的页沿用最后一个）。正文是空的，按各页的版面。
@@ -133,12 +131,7 @@ struct OpenBox {
 
 impl Paginator {
     /// `first_number`：第一页的页码，没写是 1。
-    pub fn new(
-        frames: Frames,
-        first_number: Option<i32>,
-        collapse_spacing: bool,
-        calib: &Calib,
-    ) -> Self {
+    pub fn new(frames: Frames, first_number: Option<i32>, collapse_spacing: bool) -> Self {
         let number = first_number.unwrap_or(1);
         let (frame, kind) = frames.pick(true, number);
         Self {
@@ -151,7 +144,6 @@ impl Paginator {
             used: 0.0,
             collapse_spacing,
             last_after: 0.0,
-            page_break_before: calib.page_break_before,
             open: None,
             schedule: Vec::new(),
             soft_top: false,
@@ -189,8 +181,6 @@ impl Paginator {
             used: 0.0,
             collapse_spacing,
             last_after: 0.0,
-            // 故事里的分页符在量的时候已经去掉了。
-            page_break_before: PageBreakBefore::AnyPageTop,
             open: None,
             schedule: caps.to_vec(),
             soft_top,
@@ -256,7 +246,7 @@ impl Paginator {
         self.moved = false;
     }
 
-    /// 开始新的一节。见 [`Sections::Each`](super::calib::Sections::Each)。
+    /// 开始新的一节。见 `rules` 模块「分节」一节。
     pub fn start_section(
         &mut self,
         frames: Frames,
@@ -330,11 +320,8 @@ impl Paginator {
     }
 
     pub fn place_para(&mut self, para: &ParaBox) {
-        let at_top = match self.page_break_before {
-            PageBreakBefore::FirstPageTopOnly => self.at_page_top() && self.pages.len() == 1,
-            PageBreakBefore::AnyPageTop => self.at_page_top(),
-        };
-        if para.page_break_before && !at_top {
+        // 段前分页在任何一页的页首都不另起新页，见 `rules` 模块「分页符、分栏符」一节。
+        if para.page_break_before && !self.at_page_top() {
             self.new_page();
         }
         // 段中不分页：整段放不下、又不在页首，就整段挪到下一页。
