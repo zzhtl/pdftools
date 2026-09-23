@@ -45,12 +45,16 @@ fn want_raster() -> bool {
 
 struct Case {
     name: String,
+    /// 源 docx 的内容哈希。真实语料是在用的文档，随时可能被改，
+    /// 改过的文档与旧基线没有可比性。
+    doc_hash: String,
     ours: Vec<u8>,
     reference: Vec<u8>,
 }
 
 struct Row {
     name: String,
+    doc_hash: String,
     cmp: Compare,
     ours_pages: Vec<PageText>,
 }
@@ -74,6 +78,7 @@ fn evaluate(cases: &[Case], out: &Path) -> Vec<Row> {
             std::fs::write(out.join(format!("{}.ref.dump", c.name)), dump(&pr)).unwrap();
             Row {
                 name: c.name.clone(),
+                doc_hash: c.doc_hash.clone(),
                 cmp,
                 ours_pages: po,
             }
@@ -98,9 +103,10 @@ fn convert_ours(path: &Path) -> Vec<u8> {
 
 // ---------------------------------------------------------------- 基线
 
-/// 基线文件的一行：名字、我们的页数、参照页数、分页漂移、LY 中位数、RI 均值。
+/// 基线文件的一行：名字、我们的页数、参照页数、分页漂移、LY 中位数、RI 均值、源文档哈希。
 #[derive(Debug, Clone)]
 struct Base {
+    doc_hash: Option<String>,
     pages: usize,
     pages_ref: usize,
     bd_max: usize,
@@ -123,6 +129,7 @@ fn load_baseline(dir: &Path) -> Option<HashMap<String, Base>> {
         out.insert(
             f[0].to_string(),
             Base {
+                doc_hash: f.get(7).map(|h| h.to_string()),
                 pages: f[1].parse().ok()?,
                 pages_ref: f[2].parse().ok()?,
                 bd_max: f[3].parse().ok()?,
@@ -139,19 +146,20 @@ fn write_baseline(dir: &Path, rows: &[Row], lo: &Lo) {
     let base = dir.join("baseline");
     std::fs::create_dir_all(&base).unwrap();
     let mut s = format!(
-        "# pdftools oracle 基线；LibreOffice locale {}\n# 名字\t页数\t参照页数\tBD最大\tBD总和\tLY中位数\tRI均值\n",
+        "# pdftools oracle 基线；LibreOffice locale {}\n# 名字\t页数\t参照页数\tBD最大\tBD总和\tLY中位数\tRI均值\t文档哈希\n",
         lo.locale()
     );
     for r in rows {
         s.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\n",
+            "{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{}\n",
             r.name,
             r.cmp.pages_ours,
             r.cmp.pages_ref,
             r.cmp.bd_max,
             r.cmp.bd_sum,
             r.cmp.ly_median,
-            r.cmp.ri_mean
+            r.cmp.ri_mean,
+            r.doc_hash
         ));
         std::fs::copy(
             dir.join(format!("{}.ours.pdf", r.name)),
@@ -171,6 +179,14 @@ fn regressions(dir: &Path, rows: &[Row], base: &HashMap<String, Base>) -> Vec<St
             bad.push(format!("{}：基线里没有这份文档", r.name));
             continue;
         };
+        if b.doc_hash.as_deref().is_some_and(|h| h != r.doc_hash) {
+            // 文档内容变了，与旧基线已无可比性。这不是排版回退，不拦，但要说清楚。
+            println!(
+                "提示 {}：源文档在记录基线之后被修改过，本份跳过比对；确认无误后重新定基线",
+                r.name
+            );
+            continue;
+        }
         let c = &r.cmp;
         // 页数差不能比基线大。基线本身可以带着已知的不一致（比如 21 vs 20），
         // 它是「现状」而不是「理想」；往参照靠拢的变化照样会被下面的 dump 比对拦住，
@@ -245,6 +261,7 @@ fn corpus() {
         .zip(&refs)
         .map(|(d, r)| Case {
             name: d.file_stem().unwrap().to_string_lossy().into_owned(),
+            doc_hash: format!("{:016x}", common::lo::fnv1a(&std::fs::read(d).unwrap())),
             ours: convert_ours(d),
             reference: std::fs::read(r).unwrap(),
         })
@@ -293,6 +310,7 @@ fn probes() {
         .zip(paths.iter().zip(&refs))
         .map(|(p, (d, r))| Case {
             name: p.name.to_string(),
+            doc_hash: format!("{:016x}", common::lo::fnv1a(&std::fs::read(d).unwrap())),
             ours: convert_ours(d),
             reference: std::fs::read(r).unwrap(),
         })
