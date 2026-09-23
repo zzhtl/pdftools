@@ -12,6 +12,14 @@ const MAX_PART_BYTES: u64 = 64 * 1024 * 1024;
 /// 整包解压后的总大小上限。
 const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 
+/// 一条关系。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relationship {
+    /// 包内部件的完整路径（`word/media/image1.png`），外部链接则是原文（网址）。
+    pub target: String,
+    pub external: bool,
+}
+
 pub struct Package {
     /// `docProps/core.xml` 里的 `dcterms:created`，文档的创建时间。
     pub created: Option<crate::timestamp::Timestamp>,
@@ -19,8 +27,8 @@ pub struct Package {
     pub styles: Option<String>,
     pub numbering: Option<String>,
     pub settings: Option<String>,
-    /// 关系 id → 目标路径（用于把 `a:blip r:embed` 解析成 media 文件）。
-    pub rels: HashMap<String, String>,
+    /// `document.xml` 的关系：id → 目标。
+    pub rels: HashMap<String, Relationship>,
     /// 部件路径 → 字节。只收 word/media/ 下的图片。
     pub media: HashMap<String, Vec<u8>>,
 }
@@ -143,7 +151,7 @@ fn parse_created(xml: &str) -> Option<crate::timestamp::Timestamp> {
     None
 }
 
-fn parse_rels(xml: &str) -> HashMap<String, String> {
+fn parse_rels(xml: &str) -> HashMap<String, Relationship> {
     use quick_xml::events::Event;
     let mut reader = quick_xml::Reader::from_str(xml);
     let mut out = HashMap::new();
@@ -155,21 +163,30 @@ fn parse_rels(xml: &str) -> HashMap<String, String> {
             {
                 let mut id = None;
                 let mut target = None;
+                let mut external = false;
                 for attr in e.attributes().flatten() {
+                    let value = attr
+                        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                        .map(|v| v.into_owned())
+                        .unwrap_or_else(|_| attr.value.to_string());
                     match attr.key.local_name().as_ref() {
-                        "Id" => id = Some(attr.value.to_string()),
-                        "Target" => target = Some(attr.value.to_string()),
+                        "Id" => id = Some(value),
+                        "Target" => target = Some(value),
+                        "TargetMode" => external = value == "External",
                         _ => {}
                     }
                 }
                 if let (Some(id), Some(target)) = (id, target) {
-                    // Target 通常是相对 word/ 的路径，例如 "media/image1.png"
-                    let full = if target.starts_with("word/") || target.starts_with('/') {
+                    // 外部链接（网址）原样保留；包内的 Target 通常是相对 word/ 的路径，
+                    // 例如 "media/image1.png"。
+                    let target = if external {
+                        target
+                    } else if target.starts_with("word/") || target.starts_with('/') {
                         target.trim_start_matches('/').to_string()
                     } else {
                         format!("word/{target}")
                     };
-                    out.insert(id, full);
+                    out.insert(id, Relationship { target, external });
                 }
             }
             Ok(Event::Eof) => break,
@@ -179,4 +196,30 @@ fn parse_rels(xml: &str) -> HashMap<String, String> {
         buf.clear();
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_targets_are_kept_as_written() {
+        let rels = parse_rels(
+            r#"<Relationships xmlns="r"><Relationship Id="rId1" Type="t/image" Target="media/a.png"/><Relationship Id="rId2" Type="t/hyperlink" Target="https://example.com/a?b=1&amp;c=2" TargetMode="External"/></Relationships>"#,
+        );
+        assert_eq!(
+            rels["rId1"],
+            Relationship {
+                target: "word/media/a.png".into(),
+                external: false
+            }
+        );
+        assert_eq!(
+            rels["rId2"],
+            Relationship {
+                target: "https://example.com/a?b=1&c=2".into(),
+                external: true
+            }
+        );
+    }
 }

@@ -65,6 +65,7 @@ pub(super) struct Piece {
     pub strike: bool,
     pub double_strike: bool,
     pub background: Option<[u8; 3]>,
+    pub link: Option<String>,
     pub shaped: ShapedRun,
     /// 与 `shaped.glyphs` 等长。
     pub texts: Vec<String>,
@@ -449,6 +450,7 @@ pub(super) fn shape(
                     strike: style.strike,
                     double_strike: style.double_strike,
                     background: style.background,
+                    link: style.link.clone(),
                     shaped,
                     texts,
                     upem,

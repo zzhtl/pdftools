@@ -115,6 +115,8 @@ pub struct RunStyle {
     pub vert_align: VertAlign,
     /// 升降（点），正数往上。
     pub position_pt: f32,
+    /// 超链接的网址。
+    pub link: Option<String>,
 }
 
 /// 下划线，颜色已经落实（没写时就是文字颜色）。
@@ -219,7 +221,7 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
     let mut blocks = Vec::with_capacity(doc.body.len());
     for block in &doc.body {
         match block {
-            model::Block::Para(p) => push_paragraph(&mut blocks, p, &resolver, calib),
+            model::Block::Para(p) => push_paragraph(&mut blocks, p, doc, &resolver, calib),
             model::Block::Table(t) => blocks.push(Block::Placeholder(table_placeholder(t))),
         }
     }
@@ -248,7 +250,13 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
     }
 }
 
-fn push_paragraph(out: &mut Vec<Block>, p: &model::Para, resolver: &Resolver, calib: &Calib) {
+fn push_paragraph(
+    out: &mut Vec<Block>,
+    p: &model::Para,
+    doc: &model::Document,
+    resolver: &Resolver,
+    calib: &Calib,
+) {
     let ppr = resolver.paragraph(&p.ppr);
     let mut text = String::new();
     let mut spans = Vec::with_capacity(p.runs.len());
@@ -260,7 +268,14 @@ fn push_paragraph(out: &mut Vec<Block>, p: &model::Para, resolver: &Resolver, ca
         if full && rpr.vanish == Some(true) {
             continue;
         }
-        let style = run_style(&rpr, calib);
+        let mut style = run_style(&rpr, calib);
+        if full {
+            // 只做外部链接；文档内的书签跳转还没做。
+            style.link = match &run.link {
+                Some(model::LinkRef::Rel(id)) => doc.hyperlinks.get(id).cloned(),
+                _ => None,
+            };
+        }
         // 一个 run 先切成若干（文字, 格式）小块：符号、小型大写的小写字母要换格式。
         // 同格式的相邻小块合成一个 span；不同 run 之间不合并。
         let mut chunks: Vec<(String, RunStyle)> = Vec::new();
@@ -406,6 +421,7 @@ fn run_style(rpr: &RPr, calib: &Calib) -> RunStyle {
         } else {
             0.0
         },
+        link: None,
     }
 }
 

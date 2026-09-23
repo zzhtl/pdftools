@@ -306,6 +306,36 @@ fn line(
             synthetic_italic: piece.synthetic_italic,
         });
 
+        if let Some(uri) = &piece.link {
+            let m = book.face(piece.font).metrics();
+            let scale = piece.size_pt / m.upem as f32;
+            let (bottom, top) = (m.descender as f32 * scale, m.ascender as f32 * scale);
+            // 同一行上紧挨着的同一个链接合成一块：一个链接常被格式切成好几段。
+            match ops
+                .iter_mut()
+                .rev()
+                .find(|o| matches!(o, PaintOp::Link { .. }))
+            {
+                Some(PaintOp::Link {
+                    x2,
+                    uri: last,
+                    y1,
+                    y2,
+                    ..
+                }) if last == uri && (*x2 - x).abs() < 0.5 => {
+                    *x2 = x + w + extra;
+                    *y1 = y1.min(bottom);
+                    *y2 = y2.max(top);
+                }
+                _ => ops.push(PaintOp::Link {
+                    x1: x,
+                    y1: bottom,
+                    x2: x + w + extra,
+                    y2: top,
+                    uri: uri.clone(),
+                }),
+            }
+        }
         if let Some(bg) = piece.background {
             let m = book.face(piece.font).metrics();
             let scale = piece.size_pt / m.upem as f32;

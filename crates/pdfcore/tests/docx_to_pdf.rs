@@ -1440,3 +1440,60 @@ fn superscript_position_and_caps() {
         small.size
     );
 }
+
+/// 外部超链接写成 PDF 的 Link 注释：网址原样，点击区域盖住链接文字。
+#[test]
+fn hyperlinks_become_clickable() {
+    if !require_cjk_font() {
+        return;
+    }
+    let url = "https://example.com/path?a=1&b=2";
+    let mut doc = DocxBuilder::new();
+    let rid = doc.hyperlink(url);
+    let run = |text: &str| {
+        format!(
+            r#"<w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r>"#
+        )
+    };
+    let body = format!(
+        r#"<w:p>{}<w:hyperlink r:id="{rid}">{}{}</w:hyperlink>{}</w:p>"#,
+        run("详见"),
+        run("链接"),
+        run("文字"),
+        run("。")
+    );
+    let path = doc.body(&body).build("hyperlink.docx");
+    let pdf = convert(&path).value.pdf;
+
+    let lo = lopdf::Document::load_mem(&pdf).unwrap();
+    let page = *lo.get_pages().values().next().unwrap();
+    let annots = lo.get_page_annotations(page).expect("第一页应当有注释");
+    assert_eq!(annots.len(), 1, "同一个链接的两段应当合成一块");
+    let a = annots[0];
+    let action = a.get(b"A").unwrap().as_dict().unwrap();
+    assert_eq!(
+        action.get(b"URI").unwrap().as_str().unwrap(),
+        url.as_bytes()
+    );
+
+    // 点击区域的横向范围要盖住「链接文字」四个字。
+    let rect: Vec<f32> = a
+        .get(b"Rect")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o.as_float().unwrap())
+        .collect();
+    let glyphs: Vec<(String, f32)> = common::pdftext::extract(&pdf)[0].lines[0]
+        .frags
+        .iter()
+        .flat_map(|f| f.glyphs.clone())
+        .collect();
+    let x = |c: &str| glyphs.iter().find(|(t, _)| t == c).unwrap().1;
+    assert!(
+        rect[0] <= x("链") + 0.01 && rect[2] >= x("字") + 11.99,
+        "{rect:?}"
+    );
+    assert!(rect[2] <= x("。") + 0.01, "不该盖到链接后面的字：{rect:?}");
+}

@@ -50,6 +50,14 @@ pub enum PaintOp {
         color: [u8; 3],
         dash: Vec<f32>,
     },
+    /// 可点击的区域：超链接。y 与其他操作一样，测量时相对基线。
+    Link {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        uri: String,
+    },
     /// 下划线、删除线、底色、占位框的边都用矩形画。
     Rect {
         x: f32,
@@ -66,6 +74,10 @@ impl PaintOp {
         let mut op = self.clone();
         match &mut op {
             PaintOp::Text { y, .. } | PaintOp::Rect { y, .. } | PaintOp::Line { y, .. } => *y += dy,
+            PaintOp::Link { y1, y2, .. } => {
+                *y1 += dy;
+                *y2 += dy;
+            }
         }
         op
     }
@@ -186,6 +198,7 @@ fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
         char_spacing: 0.0,
         vert_align: ir::VertAlign::Baseline,
         position_pt: 0.0,
+        link: None,
     };
     let spans = vec![ir::Span {
         range: 0..text.len(),

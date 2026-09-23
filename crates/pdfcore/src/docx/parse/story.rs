@@ -8,7 +8,9 @@ use quick_xml::events::{BytesStart, Event};
 
 use super::props::{parse_ppr, parse_rpr, parse_sect_pr};
 use super::{attr, resolve_entity, skip, xml_err, Rd};
-use crate::docx::model::{Block, BreakKind, Cell, Para, Row, Run, RunItem, SectPr, Story, Table};
+use crate::docx::model::{
+    Block, BreakKind, Cell, LinkRef, Para, Row, Run, RunItem, SectPr, Story, Table,
+};
 use crate::error::Result;
 
 /// 读 `w:body`。返回正文，以及 body 末尾那个 `w:sectPr`（最后一节的页面设置）。
@@ -67,6 +69,8 @@ fn parse_paragraph(r: &mut Rd) -> Result<Para> {
     // 段落里再套段落不合规范，但文本框之类的结构偶尔会这样；
     // 内层的字并入本段，至少不丢。
     let mut depth = 1usize;
+    // 正在 `w:hyperlink` 里面时，指向哪里。
+    let mut link: Option<LinkRef> = None;
     loop {
         match r.read_event().map_err(xml_err)? {
             Event::Start(e) => match e.local_name().as_ref() {
@@ -76,13 +80,23 @@ fn parse_paragraph(r: &mut Rd) -> Result<Para> {
                     para.ppr = ppr;
                     para.section = section;
                 }
+                "hyperlink" => {
+                    link = attr(&e, "id")
+                        .map(LinkRef::Rel)
+                        .or_else(|| attr(&e, "anchor").map(LinkRef::Anchor));
+                }
                 // 公式里的 `m:r` 也按普通 run 读：公式按线性文字输出，至少内容还在。
-                "r" => para.runs.push(parse_run(r)?),
+                "r" => {
+                    let mut run = parse_run(r)?;
+                    run.link = link.clone();
+                    para.runs.push(run);
+                }
                 name if skips_subtree(name) => skip(r, name)?,
                 // 超链接、`w:ins`、`w:smartTag`、`w:fldSimple`、公式、内容控件……
                 // 里面都是正常显示的 run。
                 _ => {}
             },
+            Event::End(e) if e.local_name().as_ref() == "hyperlink" => link = None,
             Event::End(e) if e.local_name().as_ref() == "p" => {
                 depth -= 1;
                 if depth == 0 {

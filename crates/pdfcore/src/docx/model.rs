@@ -292,6 +292,17 @@ pub struct Para {
 pub struct Run {
     pub rpr: RPr,
     pub items: Vec<RunItem>,
+    /// 这个 run 在 `w:hyperlink` 里面。
+    pub link: Option<LinkRef>,
+}
+
+/// `w:hyperlink` 指向哪里。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkRef {
+    /// `r:id`：外部链接的关系 id。
+    Rel(String),
+    /// `w:anchor`：文档内的书签。
+    Anchor(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -416,4 +427,6 @@ pub struct Document {
     pub section: SectPr,
     pub styles: Styles,
     pub settings: Settings,
+    /// 外部链接：关系 id → 网址。解析 document.xml 时不知道关系表，由调用方填上。
+    pub hyperlinks: HashMap<String, String>,
 }

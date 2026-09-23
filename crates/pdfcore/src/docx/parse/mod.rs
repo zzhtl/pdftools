@@ -103,6 +103,7 @@ pub fn parse_document(xml: &str, styles: Styles, settings: Settings) -> Result<D
         section,
         styles,
         settings,
+        hyperlinks: Default::default(),
     })
 }
 

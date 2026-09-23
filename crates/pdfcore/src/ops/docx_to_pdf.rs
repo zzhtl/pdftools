@@ -52,7 +52,13 @@ pub fn run_with(
         .as_deref()
         .map(parse::parse_settings)
         .unwrap_or_default();
-    let raw = parse::parse_document(&pkg.document, styles, settings)?;
+    let mut raw = parse::parse_document(&pkg.document, styles, settings)?;
+    raw.hyperlinks = pkg
+        .rels
+        .iter()
+        .filter(|(_, r)| r.external)
+        .map(|(id, r)| (id.clone(), r.target.clone()))
+        .collect();
     sink.emit(step(2, "解析内容"));
     bail_if_cancelled!(sink);
 

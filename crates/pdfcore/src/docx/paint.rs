@@ -111,6 +111,13 @@ pub fn paint(
                     color,
                     dash,
                 } => canvas.stroke_line((*x1, *y), (*x2, *y), *width, *color, Some(dash)),
+                PaintOp::Link {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    uri,
+                } => canvas.link([*x1, *y1, *x2, *y2], uri),
             }
         }
         doc.add_page(canvas.finish());
