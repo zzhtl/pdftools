@@ -17,7 +17,7 @@
 
 use std::ops::Range;
 
-use super::layout::{Calib, RunFormat};
+use super::layout::{Calib, Cascade, RunFormat};
 use super::model::{self, BreakKind, LineRule, PPr, RPr, RunItem};
 pub use super::model::{TabAlign, TabLeader, UnderlineStyle, VertAlign};
 use super::resolve::Resolver;
@@ -215,7 +215,7 @@ pub struct Document {
 }
 
 pub fn build(doc: &model::Document, calib: &Calib) -> Document {
-    let resolver = Resolver::new(&doc.styles);
+    let resolver = Resolver::new(&doc.styles, calib.cascade == Cascade::Spec);
     let s = doc.section;
 
     let mut blocks = Vec::with_capacity(doc.body.len());
@@ -356,7 +356,7 @@ fn push_paragraph(
     }
 
     // 首行缩进按「字符」算时，用的是段落标记的东亚字号。
-    let mark = resolver.run(&ppr, &RPr::default());
+    let mark = resolver.mark(&ppr);
     let char_size = mark
         .size_half_pt
         .map(half_pt)

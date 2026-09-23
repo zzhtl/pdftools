@@ -25,6 +25,17 @@ pub struct Calib {
     pub hanging_indent: HangingIndent,
     pub overflow: Overflow,
     pub run_format: RunFormat,
+    pub cascade: Cascade,
+}
+
+/// 样式层叠。见 `resolve` 模块。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cascade {
+    /// 重写前的做法：设了 `w:pStyle` 仍叠加 Normal，段落标记的格式套到每个 run 上。
+    Legacy,
+    /// 按 ECMA-376：只走段落自己的样式链；段落标记的格式只管段落标记；
+    /// 开关属性在段落样式与字符样式之间取异或。
+    Spec,
 }
 
 /// 重写前没有实现的字符格式：字符间距、隐藏文字、`w:sym` 符号等。
@@ -222,6 +233,7 @@ impl Calib {
             hanging_indent: HangingIndent::Outdent,
             overflow: Overflow::CharBoundary,
             run_format: RunFormat::Full,
+            cascade: Cascade::Spec,
         }
     }
 
@@ -242,6 +254,7 @@ impl Calib {
             hanging_indent: HangingIndent::Legacy,
             overflow: Overflow::NextOpportunity,
             run_format: RunFormat::Legacy,
+            cascade: Cascade::Legacy,
         }
     }
 }
