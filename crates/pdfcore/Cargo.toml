@@ -42,3 +42,4 @@ thiserror = "2"
 lopdf = "0.45.0"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+hayro = "0.7.1"

@@ -1,67 +1,29 @@
 //! Phase 3/4 验收：Word 转 PDF。
 //!
 //! 测试用的 docx 在这里现造，好让 CI 上没有任何外部素材也能跑。
-//! 真实文书的验证靠 `examples/convert` 手工过。
+//! 与 LibreOffice 的逐坐标比对、真实文书的回归闸门见 `tests/oracle.rs`。
+
+mod common;
 
 use std::io::Write;
 use std::path::PathBuf;
 
+use common::docx::{para, DocxBuilder};
+use common::{require_cjk_font, tmp};
 use pdfcore::ops::docx_to_pdf;
 use pdfcore::{NoProgress, WarningKind};
 
-fn tmp() -> PathBuf {
-    let d = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("docx");
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-<Default Extension="xml" ContentType="application/xml"/>
-<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-</Types>"#;
-
-const RELS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
-</Relationships>"#;
-
 /// 把一段 `<w:body>` 的内容包成一个可用的 .docx。
 fn make_docx(name: &str, body: &str) -> PathBuf {
-    let path = tmp().join(name);
-    let file = std::fs::File::create(&path).unwrap();
-    let mut zip = zip::ZipWriter::new(file);
-    let opts: zip::write::FileOptions<'_, ()> =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-
-    let doc = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-<w:body>{body}
-<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>
-<w:pgMar w:top="1440" w:right="1588" w:bottom="1440" w:left="1588"/></w:sectPr>
-</w:body></w:document>"#
-    );
-
-    for (n, content) in [
-        ("[Content_Types].xml", CONTENT_TYPES),
-        ("_rels/.rels", RELS),
-        ("word/document.xml", doc.as_str()),
-    ] {
-        zip.start_file(n, opts).unwrap();
-        zip.write_all(content.as_bytes()).unwrap();
-    }
-    zip.finish().unwrap();
-    path
+    DocxBuilder::new().body(body).build(name)
 }
 
-fn para(text: &str) -> String {
-    format!(
-        r#"<w:p><w:pPr><w:spacing w:line="240" w:lineRule="auto"/></w:pPr>
-<w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr>
-<w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#
-    )
+/// 造一个可以指定 sectPr 额外内容的 docx。
+fn make_docx_with_sect(name: &str, body: &str, sect_extra: &str) -> PathBuf {
+    DocxBuilder::new()
+        .body(body)
+        .sect_extra(sect_extra)
+        .build(name)
 }
 
 fn text_of(pdf: &[u8]) -> String {
@@ -73,19 +35,6 @@ fn text_of(pdf: &[u8]) -> String {
 
 fn convert(path: &std::path::Path) -> pdfcore::Report<docx_to_pdf::Outcome> {
     docx_to_pdf::run(path, &NoProgress).expect("转换失败")
-}
-
-/// 依赖中文字形的用例的前置条件。
-///
-/// 没有中文字体时，所有汉字都会落到同一个 `.notdef`，文字回抽必然对不上。
-/// 那种失败信息指向的是环境而不是代码，容易把人带偏，所以这里明确跳过并说明。
-/// CI 上会安装 `fonts-noto-cjk`，因此这些用例在 CI 里是实打实跑过的。
-fn require_cjk_font() -> bool {
-    if pdfcore::fonts::system::SystemFonts::load().has_cjk() {
-        return true;
-    }
-    eprintln!("跳过：本机没有中文字体（安装 fonts-noto-cjk 或思源黑体后可跑）");
-    false
 }
 
 #[test]
@@ -212,7 +161,7 @@ fn tables_are_reported_and_their_text_preserved() {
 /// 而不是「不是有效的 zip」。
 #[test]
 fn legacy_doc_format_is_refused_clearly() {
-    let path = tmp().join("legacy.doc");
+    let path = tmp("docx").join("legacy.doc");
     let mut f = std::fs::File::create(&path).unwrap();
     f.write_all(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1])
         .unwrap();
@@ -275,33 +224,6 @@ fn text_origins(pdf: &[u8]) -> Vec<(f32, f32)> {
         .filter(|op| op.operator == "Tm" && op.operands.len() == 6)
         .map(|op| (num(&op.operands[4]), num(&op.operands[5])))
         .collect()
-}
-
-/// 造一个可以指定 sectPr 额外内容的 docx。
-fn make_docx_with_sect(name: &str, body: &str, sect_extra: &str) -> PathBuf {
-    let path = tmp().join(name);
-    let file = std::fs::File::create(&path).unwrap();
-    let mut zip = zip::ZipWriter::new(file);
-    let opts: zip::write::FileOptions<'_, ()> =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    let doc = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-<w:body>{body}
-<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>
-<w:pgMar w:top="1440" w:right="1588" w:bottom="1440" w:left="1588"/>{sect_extra}</w:sectPr>
-</w:body></w:document>"#
-    );
-    for (n, content) in [
-        ("[Content_Types].xml", CONTENT_TYPES),
-        ("_rels/.rels", RELS),
-        ("word/document.xml", doc.as_str()),
-    ] {
-        zip.start_file(n, opts).unwrap();
-        zip.write_all(content.as_bytes()).unwrap();
-    }
-    zip.finish().unwrap();
-    path
 }
 
 /// 行网格（`w:docGrid`）必须生效。
@@ -558,28 +480,10 @@ fn header_and_footer_are_reported() {
     if !require_cjk_font() {
         return;
     }
-    let path = tmp().join("headref.docx");
-    let file = std::fs::File::create(&path).unwrap();
-    let mut zip = zip::ZipWriter::new(file);
-    let opts: zip::write::FileOptions<'_, ()> =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    let doc = r#"<?xml version="1.0" encoding="UTF-8"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
- xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>
-<w:p><w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>正文</w:t></w:r></w:p>
-<w:sectPr><w:headerReference w:type="default" r:id="rId9"/>
-<w:pgSz w:w="11906" w:h="16838"/>
-<w:pgMar w:top="1440" w:right="1588" w:bottom="1440" w:left="1588"/></w:sectPr>
-</w:body></w:document>"#;
-    for (n, c) in [
-        ("[Content_Types].xml", CONTENT_TYPES),
-        ("_rels/.rels", RELS),
-        ("word/document.xml", doc),
-    ] {
-        zip.start_file(n, opts).unwrap();
-        zip.write_all(c.as_bytes()).unwrap();
-    }
-    zip.finish().unwrap();
+    let path = DocxBuilder::new()
+        .body(r#"<w:p><w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>正文</w:t></w:r></w:p>"#)
+        .header("default", "<w:p><w:r><w:t>页眉</w:t></w:r></w:p>")
+        .build("headref.docx");
 
     let report = convert(&path);
     assert!(

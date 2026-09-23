@@ -43,6 +43,8 @@ pub struct App {
     pub thumbs: ThumbCache,
     /// 启动时探测到的界面字体名；None 表示本机没有中文字体。
     pub ui_font: Option<String>,
+    /// 首帧耗时只记一次。
+    first_frame_logged: bool,
 }
 
 impl App {
@@ -56,6 +58,7 @@ impl App {
             job: None,
             thumbs: ThumbCache::new(&cc.egui_ctx),
             ui_font,
+            first_frame_logged: false,
         }
     }
 
@@ -116,6 +119,10 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if !self.first_frame_logged {
+            self.first_frame_logged = true;
+            log::debug!("启动：开始绘制首帧 {:?}", crate::since_start());
+        }
         let ctx = ui.ctx().clone();
         self.handle_dropped_files(&ctx);
 

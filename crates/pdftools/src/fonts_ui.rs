@@ -8,8 +8,12 @@ use pdfcore::fonts::system::{SystemFonts, UI_CJK_PREFERENCE};
 
 /// 返回实际用上的字体名，供「关于」里显示；没找到中文字体时返回 None。
 pub fn install(ctx: &egui::Context) -> Option<String> {
+    let t = std::time::Instant::now();
     let system = SystemFonts::load();
+    log::debug!("界面字体：扫描系统字体 {:?}", t.elapsed());
+    let t = std::time::Instant::now();
     let found = system.find(UI_CJK_PREFERENCE, false, false)?;
+    log::debug!("界面字体：读入「{}」{:?}", found.family, t.elapsed());
 
     let mut fonts = egui::FontDefinitions::default();
     let data = egui::FontData {

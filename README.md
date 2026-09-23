@@ -183,7 +183,7 @@ macOS 只提供 M 系列（Apple Silicon）的包。Intel Mac 没有预编译版
 
 ## 从源码构建
 
-需要 Rust 1.85 或更高版本。
+需要 Rust 1.92 或更高版本。
 
 ```bash
 git clone https://github.com/zzhtl/pdftools.git

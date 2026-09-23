@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.package]
 version = "0.7.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.92"
 license = "MIT"
 repository = "https://github.com/zzhtl/pdftools"
 
@@ -18,3 +18,8 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+# 测试与开发构建里依赖也开优化：图像编解码、整形、PDF 解析与渲染都在依赖里，
+# 不开的话单个测试动辄慢十几倍。本仓库自己的 crate 仍是 opt-level 0，调试体验不变。
+[profile.dev.package."*"]
+opt-level = 2
