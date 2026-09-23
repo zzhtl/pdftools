@@ -6,6 +6,7 @@
 pub mod docx;
 pub mod error;
 pub mod fonts;
+pub mod fsio;
 pub mod imaging;
 pub mod ops;
 pub mod pdf;

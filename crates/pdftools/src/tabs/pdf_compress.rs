@@ -115,6 +115,8 @@ fn start(app: &mut App, ctx: &egui::Context) {
     app.job = Some(Job::spawn(ctx, move |sink| {
         let (mut before, mut after) = (0u64, 0u64);
         let mut last_out = None;
+        // 输出目录选成源目录是很自然的事，那时同名输出会覆盖原件 —— 一律自动改名。
+        let mut namer = pdfcore::fsio::OutputNamer::new(&files);
 
         for (i, path) in files.iter().enumerate() {
             if sink.is_cancelled() {
@@ -145,7 +147,11 @@ fn start(app: &mut App, ctx: &egui::Context) {
                 )));
             }
 
-            let out = dir.join(file_label(path));
+            let out = namer.name(
+                &dir,
+                &path.file_stem().unwrap_or_default().to_string_lossy(),
+                "pdf",
+            );
             write_atomic(&out, &report.value.pdf)?;
             before += data.len() as u64;
             after += report.value.pdf.len() as u64;

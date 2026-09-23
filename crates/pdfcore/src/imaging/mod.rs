@@ -397,6 +397,17 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
     })
 }
 
+/// 解码一张图，并把 EXIF 方向作用到像素上。
+///
+/// 重新编码会丢掉 EXIF，方向标记也就跟着没了 —— 不先转正，横拍的手机照片
+/// 压完就是躺着的。
+pub fn decode_oriented(bytes: &[u8]) -> Result<image::DynamicImage> {
+    let mut img =
+        image::load_from_memory(bytes).map_err(|e| CoreError::Image(format!("解码失败：{e}")))?;
+    img.apply_orientation(read_orientation(read_exif(bytes).as_deref()));
+    Ok(img)
+}
+
 fn raw_color(img: &image::DynamicImage, grayscale: bool) -> ColorData {
     if grayscale {
         ColorData::Raw {

@@ -307,6 +307,9 @@ fn start(app: &mut App, ctx: &egui::Context) {
     let manual = app.images.manual_times();
 
     app.job = Some(Job::spawn(ctx, move |sink| {
+        if pdfcore::fsio::OutputNamer::new(&paths).is_input(&out) {
+            return Err("输出文件不能是某张原图本身，请换一个文件名".into());
+        }
         let report = images_to_pdf::run(&paths, tier, &manual, sink).map_err(|e| e.to_string())?;
         // 把核心层收集到的警告转发给界面。静默丢弃是不允许的。
         for w in report.warnings {

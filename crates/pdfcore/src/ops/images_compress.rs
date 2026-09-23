@@ -1,9 +1,11 @@
-//! 图片批量压缩。复用 `imaging` 的同一条流水线，输出到目标目录，不覆盖原文件。
+//! 图片批量压缩。复用 `imaging` 的同一条流水线，输出到目标目录，
+//! **什么都不覆盖**：原文件不动，同名输出自动改名（见 [`crate::fsio::OutputNamer`]）。
 
 use std::path::{Path, PathBuf};
 
 use crate::bail_if_cancelled;
 use crate::error::{CoreError, Report, Result, Warning, WarningKind};
+use crate::fsio::{write_atomic, OutputNamer};
 use crate::imaging::Tier;
 use crate::progress::{Progress, ProgressSink};
 
@@ -51,6 +53,7 @@ pub fn run(
     let quality = tier.for_images();
     let mut outcome = Outcome::default();
     let mut warnings = Vec::new();
+    let mut namer = OutputNamer::new(paths);
 
     sink.emit(Progress::Started { total: paths.len() });
 
@@ -62,8 +65,17 @@ pub fn run(
             .to_string_lossy()
             .into_owned();
 
-        match compress_one(path, out_dir, &quality) {
-            Ok(item) => {
+        match compress_one(path, out_dir, &quality, &mut namer) {
+            Ok((item, dropped_pages)) => {
+                if dropped_pages > 0 {
+                    warnings.push(Warning::new(
+                        WarningKind::UnsupportedElement,
+                        format!(
+                            "{label} 是多页 TIFF（共 {} 页），本版本只处理第一页",
+                            dropped_pages + 1
+                        ),
+                    ));
+                }
                 if item.after >= item.before {
                     warnings.push(Warning::new(
                         WarningKind::ImageKeptOriginal,
@@ -95,11 +107,13 @@ pub fn run(
     Ok(Report::with(outcome, warnings))
 }
 
+/// 压缩一张图，返回结果与被丢掉的页数（多页 TIFF 只处理第一页）。
 fn compress_one(
     path: &Path,
     out_dir: &Path,
     quality: &crate::imaging::ImageQuality,
-) -> Result<Item> {
+    namer: &mut OutputNamer,
+) -> Result<(Item, usize)> {
     let before = std::fs::metadata(path)
         .map_err(|e| CoreError::io(path, e))?
         .len();
@@ -109,9 +123,17 @@ fn compress_one(
         .and_then(|e| e.to_str())
         .unwrap_or("bin")
         .to_ascii_lowercase();
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let dropped_pages =
+        if crate::imaging::probe::sniff(&original) == crate::imaging::probe::Container::Tiff {
+            crate::imaging::probe::tiff_page_count(&original)
+                .unwrap_or(1)
+                .saturating_sub(1)
+        } else {
+            0
+        };
 
-    let img = image::load_from_memory(&original)
-        .map_err(|e| CoreError::Image(format!("解码失败：{e}")))?;
+    let img = crate::imaging::decode_oriented(&original)?;
     let (w, h) = (img.width(), img.height());
 
     // 批量压缩没有「页面」的概念，用 A4 幅面作参照换算目标像素，
@@ -122,17 +144,17 @@ fn compress_one(
     // 无损档且不需要缩放 —— 没有任何可做的，直接复制。
     // 重新编码一遍只会白费 CPU，对 JPEG 源还会因为改存 PNG 而暴涨。
     if quality.lossless_only() && target.is_none() {
-        let output = out_dir.join(format!(
-            "{}.{source_ext}",
-            path.file_stem().unwrap_or_default().to_string_lossy()
+        let output = namer.name(out_dir, &stem, &source_ext);
+        write_atomic(&output, &original)?;
+        return Ok((
+            Item {
+                source: path.to_path_buf(),
+                output,
+                before,
+                after: before,
+            },
+            dropped_pages,
         ));
-        std::fs::write(&output, &original).map_err(|e| CoreError::io(&output, e))?;
-        return Ok(Item {
-            source: path.to_path_buf(),
-            output,
-            before,
-            after: before,
-        });
     }
 
     let out_img = match target {
@@ -163,16 +185,16 @@ fn compress_one(
         (bytes, n, ext)
     };
 
-    let output = out_dir.join(format!(
-        "{}.{ext}",
-        path.file_stem().unwrap_or_default().to_string_lossy()
-    ));
-    std::fs::write(&output, &final_bytes).map_err(|e| CoreError::io(&output, e))?;
+    let output = namer.name(out_dir, &stem, &ext);
+    write_atomic(&output, &final_bytes)?;
 
-    Ok(Item {
-        source: path.to_path_buf(),
-        output,
-        before,
-        after,
-    })
+    Ok((
+        Item {
+            source: path.to_path_buf(),
+            output,
+            before,
+            after,
+        },
+        dropped_pages,
+    ))
 }

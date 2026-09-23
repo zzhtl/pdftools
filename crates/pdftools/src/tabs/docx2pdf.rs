@@ -113,6 +113,12 @@ fn start(app: &mut App, ctx: &egui::Context, single: bool) {
         let mut pages = 0usize;
         let mut bytes = 0usize;
         let mut last_out = None;
+        let mut namer = pdfcore::fsio::OutputNamer::new(&files);
+        if let Target::File(p) = &target {
+            if namer.is_input(p) {
+                return Err("输出文件不能是原文档本身，请换一个文件名".into());
+            }
+        }
 
         for (i, path) in files.iter().enumerate() {
             if sink.is_cancelled() {
@@ -135,10 +141,12 @@ fn start(app: &mut App, ctx: &egui::Context, single: bool) {
 
             let out = match &target {
                 Target::File(p) => p.clone(),
-                Target::Dir(d) => d.join(format!(
-                    "{}.pdf",
-                    path.file_stem().unwrap_or_default().to_string_lossy()
-                )),
+                // 批量输出不覆盖任何东西：不同目录下的同名文档、目录里原有的 PDF 都会自动改名。
+                Target::Dir(d) => namer.name(
+                    d,
+                    &path.file_stem().unwrap_or_default().to_string_lossy(),
+                    "pdf",
+                ),
             };
             write_atomic(&out, &report.value.pdf)?;
 
