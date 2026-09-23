@@ -477,5 +477,29 @@ pub fn all() -> Vec<Probe> {
             .body(&numbered),
     );
 
+    // 多节：纵向 → 横向（边距不同、带网格）→ 纵向，再接一个设置相同的连续分节。
+    // 奇偶页起、连续分节改边距这两种 LibreOffice 与规范不同，不放进来：LibreOffice
+    // 在连续分节之后连新的一页都不用新节的边距。
+    let sect = |kind: &str, (w, h): (u32, u32), left: u32, grid: &str| {
+        format!(
+            r#"<w:sectPr><w:type w:val="{kind}"/><w:pgSz w:w="{w}" w:h="{h}"/><w:pgMar w:top="1440" w:right="1588" w:bottom="1440" w:left="{left}" w:header="851" w:footer="992" w:gutter="0"/>{grid}</w:sectPr>"#
+        )
+    };
+    let section = |seed: usize, n: usize, sect: String| {
+        (0..n)
+            .map(|i| probe_para(if i + 1 == n { &sect } else { "" }, &filler(seed + i, 60)))
+            .collect::<String>()
+    };
+    let sectioned = section(0, 30, sect("nextPage", (11906, 16838), 1588, ""))
+        + &section(40, 30, sect("nextPage", (16838, 11906), 2268, GRID_312))
+        + &section(80, 20, sect("nextPage", (11906, 16838), 1588, ""))
+        + &section(120, 20, String::new());
+    add(
+        "sections",
+        DocxBuilder::new()
+            .body(&sectioned)
+            .sect_extra(r#"<w:type w:val="continuous"/>"#),
+    );
+
     v
 }

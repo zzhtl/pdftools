@@ -18,7 +18,7 @@ mod text;
 pub use calib::{
     AutoSpace, Breaks, Calib, Cascade, CharClass, Decor, EmptyPara, FixedBaseline, Flow,
     GridLayout, HangingIndent, HangingPunct, Justify, ListNumbers, Overflow, PageBottom,
-    PageBreakBefore, ParaSpacing, RunFormat, Tabs, Theme, TrailingSpaces,
+    PageBreakBefore, ParaSpacing, RunFormat, Sections, Tabs, Theme, TrailingSpaces,
 };
 
 use super::ir;
@@ -88,9 +88,23 @@ impl PaintOp {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Page {
     pub ops: Vec<PaintOp>,
+    /// 纸张大小（点）：(宽, 高)。各节可以不同。
+    pub size: (f32, f32),
+    /// 页码：显示出来的那个数，不一定等于第几页。
+    pub number: i32,
+}
+
+impl Page {
+    fn new(page: &ir::PageGeom, number: i32) -> Self {
+        Self {
+            ops: Vec::new(),
+            size: (page.w_pt, page.h_pt),
+            number,
+        }
+    }
 }
 
 pub struct LaidOut {
@@ -101,31 +115,39 @@ pub struct LaidOut {
 const PLACEHOLDER_COLOR: [u8; 3] = [0x88, 0x88, 0x88];
 
 pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut {
-    let env = para::Env {
-        grid: doc.grid,
-        left: doc.page.margin_left,
-        width: doc.page.content_width(),
-        default_tab_stop: doc.default_tab_stop,
-        calib,
-    };
     let collapse = doc.html_paragraph_spacing && calib.para_spacing == ParaSpacing::HtmlCollapse;
-    let mut pages = paginate::Paginator::new(&doc.page, grid_area(doc, calib), collapse, calib);
+    let first = &doc.sections[0];
+    let mut pages = paginate::Paginator::new(
+        frame(first, calib),
+        first.page_number_start,
+        collapse,
+        calib,
+    );
     let mut warnings = Vec::new();
 
     // 先把所有块量好，放的时候才能往后看（与下段同页要知道下一段有多高）。
-    let mut measured: Vec<Measured> = doc
-        .blocks
-        .iter()
-        .map(|block| match block {
-            ir::Block::Para(p) => Measured::Para(para::measure(p, &env, book)),
-            ir::Block::Placeholder(ph) => Measured::Placeholder(
-                placeholder_paras(ph)
-                    .iter()
-                    .map(|p| para::measure(p, &env, book))
-                    .collect(),
-            ),
-        })
-        .collect();
+    // 各节按自己的栏宽量。
+    let mut measured: Vec<Measured> = Vec::with_capacity(doc.blocks.len());
+    for section in &doc.sections {
+        let env = para::Env {
+            grid: section.grid,
+            left: section.page.margin_left,
+            width: section.page.content_width(),
+            default_tab_stop: doc.default_tab_stop,
+            calib,
+        };
+        measured.extend(doc.blocks[section.blocks.clone()].iter().map(|block| {
+            match block {
+                ir::Block::Para(p) => Measured::Para(para::measure(p, &env, book)),
+                ir::Block::Placeholder(ph) => Measured::Placeholder(
+                    placeholder_paras(ph)
+                        .iter()
+                        .map(|p| para::measure(p, &env, book))
+                        .collect(),
+                ),
+            }
+        }));
+    }
     if calib.flow == Flow::Word {
         contextual_spacing(&doc.blocks, &mut measured);
     }
@@ -136,45 +158,18 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
         .iter()
         .filter(|b| matches!(b, ir::Block::Para(p) if p.numbering_dropped))
         .count();
-    for (i, (block, m)) in doc.blocks.iter().zip(&measured).enumerate() {
-        match (block, m) {
-            (_, Measured::Para(b)) => {
-                if b.keep_next {
-                    // 这一串与下段同页的段落，以及紧跟在后面的那一段。
-                    let chain: Vec<&para::ParaBox> = measured[i..]
-                        .iter()
-                        .map_while(|m| match m {
-                            Measured::Para(p) if p.keep_next => Some(p),
-                            _ => None,
-                        })
-                        .collect();
-                    let next = match measured.get(i + chain.len()) {
-                        Some(Measured::Para(p)) => Some(p),
-                        _ => None,
-                    };
-                    pages.keep_together(&chain, next);
-                }
-                pages.place_para(b);
-            }
-            // 不支持的内容：一句说明 + 能抽出来的文字，并记下在第几页。
-            //
-            // 不静默丢弃，是因为用户会以为转全了；不整份拒绝，是因为其余内容通常完全可用。
-            // 对法律文书来说，悄悄丢一张表格是**危险**的。
-            (ir::Block::Placeholder(ph), Measured::Placeholder(paras)) => {
-                warnings.push(
-                    Warning::new(
-                        WarningKind::UnsupportedElement,
-                        format!("{} 未能渲染", ph.kind.label()),
-                    )
-                    .at_page(pages.page_index() + 1),
-                );
-                for b in paras {
-                    pages.place_para(b);
-                }
-            }
-            (ir::Block::Para(_), Measured::Placeholder(_)) => {
-                unreachable!("量出来的与原块一一对应")
-            }
+    for (si, section) in doc.sections.iter().enumerate() {
+        if si > 0 {
+            pages.start_section(
+                frame(section, calib),
+                section.start,
+                section.page_number_start,
+            );
+        }
+        // 与下段同页不跨节：下一节总是另起一页（或者与本节无关）。
+        let in_section = &measured[..section.blocks.end];
+        for i in section.blocks.clone() {
+            place_block(i, &doc.blocks[i], in_section, &mut pages, &mut warnings);
         }
     }
 
@@ -208,6 +203,55 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
     LaidOut {
         pages: pages.finish(),
         warnings,
+    }
+}
+
+/// 把第 `i` 块放进页面。`measured` 只到本节末尾：与下段同页不跨节。
+fn place_block(
+    i: usize,
+    block: &ir::Block,
+    measured: &[Measured],
+    pages: &mut paginate::Paginator,
+    warnings: &mut Vec<Warning>,
+) {
+    match (block, &measured[i]) {
+        (_, Measured::Para(b)) => {
+            if b.keep_next {
+                // 这一串与下段同页的段落，以及紧跟在后面的那一段。
+                let chain: Vec<&para::ParaBox> = measured[i..]
+                    .iter()
+                    .map_while(|m| match m {
+                        Measured::Para(p) if p.keep_next => Some(p),
+                        _ => None,
+                    })
+                    .collect();
+                let next = match measured.get(i + chain.len()) {
+                    Some(Measured::Para(p)) => Some(p),
+                    _ => None,
+                };
+                pages.keep_together(&chain, next);
+            }
+            pages.place_para(b);
+        }
+        // 不支持的内容：一句说明 + 能抽出来的文字，并记下在第几页。
+        //
+        // 不静默丢弃，是因为用户会以为转全了；不整份拒绝，是因为其余内容通常完全可用。
+        // 对法律文书来说，悄悄丢一张表格是**危险**的。
+        (ir::Block::Placeholder(ph), Measured::Placeholder(paras)) => {
+            warnings.push(
+                Warning::new(
+                    WarningKind::UnsupportedElement,
+                    format!("{} 未能渲染", ph.kind.label()),
+                )
+                .at_page(pages.page_index() + 1),
+            );
+            for b in paras {
+                pages.place_para(b);
+            }
+        }
+        (ir::Block::Para(_), Measured::Placeholder(_)) => {
+            unreachable!("量出来的与原块一一对应")
+        }
     }
 }
 
@@ -254,10 +298,20 @@ fn join_boxes(measured: &mut [Measured]) {
     }
 }
 
+/// 一节的版面：纸张与正文区。
+fn frame(section: &ir::Section, calib: &Calib) -> paginate::Frame {
+    let (origin, capacity) = grid_area(section, calib);
+    paginate::Frame {
+        page: section.page,
+        origin,
+        capacity,
+    }
+}
+
 /// 正文能用的竖向区间：(离版心顶端的偏移, 高度)。见 [`GridLayout::Centered`]。
-fn grid_area(doc: &ir::Document, calib: &Calib) -> (f32, f32) {
-    let height = doc.page.content_height();
-    match (doc.grid, calib.grid) {
+fn grid_area(section: &ir::Section, calib: &Calib) -> (f32, f32) {
+    let height = section.page.content_height();
+    match (section.grid, calib.grid) {
         (Some(g), GridLayout::Centered) if g.pitch_pt > 0.0 && g.pitch_pt <= height => {
             let area = (height / g.pitch_pt).floor() * g.pitch_pt;
             ((height - area) / 2.0, area)

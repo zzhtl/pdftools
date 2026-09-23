@@ -4,8 +4,8 @@ use quick_xml::events::Event;
 
 use super::{attr, attr_i32, on_off, skip, xml_err, Rd};
 use crate::docx::model::{
-    Align, Border, BorderStyle, DocGrid, FontRef, LineRule, PPr, RPr, SectPr, TabAlign, TabDef,
-    TabLeader, ThemeFont, Underline, UnderlineStyle, VertAlign,
+    Align, Border, BorderStyle, DocGrid, FontRef, LineRule, PPr, RPr, SectPr, SectionStart,
+    TabAlign, TabDef, TabLeader, ThemeFont, Underline, UnderlineStyle, VertAlign,
 };
 use crate::error::Result;
 
@@ -318,7 +318,34 @@ pub(super) fn parse_sect_pr(r: &mut Rd) -> Result<SectPr> {
                         s.page_h = h;
                     }
                 }
-                "headerReference" | "footerReference" => s.has_header_footer = true,
+                kind @ ("headerReference" | "footerReference") => {
+                    s.has_header_footer = true;
+                    let refs = if kind == "headerReference" {
+                        &mut s.headers
+                    } else {
+                        &mut s.footers
+                    };
+                    let id = attr(&e, "id");
+                    match attr(&e, "type").as_deref() {
+                        Some("first") => refs.first = id,
+                        Some("even") => refs.even = id,
+                        _ => refs.default = id,
+                    }
+                }
+                "type" => {
+                    s.start = match attr(&e, "val").as_deref() {
+                        Some("continuous") => SectionStart::Continuous,
+                        Some("evenPage") => SectionStart::EvenPage,
+                        Some("oddPage") => SectionStart::OddPage,
+                        Some("nextColumn") => SectionStart::NextColumn,
+                        _ => SectionStart::NextPage,
+                    }
+                }
+                "titlePg" => s.title_page = on_off(&e),
+                "pgNumType" => {
+                    s.page_number_start = attr_i32(&e, "start");
+                    s.page_number_format = attr(&e, "fmt");
+                }
                 "docGrid" => {
                     if let Some(pitch) = attr_i32(&e, "linePitch") {
                         // 只有这三种 type 才吸附。实测 default / 不写 type 都不吸附。
@@ -344,6 +371,12 @@ pub(super) fn parse_sect_pr(r: &mut Rd) -> Result<SectPr> {
                     }
                     if let Some(v) = attr_i32(&e, "right") {
                         s.margin_right = v;
+                    }
+                    if let Some(v) = attr_i32(&e, "header") {
+                        s.header_dist = v;
+                    }
+                    if let Some(v) = attr_i32(&e, "footer") {
+                        s.footer_dist = v;
                     }
                 }
                 _ => {}

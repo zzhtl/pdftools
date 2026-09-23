@@ -17,9 +17,9 @@
 
 use std::ops::Range;
 
-use super::layout::{Calib, Cascade, ListNumbers, RunFormat, Theme};
+use super::layout::{Calib, Cascade, ListNumbers, RunFormat, Sections, Theme};
 use super::model::{self, BreakKind, FontRef, LineRule, NumSuffix, PPr, RPr, RunItem, ThemeScript};
-pub use super::model::{BorderStyle, TabAlign, TabLeader, UnderlineStyle, VertAlign};
+pub use super::model::{BorderStyle, SectionStart, TabAlign, TabLeader, UnderlineStyle, VertAlign};
 use super::numbering::Lists;
 use super::resolve::Resolver;
 
@@ -59,7 +59,7 @@ impl Grid {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PageGeom {
     pub w_pt: f32,
     pub h_pt: f32,
@@ -67,6 +67,9 @@ pub struct PageGeom {
     pub margin_bottom: f32,
     pub margin_left: f32,
     pub margin_right: f32,
+    /// 页眉顶端离纸张上边、页脚底端离纸张下边的距离。
+    pub header_dist: f32,
+    pub footer_dist: f32,
 }
 
 impl PageGeom {
@@ -278,13 +281,61 @@ pub enum Block {
     Placeholder(Placeholder),
 }
 
+/// 一节：页面设置相同的一段正文。
+#[derive(Debug, Clone)]
+pub struct Section {
+    pub page: PageGeom,
+    /// 本节的行网格。None 表示没有网格或网格类型不吸附。
+    pub grid: Option<Grid>,
+    /// 本节从哪里开始。第一节总是从第一页开始。
+    pub start: SectionStart,
+    /// 本节的块在 [`Document::blocks`] 里的区间。
+    pub blocks: Range<usize>,
+    /// 本节首页用单独的页眉页脚。
+    pub title_page: bool,
+    /// 本节第一页的页码。None 是接着上一节。
+    pub page_number_start: Option<i32>,
+    /// 页码的数字格式（与编号格式同一套取值）。
+    pub page_number_format: String,
+}
+
+impl Section {
+    fn from_model(s: &model::SectPr, blocks: Range<usize>) -> Self {
+        Self {
+            page: PageGeom {
+                w_pt: tw(s.page_w),
+                h_pt: tw(s.page_h),
+                margin_top: tw(s.margin_top),
+                margin_bottom: tw(s.margin_bottom),
+                margin_left: tw(s.margin_left),
+                margin_right: tw(s.margin_right),
+                header_dist: tw(s.header_dist),
+                footer_dist: tw(s.footer_dist),
+            },
+            grid: s
+                .doc_grid
+                .filter(|g| g.snaps && g.line_pitch > 0)
+                .map(|g| Grid {
+                    pitch_pt: tw(g.line_pitch),
+                }),
+            start: s.start,
+            blocks,
+            title_page: s.title_page,
+            page_number_start: s.page_number_start,
+            page_number_format: s
+                .page_number_format
+                .clone()
+                .unwrap_or_else(|| "decimal".into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Document {
-    pub page: PageGeom,
+    /// 至少一节，按顺序首尾相接地覆盖全部块。
+    pub sections: Vec<Section>,
     /// 文档引用了页眉或页脚，但本版本不渲染。
     pub has_header_footer: bool,
-    /// 文档的行网格。None 表示没有网格或网格类型不吸附。
-    pub grid: Option<Grid>,
     /// 相邻两段的段后距与段前距取较大值而不是相加（HTML 的规矩）。
     /// 文档没有设置 `w:doNotUseHTMLParagraphAutoSpacing` 时为真，见 `Calib::para_spacing`。
     pub html_paragraph_spacing: bool,
@@ -300,9 +351,13 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
     let resolver = Resolver::new(&doc.styles, calib.cascade == Cascade::Spec, numbering);
     let mut lists = numbering.map(|n| Lists::new(n, &doc.styles));
     let fonts = FontNames::new(doc, calib);
-    let s = doc.section;
+    // 段落里的 `w:sectPr` 结束一节；最后一节的设置在 body 末尾。
+    // 重写前只用最后一节排全文。
+    let each = calib.sections == Sections::Each;
 
     let mut blocks = Vec::with_capacity(doc.body.len());
+    let mut sections = Vec::new();
+    let mut start = 0;
     for block in &doc.body {
         match block {
             model::Block::Para(p) => {
@@ -312,30 +367,25 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
                     fonts: &fonts,
                     calib,
                 };
-                push_paragraph(&mut blocks, p, &ctx, lists.as_mut())
+                push_paragraph(&mut blocks, p, &ctx, lists.as_mut());
+                if let (true, Some(sp)) = (each, &p.section) {
+                    sections.push(Section::from_model(sp, start..blocks.len()));
+                    start = blocks.len();
+                }
             }
             model::Block::Table(t) => blocks.push(Block::Placeholder(table_placeholder(t))),
         }
     }
-
-    let grid = s
-        .doc_grid
-        .filter(|g| g.snaps && g.line_pitch > 0)
-        .map(|g| Grid {
-            pitch_pt: tw(g.line_pitch),
-        });
+    sections.push(Section::from_model(&doc.section, start..blocks.len()));
+    let has_header_footer = doc.section.has_header_footer
+        || (each
+            && doc.body.iter().any(|b| {
+                matches!(b, model::Block::Para(p) if p.section.as_ref().is_some_and(|s| s.has_header_footer))
+            }));
 
     Document {
-        page: PageGeom {
-            w_pt: tw(s.page_w),
-            h_pt: tw(s.page_h),
-            margin_top: tw(s.margin_top),
-            margin_bottom: tw(s.margin_bottom),
-            margin_left: tw(s.margin_left),
-            margin_right: tw(s.margin_right),
-        },
-        has_header_footer: s.has_header_footer,
-        grid,
+        sections,
+        has_header_footer,
         html_paragraph_spacing: !doc.settings.no_html_paragraph_spacing,
         default_tab_stop: doc.settings.default_tab_stop.map(tw).unwrap_or(36.0),
         num_format_fallbacks: lists

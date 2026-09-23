@@ -3,14 +3,25 @@
 use super::calib::{Calib, PageBreakBefore};
 use super::para::{Line, ParaBody, ParaBox, ParaDecor};
 use super::{Page, PaintOp};
-use crate::docx::ir::{self, BorderStyle, PageGeom};
+use crate::docx::ir::{self, BorderStyle, PageGeom, SectionStart};
 
-pub(super) struct Paginator<'a> {
-    page: &'a PageGeom,
+/// 一页的版面：纸张，以及其中的正文区。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Frame {
+    pub page: PageGeom,
     /// 正文区的起点离版心顶端多远。有行网格时网格在版心里居中，起点就不在顶端。
-    origin: f32,
+    pub origin: f32,
     /// 正文区的高度。
-    capacity: f32,
+    pub capacity: f32,
+}
+
+pub(super) struct Paginator {
+    /// 当前页的版面。
+    frame: Frame,
+    /// 之后新开的页用的版面。连续分节换了设置时，当前页仍用旧的。
+    next_frame: Frame,
+    /// 下一页的页码从这里重新起头（`w:pgNumType/@w:start`）。
+    restart: Option<i32>,
     pages: Vec<Page>,
     /// 当前页已用掉的垂直空间（从正文区顶部往下量）。
     used: f32,
@@ -31,19 +42,19 @@ struct OpenBox {
     ops_at: usize,
 }
 
-impl<'a> Paginator<'a> {
-    /// `area` 是正文区：(离版心顶端的偏移, 高度)。
+impl Paginator {
+    /// `first_number`：第一页的页码，没写是 1。
     pub fn new(
-        page: &'a PageGeom,
-        (origin, capacity): (f32, f32),
+        frame: Frame,
+        first_number: Option<i32>,
         collapse_spacing: bool,
         calib: &Calib,
     ) -> Self {
         Self {
-            page,
-            origin,
-            capacity,
-            pages: vec![Page::default()],
+            frame,
+            next_frame: frame,
+            restart: None,
+            pages: vec![Page::new(&frame.page, first_number.unwrap_or(1))],
             used: 0.0,
             collapse_spacing,
             last_after: 0.0,
@@ -63,9 +74,38 @@ impl<'a> Paginator<'a> {
 
     fn new_page(&mut self) {
         self.close_box();
-        self.pages.push(Page::default());
+        self.frame = self.next_frame;
+        let number = self
+            .restart
+            .take()
+            .unwrap_or_else(|| self.pages.last().map_or(1, |p| p.number + 1));
+        self.pages.push(Page::new(&self.frame.page, number));
         self.used = 0.0;
         self.last_after = 0.0;
+    }
+
+    /// 开始新的一节。见 [`Sections::Each`](super::calib::Sections::Each)。
+    pub fn start_section(&mut self, frame: Frame, start: SectionStart, number: Option<i32>) {
+        let same_paper = (frame.page.w_pt - self.frame.page.w_pt).abs() < 0.01
+            && (frame.page.h_pt - self.frame.page.h_pt).abs() < 0.01;
+        self.next_frame = frame;
+        if start == SectionStart::Continuous && same_paper {
+            return;
+        }
+        self.restart = number;
+        self.new_page();
+        let odd = self
+            .pages
+            .last()
+            .is_some_and(|p| p.number.rem_euclid(2) == 1);
+        let blank = match start {
+            SectionStart::OddPage => !odd,
+            SectionStart::EvenPage => odd,
+            _ => false,
+        };
+        if blank {
+            self.new_page();
+        }
     }
 
     fn at_page_top(&self) -> bool {
@@ -100,7 +140,7 @@ impl<'a> Paginator<'a> {
                 need += self.gap_before(n, last_after) + top + n.first_line_height();
             }
         }
-        if self.used + need > self.capacity + FIT_TOLERANCE {
+        if self.used + need > self.frame.capacity + FIT_TOLERANCE {
             self.new_page();
         }
     }
@@ -120,7 +160,7 @@ impl<'a> Paginator<'a> {
                 + self.gap_before(para, self.last_after)
                 + para.body_height()
                 + para.decor_height()
-                > self.capacity + FIT_TOLERANCE
+                > self.frame.capacity + FIT_TOLERANCE
         {
             self.new_page();
         }
@@ -156,7 +196,7 @@ impl<'a> Paginator<'a> {
                     let mut n = fit_lines(
                         &lines[next..],
                         self.used + lead,
-                        self.capacity - reserve,
+                        self.frame.capacity - reserve,
                         self.at_page_top(),
                     );
                     if para.widow_control {
@@ -256,12 +296,12 @@ impl<'a> Paginator<'a> {
 
     /// 从正文区顶部往下 `used` 处的 y（PDF 坐标）。
     fn y(&self, used: f32) -> f32 {
-        self.page.h_pt - self.page.margin_top - self.origin - used
+        self.frame.page.h_pt - self.frame.page.margin_top - self.frame.origin - used
     }
 
     fn commit(&mut self, line: &Line) {
         self.last_after = 0.0;
-        let base = self.page.h_pt - self.page.margin_top - self.origin - self.used - line.baseline;
+        let base = self.y(self.used) - line.baseline;
         let page = self.pages.last_mut().expect("至少有一页");
         page.ops.extend(line.ops.iter().map(|op| op.shifted(base)));
         self.used += line.height;

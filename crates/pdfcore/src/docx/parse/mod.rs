@@ -126,6 +126,9 @@ pub fn parse_settings(xml: &str) -> Settings {
             Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == "defaultTabStop" => {
                 settings.default_tab_stop = attr_i32(&e, "val").filter(|v| *v > 0);
             }
+            Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == "evenAndOddHeaders" => {
+                settings.even_and_odd_headers = on_off(&e);
+            }
             Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == "themeFontLang" => {
                 settings.theme_font_lang_east_asia = attr(&e, "eastAsia").filter(|v| !v.is_empty());
             }

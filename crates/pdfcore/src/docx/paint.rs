@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::ir::PageGeom;
 use super::layout::{LaidOut, PaintOp};
 use crate::error::Result;
 use crate::fonts::{FontBook, FontId};
@@ -11,7 +10,6 @@ use crate::pdf::writer::{Canvas, DocBuilder, GlyphRun};
 
 pub fn paint(
     laid: &LaidOut,
-    page: &PageGeom,
     book: &FontBook,
     info: crate::pdf::writer::DocInfo,
 ) -> Result<Vec<u8>> {
@@ -70,7 +68,8 @@ pub fn paint(
     }
 
     for laid_page in &laid.pages {
-        let mut canvas = Canvas::new(page.w_pt, page.h_pt);
+        let (w, h) = laid_page.size;
+        let mut canvas = Canvas::new(w, h);
         for op in &laid_page.ops {
             match op {
                 PaintOp::Text {
@@ -122,9 +121,9 @@ pub fn paint(
         doc.add_page(canvas.finish());
     }
 
-    // 一页都没有的文档（空 docx）也要出一页空白，否则 PDF 非法。
+    // 一页都没有的 PDF 不合法。排版总会给出至少一页，这里只是兜底：A4。
     if doc.page_count() == 0 {
-        doc.add_page(Canvas::new(page.w_pt, page.h_pt).finish());
+        doc.add_page(Canvas::new(595.3, 841.9).finish());
     }
 
     doc.finish()

@@ -1842,3 +1842,83 @@ fn paragraph_borders_and_shading_are_drawn() {
         );
     }
 }
+
+/// 多节：每节用自己的纸张与边距；偶数页起时页码奇偶不对就空出一页；连续分节
+/// 不换页，左边距从分节处起生效。
+#[test]
+fn sections_have_their_own_pages() {
+    if !require_cjk_font() {
+        return;
+    }
+    let sect = |kind: &str, (w, h): (u32, u32), left: u32| {
+        format!(
+            r#"<w:sectPr><w:type w:val="{kind}"/><w:pgSz w:w="{w}" w:h="{h}"/><w:pgMar w:top="1440" w:right="1588" w:bottom="1440" w:left="{left}" w:header="851" w:footer="992"/></w:sectPr>"#
+        )
+    };
+    let para = |text: &str, sect: &str| {
+        format!(
+            r#"<w:p><w:pPr>{sect}</w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    };
+    let (portrait, landscape) = ((11906, 16838), (16838, 11906));
+    let body = [
+        para("第一节", &sect("nextPage", portrait, 1588)),
+        para("第二节横向", &sect("nextPage", landscape, 2000)),
+        para("第三节", &sect("evenPage", portrait, 1588)),
+        para("第四节", &sect("continuous", portrait, 3000)),
+        para("最后一节", ""),
+    ]
+    .concat();
+    let path = DocxBuilder::new()
+        .body(&body)
+        .sect_extra(r#"<w:type w:val="continuous"/>"#)
+        .build("sections.docx");
+    let pdf = convert(&path).value.pdf;
+
+    let doc = lopdf::Document::load_mem(&pdf).unwrap();
+    let sizes: Vec<(f32, f32)> = doc
+        .get_pages()
+        .values()
+        .map(|&id| {
+            let b = doc.get_dictionary(id).unwrap().get(b"MediaBox").unwrap();
+            let v: Vec<f32> = b
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o.as_float().unwrap())
+                .collect();
+            (v[2], v[3])
+        })
+        .collect();
+    let a4 = (595.3, 841.9);
+    assert_eq!(
+        sizes.len(),
+        4,
+        "第二节占第 2 页；第三节要从偶数页起，空出第 3 页"
+    );
+    for (got, want) in sizes.iter().zip([a4, (841.9, 595.3), a4, a4]) {
+        assert!(
+            (got.0 - want.0).abs() < 0.1 && (got.1 - want.1).abs() < 0.1,
+            "{sizes:?}"
+        );
+    }
+
+    let pages = common::pdftext::extract(&pdf);
+    let left = |page: usize, text: &str| {
+        pages[page]
+            .lines
+            .iter()
+            .find(|l| l.text.contains(text))
+            .map(|l| l.x0)
+            .unwrap_or_else(|| panic!("第 {} 页找不到「{text}」", page + 1))
+    };
+    assert!((left(0, "第一节") - 79.4).abs() < 0.01);
+    assert!((left(1, "第二节") - 100.0).abs() < 0.01);
+    assert!(pages[2].lines.is_empty(), "空出来的一页");
+    assert!((left(3, "第三节") - 79.4).abs() < 0.01);
+    assert!(
+        (left(3, "第四节") - 150.0).abs() < 0.01,
+        "连续分节：同一页、新的左边距"
+    );
+    assert!((left(3, "最后一节") - 79.4).abs() < 0.01);
+}

@@ -524,8 +524,8 @@ pub struct DocGrid {
     pub snaps: bool,
 }
 
-/// `w:sectPr`，页面几何。单位 twips。
-#[derive(Debug, Clone, Copy)]
+/// `w:sectPr`：一节的页面设置。单位 twips。
+#[derive(Debug, Clone)]
 pub struct SectPr {
     pub page_w: i32,
     pub page_h: i32,
@@ -536,6 +536,44 @@ pub struct SectPr {
     pub doc_grid: Option<DocGrid>,
     /// 本节引用了页眉或页脚。
     pub has_header_footer: bool,
+    /// `w:pgMar/@w:header`：页眉顶端离纸张上边的距离。
+    pub header_dist: i32,
+    /// `w:pgMar/@w:footer`：页脚底端离纸张下边的距离。
+    pub footer_dist: i32,
+    /// `w:type`：本节从哪里开始。
+    pub start: SectionStart,
+    /// `w:titlePg`：本节首页用单独的页眉页脚。
+    pub title_page: bool,
+    /// `w:pgNumType/@w:start`：本节的页码从几开始。没写就接着上一节。
+    pub page_number_start: Option<i32>,
+    /// `w:pgNumType/@w:fmt`：页码的数字格式，取值与编号格式相同。
+    pub page_number_format: Option<String>,
+    /// `w:headerReference`：各类页眉的关系 id。
+    pub headers: HeaderRefs,
+    pub footers: HeaderRefs,
+}
+
+/// 一节从哪里开始（`w:sectPr/w:type`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SectionStart {
+    /// 另起一页。缺省。
+    #[default]
+    NextPage,
+    /// 接着上一节排，不换页。
+    Continuous,
+    /// 从下一个偶数页开始，需要时空出一页。
+    EvenPage,
+    OddPage,
+    /// 下一栏。本版本不分栏，按另起一页处理。
+    NextColumn,
+}
+
+/// 首页、偶数页、其余页各用哪个页眉（或页脚）部件：关系 id。
+#[derive(Debug, Clone, Default)]
+pub struct HeaderRefs {
+    pub default: Option<String>,
+    pub first: Option<String>,
+    pub even: Option<String>,
 }
 
 impl Default for SectPr {
@@ -550,6 +588,14 @@ impl Default for SectPr {
             margin_right: 1800,
             doc_grid: None,
             has_header_footer: false,
+            header_dist: 720,
+            footer_dist: 720,
+            start: SectionStart::NextPage,
+            title_page: false,
+            page_number_start: None,
+            page_number_format: None,
+            headers: HeaderRefs::default(),
+            footers: HeaderRefs::default(),
         }
     }
 }
@@ -668,6 +714,8 @@ pub struct Settings {
     pub no_html_paragraph_spacing: bool,
     /// `w:defaultTabStop`，twips。
     pub default_tab_stop: Option<i32>,
+    /// `w:evenAndOddHeaders`：偶数页用单独的页眉页脚。
+    pub even_and_odd_headers: bool,
     /// `w:themeFontLang/@w:eastAsia`（`zh-CN` 之类）：东亚主题字体取主题里哪个文种的字体。
     pub theme_font_lang_east_asia: Option<String>,
 }

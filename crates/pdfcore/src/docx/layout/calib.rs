@@ -32,6 +32,22 @@ pub struct Calib {
     pub auto_space: AutoSpace,
     pub decor: Decor,
     pub list_numbers: ListNumbers,
+    pub sections: Sections,
+}
+
+/// 多节文档（段落里的 `w:sectPr`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sections {
+    /// 只用最后一节（body 末尾的 `w:sectPr`）的设置排全文。
+    Last,
+    /// 每节用自己的纸张、边距、网格，按 `w:type` 开始：
+    /// - 另起一页；奇数页、偶数页起时，页码奇偶不对就空出一页（规范如此，
+    ///   LibreOffice 实测不空页）；
+    /// - 连续：不换页，本节的左右边距从分节处起生效，其余设置等下一页；纸张大小、
+    ///   方向变了则照样换页。LibreOffice 实测在连续分节之后一直沿用上一节的边距，
+    ///   连之后新开的页也不改。
+    /// - `w:pgNumType/@w:start` 让本节第一页的页码重新起头。
+    Each,
 }
 
 /// 自动编号（`w:numPr`）。
@@ -336,6 +352,7 @@ impl Calib {
             auto_space: AutoSpace::Letters,
             decor: Decor::Boxes,
             list_numbers: ListNumbers::Rendered,
+            sections: Sections::Each,
         }
     }
 
@@ -363,6 +380,7 @@ impl Calib {
             auto_space: AutoSpace::Legacy,
             decor: Decor::Ignored,
             list_numbers: ListNumbers::Dropped,
+            sections: Sections::Last,
         }
     }
 }

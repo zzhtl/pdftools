@@ -87,7 +87,7 @@ pub fn run_with(
         creation: pkg.created,
         modified: Some(crate::timestamp::Timestamp::now()),
     };
-    let pdf = paint::paint(&laid, &doc.page, &book, info)?;
+    let pdf = paint::paint(&laid, &book, info)?;
     sink.emit(step(4, "生成 PDF"));
 
     let pages = laid.pages.len();
