@@ -14,7 +14,9 @@ mod paginate;
 mod para;
 mod text;
 
-pub use calib::{Calib, EmptyPara, FixedBaseline, GridLayout, PageBottom, ParaSpacing};
+pub use calib::{
+    Calib, EmptyPara, FixedBaseline, GridLayout, PageBottom, ParaSpacing, TrailingSpaces,
+};
 
 use super::ir;
 use crate::error::{Warning, WarningKind};

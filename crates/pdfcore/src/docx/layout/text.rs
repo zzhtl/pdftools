@@ -128,19 +128,33 @@ impl ShapedPara {
             .sum()
     }
 
+    /// 行 `[start, end)` 里算行宽的部分到哪里为止。`hang_spaces` 时行尾的半角空格
+    /// （连同其后的换行符）不算：它们悬挂在右边距外。
+    pub fn measured_end(&self, start: usize, end: usize, hang_spaces: bool) -> usize {
+        if !hang_spaces {
+            return end;
+        }
+        let end = end.min(self.text.len());
+        start
+            + self.text[start..end]
+                .trim_end_matches(|c: char| c == ' ' || c.is_control())
+                .len()
+    }
+
     /// 从 `start` 开始，找最后一个装得下的断行点。返回 (断点偏移, 是否是强制断行)。
-    pub fn next_break(&self, start: usize, avail: f32) -> (usize, bool) {
+    pub fn next_break(&self, start: usize, avail: f32, hang_spaces: bool) -> (usize, bool) {
         let first = self.breaks.partition_point(|(i, _)| *i <= start);
+        let fits = |idx| self.width(start, self.measured_end(start, idx, hang_spaces)) <= avail;
         let mut best: Option<usize> = None;
         for &(idx, kind) in &self.breaks[first..] {
             if kind == BreakOpportunity::Mandatory {
                 // 强制断行点之前的内容装不下也得先断在这里之前的某个可断点。
-                if self.width(start, idx) <= avail {
+                if fits(idx) {
                     return (idx, true);
                 }
                 break;
             }
-            if self.width(start, idx) <= avail {
+            if fits(idx) {
                 best = Some(idx);
             } else {
                 break;
@@ -352,4 +366,28 @@ fn symbol_font_of<'a>(style: &'a ir::RunStyle, book: &FontBook) -> Option<&'a st
         .into_iter()
         .flatten()
         .find(|f| pua::is_symbol_font(f) && !book.has_family(f))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn para(text: &str) -> ShapedPara {
+        ShapedPara {
+            text: text.to_string(),
+            pieces: Vec::new(),
+            breaks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn trailing_spaces_and_breaks_are_not_measured_when_they_hang() {
+        let p = para("ab  cd  \n");
+        assert_eq!(p.measured_end(0, 4, true), 2);
+        assert_eq!(p.measured_end(0, 9, true), 6);
+        assert_eq!(p.measured_end(4, 9, true), 6);
+        assert_eq!(p.measured_end(0, 9, false), 9);
+        // 全角空格不悬挂：它是一个正常的字。
+        assert_eq!(para("甲\u{3000}").measured_end(0, 6, true), 6);
+    }
 }

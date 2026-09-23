@@ -16,6 +16,18 @@ pub struct Calib {
     pub para_spacing: ParaSpacing,
     pub page_bottom: PageBottom,
     pub fixed_baseline: FixedBaseline,
+    pub trailing_spaces: TrailingSpaces,
+}
+
+/// 行尾的半角空格算不算行宽。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrailingSpaces {
+    Counted,
+    /// 不算：行尾空格悬挂在右边距外，放不放得下、居中和右对齐都只看可见的文字。
+    ///
+    /// 对照 LibreOffice 实测：右对齐的一段西文，首行可见文字的右缘正好贴着右边距，
+    /// 行尾那个空格伸出边距约一个空格宽。
+    Hang,
 }
 
 /// 固定行距、最小行距时，基线在行框里的位置。
@@ -102,6 +114,7 @@ impl Calib {
             para_spacing: ParaSpacing::HtmlCollapse,
             page_bottom: PageBottom::TextOnly,
             fixed_baseline: FixedBaseline::Measured,
+            trailing_spaces: TrailingSpaces::Hang,
         }
     }
 
@@ -113,6 +126,7 @@ impl Calib {
             para_spacing: ParaSpacing::Sum,
             page_bottom: PageBottom::WholeLine,
             fixed_baseline: FixedBaseline::Legacy,
+            trailing_spaces: TrailingSpaces::Counted,
         }
     }
 }

@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use super::calib::{Calib, EmptyPara};
+use super::calib::{Calib, EmptyPara, TrailingSpaces};
 use super::metrics::line_box;
 use super::text::{self, ShapedPara};
 use super::PaintOp;
@@ -118,7 +118,8 @@ fn break_lines(para: &ir::Paragraph, sp: &ShapedPara, env: &Env, book: &FontBook
         } else {
             avail_rest
         };
-        let (end, mandatory) = sp.next_break(start, avail);
+        let hang = env.calib.trailing_spaces == TrailingSpaces::Hang;
+        let (end, mandatory) = sp.next_break(start, avail, hang);
         let is_last = end >= sp.text.len();
         lines.push(line(
             para,
@@ -169,7 +170,10 @@ fn line(
         env.calib,
     );
 
-    let line_width = sp.width(range.start, range.end);
+    // 行尾悬挂的空格不参与对齐（见 `TrailingSpaces::Hang`）。
+    let hang = env.calib.trailing_spaces == TrailingSpaces::Hang;
+    let measured = range.start..sp.measured_end(range.start, range.end, hang);
+    let line_width = sp.width(measured.start, measured.end);
     let content_left = env.left + para.indent_left;
     let avail = env.width - para.indent_left - para.indent_right;
     let indent = if is_first {
@@ -193,7 +197,7 @@ fn line(
     let mut char_spacing = 0.0f32;
     if para.align == Align::Justify && !suppress_justify {
         let slack = avail - indent - line_width;
-        let has_space = sp.text[range.clone()].contains(' ');
+        let has_space = sp.text[measured.clone()].contains(' ');
         if slack > 0.0 && !has_space {
             let glyphs: usize = active
                 .iter()

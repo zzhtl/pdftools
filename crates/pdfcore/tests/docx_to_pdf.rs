@@ -973,3 +973,29 @@ fn paragraph_spacing_collapses_unless_the_document_opts_out() {
         "设置了兼容选项应当相加：{summed}"
     );
 }
+
+/// 行尾的半角空格悬挂在右边距外：右对齐时可见文字贴着右边距，空格伸出去。
+#[test]
+fn trailing_spaces_hang_past_the_right_margin() {
+    if !require_cjk_font() {
+        return;
+    }
+    let words = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu ".repeat(4);
+    let body = format!(
+        r#"<w:p><w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">{words}</w:t></w:r></w:p>"#
+    );
+    let path = make_docx("trailing_space.docx", &body);
+    let pages = common::pdftext::extract(&convert(&path).value.pdf);
+    let first = &pages[0].lines[0];
+    let right = first
+        .frags
+        .iter()
+        .map(|f| f.x + f.width)
+        .fold(f32::MIN, f32::max);
+    // DocxBuilder 的右边距是 1588 twips。
+    let past = right - (pages[0].width - 1588.0 / 20.0);
+    assert!(
+        (1.0..6.0).contains(&past),
+        "首行（含行尾空格）应当越过右边距一个空格宽，实际 {past}pt"
+    );
+}
