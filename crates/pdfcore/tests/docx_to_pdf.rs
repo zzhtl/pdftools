@@ -537,6 +537,422 @@ fn floating_images_are_positioned() {
     );
 }
 
+/// 形状测试用的零件：固定 20pt 行距的段落（行高与字体无关）、DrawingML 形状的浮动与
+/// 行内写法（包在 `mc:AlternateContent` 里，Fallback 是一个带字的 VML 框，画出来就错了）。
+mod shapes {
+    pub fn emu(pt: f32) -> i64 {
+        (pt * 12700.0).round() as i64
+    }
+
+    pub fn p(runs: &str) -> String {
+        format!(
+            r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="400" w:lineRule="exact"/></w:pPr>{runs}</w:p>"#
+        )
+    }
+
+    pub fn text(t: &str) -> String {
+        format!("<w:r><w:t>{t}</w:t></w:r>")
+    }
+
+    /// `wps:wsp` 的 `a:graphic`：`sp_pr` 是几何、填充与轮廓，`inner` 是文本框里的段落。
+    pub fn wsp(sp_pr: &str, inner: &str, anchor_v: &str) -> String {
+        let txbx = if inner.is_empty() {
+            String::new()
+        } else {
+            format!("<wps:txbx><w:txbxContent>{inner}</w:txbxContent></wps:txbx>")
+        };
+        format!(
+            r#"<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:spPr>{sp_pr}</wps:spPr>{txbx}<wps:bodyPr anchor="{anchor_v}"/></wps:wsp></a:graphicData></a:graphic>"#
+        )
+    }
+
+    /// 黄底、1pt 红框的矩形文本框。
+    pub fn text_box(w: f32, h: f32, anchor_v: &str, inner: &str) -> String {
+        let sp_pr = format!(
+            r#"<a:xfrm><a:off x="0" y="0"/><a:ext cx="{}" cy="{}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FFF2CC"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln>"#,
+            emu(w),
+            emu(h)
+        );
+        wsp(&sp_pr, inner, anchor_v)
+    }
+
+    fn alternate(drawing: &str) -> String {
+        format!(
+            r#"<w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing>{drawing}</w:drawing></mc:Choice><mc:Fallback><w:pict><v:rect style="width:50pt;height:20pt"><v:textbox><w:txbxContent><w:p><w:r><w:t>兼容分支</w:t></w:r></w:p></w:txbxContent></v:textbox></v:rect></w:pict></mc:Fallback></mc:AlternateContent></w:r>"#
+        )
+    }
+
+    /// 浮动：`place` 是 `wp:positionH` + `wp:positionV`。
+    pub fn floating(place: &str, w: f32, h: f32, graphic: &str) -> String {
+        alternate(&format!(
+            r#"<wp:anchor behindDoc="0" distT="0" distB="0" distL="0" distR="0" simplePos="0"><wp:simplePos x="0" y="0"/>{place}<wp:extent cx="{}" cy="{}"/><wp:wrapNone/><wp:docPr id="1" name="s"/>{graphic}</wp:anchor>"#,
+            emu(w),
+            emu(h)
+        ))
+    }
+
+    pub fn inline(w: f32, h: f32, graphic: &str) -> String {
+        alternate(&format!(
+            r#"<wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{}" cy="{}"/><wp:docPr id="1" name="s"/>{graphic}</wp:inline>"#,
+            emu(w),
+            emu(h)
+        ))
+    }
+
+    pub fn at(h_from: &str, x: f32, v_from: &str, y: f32) -> String {
+        format!(
+            r#"<wp:positionH relativeFrom="{h_from}"><wp:posOffset>{}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="{v_from}"><wp:posOffset>{}</wp:posOffset></wp:positionV>"#,
+            emu(x),
+            emu(y)
+        )
+    }
+}
+
+/// 文本框：浮动的按纸张定位，填充与边框在外框上，字从边距（左右 7.2pt、上下 3.6pt）
+/// 处排起，也能竖直居中；行内的像一个大字；放不下的行不画；页脚文本框里的页码逐页
+/// 代入；`mc:AlternateContent` 只画新版的那一支。
+#[test]
+fn text_boxes_are_drawn() {
+    use common::pdfpaths;
+    use shapes::*;
+    if !require_cjk_font() {
+        return;
+    }
+    let lines = |inner: &[&str]| inner.iter().map(|t| p(&text(t))).collect::<String>();
+    let page_no = r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="400" w:lineRule="exact"/></w:pPr><w:r><w:t>第</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>9</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>页</w:t></w:r></w:p>"#;
+    let footer = p(&(text("页脚")
+        + &floating(
+            &at("margin", 200.0, "paragraph", 0.0),
+            80.0,
+            28.0,
+            &text_box(80.0, 28.0, "t", page_no),
+        )));
+    let body = p(&(text("浮动")
+        + &floating(
+            &at("page", 300.0, "page", 200.0),
+            160.0,
+            80.0,
+            &text_box(160.0, 80.0, "t", &lines(&["框内文字"])),
+        )
+        + &floating(
+            &at("page", 300.0, "page", 400.0),
+            160.0,
+            80.0,
+            &text_box(160.0, 80.0, "ctr", &lines(&["居中文字"])),
+        )
+        + &floating(
+            &at("page", 80.0, "page", 600.0),
+            100.0,
+            40.0,
+            &text_box(
+                100.0,
+                40.0,
+                "t",
+&lines(&["溢出一", "溢出二", "溢出三", "溢出四"]),
+            ),
+        )
+        // 文字区正好 10 个字宽（字号缺省 10pt）：逗号挂在行尾，不把「十」挤下去。
+        + &floating(
+            &at("page", 300.0, "page", 700.0),
+            114.4,
+            60.0,
+            &text_box(114.4, 60.0, "t", &lines(&["一二三四五六七八九十，一二三"])),
+        )))
+        + &p(&(text("前")
+            + &inline(120.0, 50.0, &text_box(120.0, 50.0, "t", &lines(&["行内"])))
+            + &text("后")))
+        + r#"<w:p><w:r><w:br w:type="page"/></w:r></w:p>"#
+        + &p(&text("第二页"));
+    let path = DocxBuilder::new()
+        .body(&body)
+        .footer("default", &footer)
+        .build("text_boxes.docx");
+    let report = docx_to_pdf::run(&path, &NoProgress).expect("转换失败");
+    let pdf = &report.value.pdf;
+    let pages = common::pdftext::extract(pdf);
+    let find = |page: usize, t: &str| {
+        pages[page]
+            .lines
+            .iter()
+            .flat_map(|l| &l.frags)
+            .find(|f| f.text.contains(t))
+            .unwrap_or_else(|| panic!("第 {} 页找不到「{t}」：{}", page + 1, pages[page].text()))
+            .clone()
+    };
+
+    // 浮动文本框：外框在 (300, 200)，黄底、红框骑在外框上。
+    let top = 841.9 - 200.0;
+    let paths = &pdfpaths::extract(pdf)[0];
+    assert!(
+        paths.iter().any(|p| !p.stroke
+            && p.color == [1.0, 0xF2 as f32 / 255.0, 0xCC as f32 / 255.0]
+            && (p.bbox[0] - 300.0).abs() < 0.01
+            && (p.bbox[3] - top).abs() < 0.01
+            && (p.w() - 160.0).abs() < 0.01
+            && (p.h() - 80.0).abs() < 0.01),
+        "{}",
+        pdfpaths::dump(std::slice::from_ref(paths))
+    );
+    let red: Vec<_> = paths
+        .iter()
+        .filter(|p| p.stroke && p.color == [1.0, 0.0, 0.0])
+        .collect();
+    assert!(
+        [top, top - 80.0]
+            .iter()
+            .all(|y| red.iter().any(|p| (p.bbox[1] - y).abs() < 0.01
+                && p.h() < 0.01
+                && p.bbox[0] <= 299.5 + 0.01
+                && p.bbox[2] >= 460.5 - 0.01)),
+        "上下边框都要连着两个角：{red:?}"
+    );
+    // 框里的首行与正文首行行距、字体都一样：行顶分别在上边距 3.6pt 之下与版心顶
+    // （离纸边 72pt），基线差就是两个行顶的差。
+    let first = find(0, "框内文字");
+    let body_first = find(0, "浮动");
+    assert!((first.x - 307.2).abs() < 0.01, "{first:?}");
+    assert!(
+        (body_first.y - first.y - ((841.9 - 72.0) - (top - 3.6))).abs() < 0.01,
+        "{body_first:?} {first:?}"
+    );
+
+    // 竖直居中：一行 20pt 在 80 − 7.2 高的文字区里居中，比顶端对齐的多下移 26.4pt。
+    let centered = find(0, "居中文字");
+    assert!(
+        (first.y - centered.y - 200.0 - 26.4).abs() < 0.01,
+        "{first:?} {centered:?}"
+    );
+
+    // 放不下：第二行顶端还在文字区里（裁掉下半），第三行起不画。
+    let text = pages[0].text();
+    assert!(text.contains("溢出一") && text.contains("溢出二"), "{text}");
+    assert!(
+        !text.contains("溢出三") && !text.contains("溢出四"),
+        "{text}"
+    );
+    assert!(
+        all_content_ops(pdf).iter().any(|o| o.operator == "W"),
+        "溢出的那一行要裁剪"
+    );
+
+    assert!(
+        pages[0]
+            .lines
+            .iter()
+            .any(|l| common::pdftext::norm(&l.text) == "一二三四五六七八九十，"),
+        "文本框里行尾的标点要悬挂：{}",
+        pages[0].text()
+    );
+
+    // 行内文本框：120pt 宽，「后」紧跟在框后面，框里的字从框的左边距排起。
+    let (inner, after) = (find(0, "行内"), find(0, "后"));
+    assert!(
+        (inner.x - (after.x - 120.0 + 7.2)).abs() < 0.01,
+        "{inner:?} {after:?}"
+    );
+    assert!(inner.y > after.y, "框里的字在基线以上：{inner:?} {after:?}");
+
+    // 页脚文本框里的页码。
+    assert!(pages[0].text().contains("第1页"), "{}", pages[0].text());
+    assert!(pages[1].text().contains("第2页"), "{}", pages[1].text());
+    assert!(!text_of(pdf).contains("兼容分支"), "Fallback 不该画");
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+}
+
+/// 直线（DrawingML 与 VML）、VML 文本框与图片、画不了的几何形状。
+#[test]
+fn lines_and_vml_shapes_are_drawn() {
+    use common::pdfpaths;
+    use shapes::*;
+    if !require_cjk_font() {
+        return;
+    }
+    let png = {
+        let img = image::DynamicImage::ImageRgb8(common::images::photo(20, 20));
+        let mut bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        bytes
+    };
+    let line = |w: f32, h: f32, xfrm: &str, color: &str, width_pt: f32| {
+        wsp(
+            &format!(
+                r#"<a:xfrm{xfrm}><a:off x="0" y="0"/><a:ext cx="{}" cy="{}"/></a:xfrm><a:prstGeom prst="line"><a:avLst/></a:prstGeom><a:ln w="{}"><a:solidFill><a:srgbClr val="{color}"/></a:solidFill></a:ln>"#,
+                emu(w),
+                emu(h),
+                emu(width_pt)
+            ),
+            "",
+            "t",
+        )
+    };
+    let t202 = r#"<v:shapetype id="_x0000_t202" coordsize="21600,21600" o:spt="202" path="m,l,21600r21600,l21600,xe"><v:stroke joinstyle="miter"/><v:path gradientshapeok="t" o:connecttype="rect"/></v:shapetype>"#;
+    let mut builder = DocxBuilder::new();
+    let rid = builder.media("seal.png", png);
+    let body = p(&(text("横线")
+        + &floating(
+            &at("column", 0.0, "paragraph", 10.0),
+            300.0,
+            0.0,
+            &line(300.0, 0.0, "", "FF0000", 2.25),
+        )
+        + &floating(
+            &at("page", 400.0, "page", 600.0),
+            100.0,
+            50.0,
+            &line(100.0, 50.0, r#" flipV="1""#, "00AA00", 1.0),
+        )
+        + &floating(
+            &at("page", 80.0, "page", 400.0),
+            100.0,
+            60.0,
+            &wsp(
+                r#"<a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill>"#,
+                &p(&text("椭圆里的字")),
+                "t",
+            ),
+        )))
+        + &p(&(text("VML")
+            + r##"<w:r><w:pict><v:line style="position:absolute;z-index:1;mso-position-horizontal-relative:page;mso-position-vertical-relative:page" from="100pt,700pt" to="300pt,690pt" strokecolor="#0000ff" strokeweight="3pt"/></w:pict></w:r>"##
+            + &format!(
+                r##"<w:r><w:pict>{t202}<v:shape type="#_x0000_t202" style="position:absolute;margin-left:350pt;margin-top:650pt;width:150pt;height:60pt;z-index:2;mso-position-horizontal-relative:page;mso-position-vertical-relative:page" fillcolor="#ccffcc"><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape></w:pict></w:r>"##,
+                p(&text("VML框里的字"))
+            )
+            + &format!(
+                r##"<w:r><w:pict><v:shape type="#_x0000_t75" style="position:absolute;margin-left:80pt;margin-top:500pt;width:40pt;height:40pt;z-index:-1;mso-position-horizontal-relative:page;mso-position-vertical-relative:page"><v:imagedata r:id="{rid}" o:title="印"/></v:shape></w:pict></w:r>"##
+            )));
+    // 文本框里的图：图片的关系 id 也要解析。
+    let pic = format!(
+        r#"<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{}" cy="{}"/><wp:docPr id="2" name="p"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="{rid}"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#,
+        emu(40.0),
+        emu(40.0)
+    );
+    let body = body
+        + &p(&(text("框里有图")
+            + &floating(
+                &at("page", 300.0, "page", 300.0),
+                100.0,
+                100.0,
+                &wsp(
+                    r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"#,
+                    &format!("<w:p>{pic}</w:p>"),
+                    "t",
+                ),
+            )));
+    let path = builder.body(&body).build("shapes.docx");
+    let report = docx_to_pdf::run(&path, &NoProgress).expect("转换失败");
+    let pdf = &report.value.pdf;
+    let paths = &pdfpaths::extract(pdf)[0];
+    let dump = pdfpaths::dump(std::slice::from_ref(paths));
+    let stroke = |color: [f32; 3]| {
+        paths
+            .iter()
+            .filter(|p| p.stroke && p.color == color)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    // 横线：栏左边起 300pt 长、2.25pt 粗，零高度的线也要画。
+    let red = stroke([1.0, 0.0, 0.0]);
+    assert!(
+        red.iter().any(|p| (p.bbox[0] - 79.4).abs() < 0.2
+            && (p.w() - 300.0).abs() < 0.01
+            && p.h() < 0.01
+            && (p.width - 2.25).abs() < 0.01),
+        "{dump}"
+    );
+    // 上下翻转的斜线从左下到右上；VML 直线按两个端点画。
+    let ops = all_content_ops(pdf);
+    let segment_from = |x: f32, y: f32| {
+        ops.windows(2).find_map(|w| {
+            let at = |o: &lopdf::content::Operation| {
+                (
+                    o.operands[0].as_float().unwrap(),
+                    o.operands[1].as_float().unwrap(),
+                )
+            };
+            (w[0].operator == "m" && w[1].operator == "l" && {
+                let (mx, my) = at(&w[0]);
+                (mx - x).abs() < 0.01 && (my - y).abs() < 0.01
+            })
+            .then(|| at(&w[1]))
+        })
+    };
+    let end = segment_from(400.0, 841.9 - 650.0).expect("斜线应从左下角画起");
+    assert!(
+        (end.0 - 500.0).abs() < 0.01 && (end.1 - (841.9 - 600.0)).abs() < 0.01,
+        "{end:?}"
+    );
+    let end = segment_from(100.0, 841.9 - 700.0).expect("VML 直线");
+    assert!(
+        (end.0 - 300.0).abs() < 0.01 && (end.1 - (841.9 - 690.0)).abs() < 0.01,
+        "{end:?}"
+    );
+    assert!(
+        stroke([0.0, 0.0, 1.0])
+            .iter()
+            .any(|p| (p.width - 3.0).abs() < 0.01),
+        "{dump}"
+    );
+
+    // VML 文本框：填色，缺省描 0.75pt 黑边，字从左边距 7.2pt 处排起。
+    assert!(
+        paths.iter().any(|p| !p.stroke
+            && (p.bbox[0] - 350.0).abs() < 0.01
+            && (p.w() - 150.0).abs() < 0.01
+            && p.color == [0.8, 1.0, 0.8]),
+        "{dump}"
+    );
+    assert!(
+        stroke([0.0, 0.0, 0.0])
+            .iter()
+            .any(|p| (p.width - 0.75).abs() < 0.01),
+        "{dump}"
+    );
+    let pages = common::pdftext::extract(pdf);
+    let line = pages[0]
+        .lines
+        .iter()
+        .find(|l| common::pdftext::norm(&l.text).contains("VML框里的字"))
+        .expect("VML 文本框里的字");
+    assert!((line.x0 - 357.2).abs() < 0.01, "{line:?}");
+
+    // VML 图片：z-index 为负，衬在字下面。文本框里的图从左边距处画起。
+    let image = &pdfpaths::images(pdf)[0];
+    assert!(
+        image.iter().any(
+            |i| (i.bbox[0] - 307.2).abs() < 0.01 && (i.bbox[2] - i.bbox[0] - 40.0).abs() < 0.01
+        ),
+        "{image:?}"
+    );
+    assert!(
+        image
+            .iter()
+            .any(|i| (i.bbox[0] - 80.0).abs() < 0.01 && (i.bbox[3] - (841.9 - 500.0)).abs() < 0.01),
+        "{image:?}"
+    );
+
+    // 椭圆画不了：只排字，不填蓝色，并且说清楚。
+    assert!(text_of(pdf).contains("椭圆里的字"));
+    assert!(
+        !paths
+            .iter()
+            .any(|p| p.color == [0.0, 0.0, 1.0] && !p.stroke),
+        "{dump}"
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.detail.contains("只画了框里的字")),
+        "{:?}",
+        report.warnings
+    );
+}
+
 /// Word 默认插入的「网格型」表格只写了 `w:tblStyle`：框线、单元格里的段距都来自表格样式；
 /// 首行的条件格式铺底纹（加粗在 `ir` 的单元测试里验：宋体没有粗体时是合成的，字体名看不出）。
 #[test]

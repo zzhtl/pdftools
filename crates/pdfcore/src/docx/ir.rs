@@ -34,7 +34,7 @@ pub const COLUMN_BREAK: char = '\u{000B}';
 pub const OBJECT: char = '\u{FFFC}';
 
 /// 行内对象（`wp:inline` 的图片）：底边在基线上，像一个很大的字。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct InlineObject {
     /// 显示大小（点）。
     pub width: f32,
@@ -42,16 +42,44 @@ pub struct InlineObject {
     pub content: ObjectContent,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum ObjectContent {
     /// 包里的图片：部件路径，左、上、右、下各裁掉的比例（0–1）。
     Image { part: String, crop: [f32; 4] },
-    /// 画不出来的（形状、图表、找不到的图）：按大小画一个灰框，版面不乱。
+    /// 矩形、直线、文本框。
+    Shape(Box<ShapeObject>),
+    /// 画不出来的（组合、图表、找不到的图）：按大小画一个灰框，版面不乱。
     Missing { alt: Option<String> },
 }
 
+/// 形状：填充、轮廓，框里的字与正文一样排。
+#[derive(Debug, Clone)]
+pub struct ShapeObject {
+    pub kind: ShapeKind,
+    pub fill: Option<[u8; 3]>,
+    /// 轮廓（直线就是线本身）：线宽（点）与颜色。
+    pub line: Option<(f32, [u8; 3])>,
+    /// 框里的字（文本框）。
+    pub text: Vec<Block>,
+    /// 字离框的距离：上、左、下、右（点），与单元格边距同序。
+    pub insets: [f32; 4],
+    /// 字在框里竖直方向怎么放。
+    pub text_align: model::VAlign,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeKind {
+    Rect,
+    /// 外框的一条对角线：`rising` 是从左下到右上，否则从左上到右下。
+    Line {
+        rising: bool,
+    },
+    /// 画不了的形状（椭圆、箭头……）：只排框里的字。
+    TextOnly,
+}
+
 /// 浮动的图（`wp:anchor`）：不占行里的位置，放段落时按锚点定位。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct FloatObject {
     pub width: f32,
     pub height: f32,
@@ -622,8 +650,10 @@ pub struct Document {
     pub default_tab_stop: f32,
     /// 不认识、按阿拉伯数字输出的编号格式。
     pub num_format_fallbacks: Vec<String>,
-    /// 画成灰框的对象（形状、图表、找不到的图片）有几个。
+    /// 画成灰框的对象（组合、图表、找不到的图片）有几个。
     pub missing_objects: usize,
+    /// 画不准的形状（圆角、旋转、其他几何形状）有几个。
+    pub approximated_shapes: usize,
     /// 文字绕着图走的环绕按上下型近似排了几个。
     pub approximated_wraps: usize,
     pub blocks: Vec<Block>,
@@ -644,6 +674,7 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
         fonts: &fonts,
         calib,
         missing: Default::default(),
+        shapes: Default::default(),
         approximated: Default::default(),
     };
     let mut blocks = Vec::with_capacity(doc.body.len());
@@ -710,6 +741,7 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
             .map(|l| l.fallbacks.into_iter().collect())
             .unwrap_or_default(),
         missing_objects: ctx.missing.get(),
+        approximated_shapes: ctx.shapes.get(),
         approximated_wraps: ctx.approximated.get(),
         blocks,
     }
@@ -755,6 +787,8 @@ struct Ctx<'a> {
     calib: &'a Calib,
     /// 画成灰框的对象有几个。
     missing: std::cell::Cell<usize>,
+    /// 画不准的形状有几个。
+    shapes: std::cell::Cell<usize>,
     /// 按上下型近似排的环绕（四周型、紧密型、穿越型）有几个。
     approximated: std::cell::Cell<usize>,
 }
@@ -842,8 +876,9 @@ fn push_paragraph(
                 RunItem::Break(BreakKind::Page) => push(PAGE_BREAK.into(), &style),
                 RunItem::Break(BreakKind::Column) => push(COLUMN_BREAK.into(), &style),
                 RunItem::NoBreakHyphen => push("\u{2011}".into(), &style),
-                RunItem::Drawing(d) if images && d.inline => match d.extent {
-                    Some((cx, cy)) if cx > 0 && cy > 0 => {
+                RunItem::Drawing(d) if images && d.inline => {
+                    // 零大小的图看不见，也不占位置。
+                    if let Some((cx, cy)) = shown_size(d) {
                         objects.push(InlineObject {
                             width: emu(cx),
                             height: emu(cy),
@@ -851,12 +886,9 @@ fn push_paragraph(
                         });
                         push(OBJECT.to_string(), &style);
                     }
-                    // 零大小的图看不见，也不占位置。
-                    _ => {}
-                },
+                }
                 RunItem::Drawing(d) if images && d.anchor.is_some() => {
-                    let size = d.extent.filter(|(cx, cy)| *cx > 0 && *cy > 0);
-                    if let (Some(a), Some((cx, cy))) = (&d.anchor, size) {
+                    if let (Some(a), Some((cx, cy))) = (&d.anchor, shown_size(d)) {
                         let wrap = match a.wrap {
                             model::WrapKind::None => Wrap::None,
                             model::WrapKind::TopAndBottom => Wrap::TopAndBottom,
@@ -1004,21 +1036,68 @@ fn push_paragraph(
     }
 }
 
-/// 图片对象画什么：找得到的图片，或者画不出来的（形状、图表、找不到的图）。
+/// 显示大小（EMU）。零大小的看不见；水平、竖直的直线除外。
+fn shown_size(d: &model::Drawing) -> Option<(i64, i64)> {
+    let line = d
+        .shape
+        .as_ref()
+        .is_some_and(|s| s.geometry == model::Geometry::Line);
+    d.extent
+        .filter(|&(cx, cy)| cx >= 0 && cy >= 0 && ((cx > 0 && cy > 0) || (line && cx + cy > 0)))
+}
+
+/// 对象画什么：找得到的图片、形状，或者画不出来的（组合、图表、找不到的图）。
 fn object_content(d: &model::Drawing, ctx: &Ctx) -> ObjectContent {
-    match d
+    if let Some((part, crop)) = d
         .picture
         .as_ref()
         .and_then(|p| Some((p.target.clone()?, p.crop)))
     {
-        Some((part, crop)) => ObjectContent::Image {
+        return ObjectContent::Image {
             part,
             crop: crop.map(|c| c as f32 / 100_000.0),
-        },
+        };
+    }
+    match &d.shape {
+        Some(shape) => ObjectContent::Shape(Box::new(shape_object(shape, ctx))),
         None => {
             ctx.missing.set(ctx.missing.get() + 1);
             ObjectContent::Missing { alt: d.alt.clone() }
         }
+    }
+}
+
+/// 形状换成排版用的：圆角矩形按矩形画，旋转的按不旋转画，其他几何形状只排框里的字，
+/// 这几种都记下来汇总成一条警告。
+fn shape_object(s: &model::Shape, ctx: &Ctx) -> ShapeObject {
+    use model::Geometry;
+    // 转 180° 的矩形、直线看起来与不转一样。
+    let rotated = s.rotation.rem_euclid(10_800_000) != 0;
+    let kind = match s.geometry {
+        Geometry::Rect | Geometry::RoundRect => ShapeKind::Rect,
+        Geometry::Line => ShapeKind::Line {
+            rising: s.flip[0] != s.flip[1],
+        },
+        Geometry::Other => ShapeKind::TextOnly,
+    };
+    if rotated || matches!(s.geometry, Geometry::RoundRect | Geometry::Other) {
+        ctx.shapes.set(ctx.shapes.get() + 1);
+    }
+    let [left, top, right, bottom] = s.insets.map(emu);
+    ShapeObject {
+        kind,
+        fill: s.fill.filter(|_| kind == ShapeKind::Rect),
+        line: s
+            .line
+            .filter(|_| kind != ShapeKind::TextOnly)
+            .map(|(w, color)| (emu(w), color)),
+        text: s
+            .text
+            .as_ref()
+            .map(|story| story_blocks(story, ctx))
+            .unwrap_or_default(),
+        insets: [top, left, bottom, right],
+        text_align: s.text_align,
     }
 }
 

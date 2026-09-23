@@ -7,13 +7,15 @@ use super::calib::{
     TrailingSpaces,
 };
 use super::metrics::{line_box, LineContent};
+use super::paginate::StoryPage;
 use super::text::{self, Hang, Piece, ShapedPara, TabRules};
 use super::PaintOp;
 use crate::docx::ir::{self, Align, Grid, LineSpacing};
+use crate::docx::model::VAlign;
 use crate::fonts::FontBook;
 
 /// 画不出来的对象：浅灰的底、深一点的边，按原大小画，版面不乱。
-pub(super) fn missing_box(x: f32, y: f32, w: f32, h: f32) -> Vec<PaintOp> {
+fn missing_box(x: f32, y: f32, w: f32, h: f32) -> Vec<PaintOp> {
     let corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)];
     std::iter::once(PaintOp::Rect {
         x,
@@ -30,6 +32,120 @@ pub(super) fn missing_box(x: f32, y: f32, w: f32, h: f32) -> Vec<PaintOp> {
         dash: Vec::new(),
     }))
     .collect()
+}
+
+/// 量一串块（形状里的字）并按给定的各页高度排下去，见 [`flow`](super::paginate::flow)。
+pub(super) type MeasureStory<'a> =
+    dyn FnMut(&[ir::Block], &Env, &mut FontBook, &[f32]) -> Vec<StoryPage> + 'a;
+
+/// 一个对象画出来的样子：左下角在原点，宽 `w`、高 `h`。
+fn object_ops(
+    content: &ir::ObjectContent,
+    (w, h): (f32, f32),
+    env: &Env,
+    book: &mut FontBook,
+    story: &mut MeasureStory,
+) -> Vec<PaintOp> {
+    match content {
+        ir::ObjectContent::Image { part, crop } => vec![PaintOp::Image {
+            part: part.clone(),
+            x: 0.0,
+            y: 0.0,
+            w,
+            h,
+            crop: *crop,
+        }],
+        ir::ObjectContent::Shape(shape) => shape_ops(shape, (w, h), env, book, story),
+        ir::ObjectContent::Missing { .. } => missing_box(0.0, 0.0, w, h),
+    }
+}
+
+/// 形状：先填充，再描轮廓（骑在外框上），最后是框里的字 —— 按框宽减去左右边距
+/// 排成一栏，在上下边距之间按竖直对齐放。
+fn shape_ops(
+    shape: &ir::ShapeObject,
+    (w, h): (f32, f32),
+    env: &Env,
+    book: &mut FontBook,
+    story: &mut MeasureStory,
+) -> Vec<PaintOp> {
+    let mut ops = Vec::new();
+    if let Some(color) = shape.fill {
+        ops.push(PaintOp::Rect {
+            x: 0.0,
+            y: 0.0,
+            w,
+            h,
+            color,
+        });
+    }
+    if let Some((width, color)) = shape.line {
+        let segment = |from, to| PaintOp::Line {
+            from,
+            to,
+            width,
+            color,
+            dash: Vec::new(),
+        };
+        match shape.kind {
+            // 上下两条边各往外多伸半个线宽，把四个角补齐。
+            ir::ShapeKind::Rect => {
+                let half = width / 2.0;
+                ops.push(segment((-half, 0.0), (w + half, 0.0)));
+                ops.push(segment((w, 0.0), (w, h)));
+                ops.push(segment((w + half, h), (-half, h)));
+                ops.push(segment((0.0, h), (0.0, 0.0)));
+            }
+            ir::ShapeKind::Line { rising: false } => ops.push(segment((0.0, h), (w, 0.0))),
+            ir::ShapeKind::Line { rising: true } => ops.push(segment((0.0, 0.0), (w, h))),
+            ir::ShapeKind::TextOnly => {}
+        }
+    }
+    if !shape.text.is_empty() {
+        let [top, left, bottom, right] = shape.insets;
+        // 框里的字不吸附行网格，行尾标点照样悬挂（与单元格不同），LibreOffice 实测。
+        let inner = Env {
+            grid: None,
+            left: 0.0,
+            width: (w - left - right).max(0.0),
+            default_tab_stop: env.default_tab_stop,
+            char_pitch: None,
+            punct_hangs: true,
+            calib: env.calib,
+        };
+        // 放不下时：放得下的行照画；接着的一行顶端还在文字区里就也画，裁到文字区
+        // 底边为止；再往后的不画（LibreOffice 实测）。第二页高度为 0：每页只放一行。
+        let room = (h - top - bottom).max(0.0);
+        let mut pages = story(&shape.text, &inner, book, &[room, 0.0]).into_iter();
+        let (mut text, mut height) = pages
+            .next()
+            .map_or((Vec::new(), 0.0), |p| (p.ops, p.height));
+        let overflow = pages.len() > 0;
+        if let Some(next) = pages.next().filter(|_| height < room) {
+            text.extend(next.ops.iter().map(|op| op.shifted(-height)));
+            height += next.height;
+        }
+        let down = match shape.text_align {
+            VAlign::Top => 0.0,
+            VAlign::Center => (room - height) / 2.0,
+            VAlign::Bottom => room - height,
+        }
+        .max(0.0);
+        let placed = text.iter().map(|op| op.translated(left, h - top - down));
+        if overflow || height > room {
+            ops.push(PaintOp::Clip {
+                x: 0.0,
+                y: bottom,
+                w,
+                h: h - bottom,
+            });
+            ops.extend(placed);
+            ops.push(PaintOp::EndClip);
+        } else {
+            ops.extend(placed);
+        }
+    }
+    ops
 }
 
 /// 测量环境：一栏的横向位置与宽度，以及排版规则。
@@ -80,9 +196,22 @@ pub(super) struct ParaBox {
     pub joins_next: bool,
     pub body: ParaBody,
     /// 锚在这一段上的浮动对象，放第一行时按页面定位。
-    pub floats: Vec<ir::FloatObject>,
+    pub floats: Vec<Float>,
     /// 所在的栏：左边缘的 x 与宽度。浮动对象相对栏定位时用。
     pub column: (f32, f32),
+}
+
+/// 锚在段落上的浮动对象，连同它画出来的样子（左下角在原点）。
+pub(super) struct Float {
+    pub object: ir::FloatObject,
+    pub ops: Vec<PaintOp>,
+}
+
+/// 段落里的行内对象：各自画出来的样子（左下角在原点），以及只有对象的行按什么算
+/// 行距 —— 段落标记的自然行高与上伸，见 [`mark_metrics`]。
+struct Objects {
+    drawn: Vec<Vec<PaintOp>>,
+    marks: Option<(f32, f32)>,
 }
 
 /// 段落边框与底纹围成的框。横向位置在测量时就定了；纵向由分页决定 ——
@@ -168,14 +297,27 @@ impl ParaBox {
     }
 }
 
-pub(super) fn measure(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> ParaBox {
+/// 量一段。`story` 量形状里的字。
+pub(super) fn measure(
+    para: &ir::Paragraph,
+    env: &Env,
+    book: &mut FontBook,
+    story: &mut MeasureStory,
+) -> ParaBox {
     let shaped = text::shape(para, book, env.calib, env.char_pitch);
     let body = if !shaped.pieces.is_empty() {
-        // 只有图的行，行距倍数多出来的部分按段落标记的字体算。
-        let marks = (!para.objects.is_empty())
-            .then(|| mark_metrics(para, env, book))
-            .flatten();
-        ParaBody::Lines(break_lines(para, &shaped, env, book, marks))
+        let objects = Objects {
+            drawn: para
+                .objects
+                .iter()
+                .map(|o| object_ops(&o.content, (o.width, o.height), env, book, story))
+                .collect(),
+            // 只有图的行，行距倍数多出来的部分按段落标记的字体算。
+            marks: (!para.objects.is_empty())
+                .then(|| mark_metrics(para, env, book))
+                .flatten(),
+        };
+        ParaBody::Lines(break_lines(para, &shaped, env, book, &objects))
     } else {
         match env.calib.empty_para {
             EmptyPara::MarkLine => match mark_line(para, env, book) {
@@ -201,7 +343,14 @@ pub(super) fn measure(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> P
         decor: decor(para, env),
         joins_next: false,
         body,
-        floats: para.floats.clone(),
+        floats: para
+            .floats
+            .iter()
+            .map(|f| Float {
+                object: f.clone(),
+                ops: object_ops(&f.content, (f.width, f.height), env, book, story),
+            })
+            .collect(),
         column: (env.left, env.width),
     }
 }
@@ -298,13 +447,12 @@ fn line_start(para: &ir::Paragraph, sp: &ShapedPara, is_first: bool, calib: &Cal
     para.indent_left + first_line_offset(para, sp, is_first, calib)
 }
 
-/// `marks`：段落标记的自然行高与上伸，见 [`mark_metrics`]。
 fn break_lines(
     para: &ir::Paragraph,
     sp: &ShapedPara,
     env: &Env,
     book: &FontBook,
-    marks: Option<(f32, f32)>,
+    objects: &Objects,
 ) -> Vec<Line> {
     let avail_first = env.width - para.indent_left - para.indent_right + para.first_line.min(0.0);
     let avail_rest = env.width - para.indent_left - para.indent_right;
@@ -340,7 +488,7 @@ fn break_lines(
             is_first,
             is_last || mandatory,
             is_last,
-            marks,
+            objects,
         );
         l.page_break_after = mandatory
             && sp.text[start..end]
@@ -365,7 +513,7 @@ fn line(
     suppress_justify: bool,
     // 本行是不是所属段落的最后一行 —— 决定倍数行距怎么算，见 `line_box`。
     is_last: bool,
-    marks: Option<(f32, f32)>,
+    objects: &Objects,
 ) -> Line {
     // 行内实际出现的片段决定行高：取最大的那个字体。行内对象另算，见 `LineContent`。
     let active = sp.pieces_in(range.start, range.end);
@@ -391,7 +539,7 @@ fn line(
         }
     } else {
         // 只有对象的行：行距倍数多出来的部分按段落标记的字体算。
-        let (unsnapped, ascent) = marks.unwrap_or((object, object));
+        let (unsnapped, ascent) = objects.marks.unwrap_or((object, object));
         LineContent {
             unsnapped,
             ascent,
@@ -465,19 +613,9 @@ fn line(
         }
         if let Some(obj) = piece.object {
             let extra: f32 = extra_after.iter().sum();
-            let (w, h, y) = (obj.width, obj.height, piece.rise);
-            match &para.objects[obj.index].content {
-                ir::ObjectContent::Image { part, crop } => ops.push(PaintOp::Image {
-                    part: part.clone(),
-                    x,
-                    y,
-                    w,
-                    h,
-                    crop: *crop,
-                }),
-                ir::ObjectContent::Missing { .. } => ops.extend(missing_box(x, y, w, h)),
-            }
-            x += w + extra;
+            let drawn = &objects.drawn[obj.index];
+            ops.extend(drawn.iter().map(|op| op.translated(x, piece.rise)));
+            x += obj.width + extra;
             continue;
         }
         let glyphs = piece.glyphs_between(range.start, range.end);

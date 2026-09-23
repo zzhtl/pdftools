@@ -556,6 +556,99 @@ pub fn all() -> Vec<Probe> {
     );
     add("images_floating", builder.body(&body));
 
+    // 文本框与直线：框里的字（有行网格也不吸附、行尾标点悬挂）、竖直对齐、行内的框、
+    // 公文红线那样的横线、VML 直线，跨页时跟着锚点段落走。
+    let shape = |w: u32, h: u32, sp_pr: &str, inner: &str, anchor_v: &str| {
+        let txbx = if inner.is_empty() {
+            String::new()
+        } else {
+            format!("<wps:txbx><w:txbxContent>{inner}</w:txbxContent></wps:txbx>")
+        };
+        format!(
+            r#"<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{}" cy="{}"/></a:xfrm>{sp_pr}</wps:spPr>{txbx}<wps:bodyPr rot="0" vert="horz" wrap="square" lIns="91440" tIns="45720" rIns="91440" bIns="45720" anchor="{anchor_v}"><a:noAutofit/></wps:bodyPr></wps:wsp></a:graphicData></a:graphic>"#,
+            w * 12700,
+            h * 12700
+        )
+    };
+    let boxed = r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FFF2CC"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="C00000"/></a:solidFill></a:ln>"#;
+    let red_line = r#"<a:prstGeom prst="line"><a:avLst/></a:prstGeom><a:ln w="19050"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln>"#;
+    let anchored = |place: &str, w: u32, h: u32, graphic: &str| {
+        format!(
+            r#"<w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="251659264" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/>{place}<wp:extent cx="{}" cy="{}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="1" name="s"/>{graphic}</wp:anchor></w:drawing></mc:Choice><mc:Fallback/></mc:AlternateContent></w:r>"#,
+            w * 12700,
+            h * 12700
+        )
+    };
+    let inline = |w: u32, h: u32, graphic: &str| {
+        format!(
+            r#"<w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{}" cy="{}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="1" name="s"/>{graphic}</wp:inline></w:drawing></mc:Choice><mc:Fallback/></mc:AlternateContent></w:r>"#,
+            w * 12700,
+            h * 12700
+        )
+    };
+    let in_box = |seed: usize, n: usize| format!("<w:p>{}</w:p>", run(&filler(seed, n)));
+    let mut body = String::new();
+    for i in 0..4 {
+        body += &paras(3, "", 50 + i * 11);
+        let align_v = ["t", "ctr", "b", "t"][i];
+        body += &format!(
+            "<w:p>{}{}</w:p>",
+            run("说明"),
+            anchored(
+                &(pos("H", "margin", align("right")) + &pos("V", "paragraph", off(0))),
+                150,
+                110,
+                &shape(
+                    150,
+                    110,
+                    boxed,
+                    &(in_box(i, 30) + &in_box(i + 1, 12)),
+                    align_v
+                )
+            )
+        );
+        body += &format!(
+            "<w:p>{}{}</w:p>",
+            run(&filler(i + 3, 16)),
+            anchored(
+                &(pos("H", "column", off(0)) + &pos("V", "paragraph", off(26))),
+                430,
+                0,
+                &shape(430, 0, red_line, "", "t")
+            )
+        );
+        body += &paras(2, "", 40 + i * 5);
+        body += &format!(
+            "<w:p>{}{}{}</w:p>",
+            run(&filler(i, 10)),
+            inline(110, 44, &shape(110, 44, boxed, &in_box(i + 5, 9), "t")),
+            run(&filler(i + 2, 24))
+        );
+    }
+    // 放不下的框：只露出两行。
+    body += &format!(
+        "<w:p>{}{}</w:p>",
+        run("溢出"),
+        anchored(
+            &(pos("H", "page", off(360)) + &pos("V", "page", off(90))),
+            120,
+            40,
+            &shape(
+                120,
+                40,
+                boxed,
+                &(0..5).map(|k| in_box(k, 8)).collect::<String>(),
+                "t"
+            )
+        )
+    );
+    body += r##"<w:p><w:r><w:pict><v:line style="position:absolute;z-index:251670000;mso-position-horizontal-relative:page;mso-position-vertical-relative:page" from="90pt,760pt" to="300pt,750pt" strokecolor="#0000ff" strokeweight="2pt"/></w:pict></w:r></w:p>"##;
+    body += &paras(3, "", 60);
+    add(
+        "text_boxes",
+        DocxBuilder::new().body(&body).sect_extra(GRID_312),
+    );
+
     let numbering = r#"<w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="hybridMultilevel"/>
 <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="chineseCounting"/><w:lvlText w:val="%1、"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="420" w:hanging="420"/></w:pPr></w:lvl>
 <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="840" w:hanging="420"/></w:pPr></w:lvl>

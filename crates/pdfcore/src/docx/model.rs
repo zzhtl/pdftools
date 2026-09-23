@@ -31,7 +31,7 @@ pub enum LineRule {
     AtLeast,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RPr {
     pub style_id: Option<String>,
     pub bold: Option<bool>,
@@ -175,7 +175,7 @@ impl RPr {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Indent {
     pub left_twips: Option<i32>,
     pub right_twips: Option<i32>,
@@ -205,7 +205,7 @@ impl Indent {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PPr {
     pub style_id: Option<String>,
     pub align: Option<Align>,
@@ -436,7 +436,7 @@ pub fn merge_tabs(base: &mut Vec<TabDef>, over: &[TabDef]) {
 /// 一串块级内容：正文、页眉页脚、单元格、文本框共用。
 pub type Story = Vec<Block>;
 
-/// 对故事里的每一张图片（表格里的也算）调用 `f`，按出现的顺序。
+/// 对故事里的每一张图片（表格里、文本框里的也算）调用 `f`，按出现的顺序。
 pub fn for_each_picture(story: &mut Story, f: &mut dyn FnMut(&mut Picture)) {
     for block in story {
         match block {
@@ -445,6 +445,10 @@ pub fn for_each_picture(story: &mut Story, f: &mut dyn FnMut(&mut Picture)) {
                     if let RunItem::Drawing(d) = item {
                         if let Some(pic) = d.picture.as_mut() {
                             f(pic);
+                        }
+                        // 文本框里也可以放图。
+                        if let Some(text) = d.shape.as_mut().and_then(|s| s.text.as_mut()) {
+                            for_each_picture(text, f);
                         }
                     }
                 }
@@ -460,13 +464,13 @@ pub fn for_each_picture(story: &mut Story, f: &mut dyn FnMut(&mut Picture)) {
 
 // 块几乎都是段落，表格少见：给段落装箱省不下多少内存，反倒每段多一次分配。
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Block {
     Para(Para),
     Table(Table),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Para {
     pub ppr: PPr,
     pub runs: Vec<Run>,
@@ -474,7 +478,7 @@ pub struct Para {
     pub section: Option<SectPr>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Run {
     pub rpr: RPr,
     pub items: Vec<RunItem>,
@@ -526,6 +530,39 @@ pub struct Drawing {
     pub picture: Option<Picture>,
     /// 浮动的（`wp:anchor`）怎么摆、怎么让文字。
     pub anchor: Option<Anchor>,
+    /// 形状（`wps:wsp`、VML 的 `v:shape`/`v:rect`……）：填充、轮廓、文本框里的字。
+    pub shape: Option<Shape>,
+}
+
+/// 一个形状。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Shape {
+    pub geometry: Geometry,
+    pub fill: Option<[u8; 3]>,
+    /// 轮廓：线宽（EMU）与颜色。
+    pub line: Option<(i64, [u8; 3])>,
+    /// 文本框里的内容（`w:txbxContent`）。
+    pub text: Option<Story>,
+    /// 文字离框的距离：左、上、右、下，EMU。
+    pub insets: [i64; 4],
+    /// 文字在框里竖直方向怎么放。
+    pub text_align: VAlign,
+    /// 左右翻转、上下翻转（`a:xfrm` 的 `@flipH` / `@flipV`）。直线靠它定方向。
+    pub flip: [bool; 2],
+    /// 顺时针旋转，1/60000 度。
+    pub rotation: i64,
+}
+
+/// 形状的几何（`a:prstGeom` 的预设，VML 的形状类型）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Geometry {
+    #[default]
+    Rect,
+    RoundRect,
+    /// 从外框的左上角到右下角的一条线，翻转后换成另一条对角线。
+    Line,
+    /// 其余的预设形状与自定义形状。
+    Other,
 }
 
 /// `wp:anchor`：浮动对象的位置与环绕，原样记下。
@@ -584,7 +621,7 @@ pub enum BreakKind {
     Column,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Table {
     pub props: TblPr,
     /// `w:tblGrid/w:gridCol`：各列的宽度，twips。
@@ -592,7 +629,7 @@ pub struct Table {
     pub rows: Vec<Row>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Row {
     pub props: TrPr,
     /// `w:tblPrEx`：这一行对表格属性的例外（边框、单元格边距）。
@@ -600,7 +637,7 @@ pub struct Row {
     pub cells: Vec<Cell>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Cell {
     pub props: TcPr,
     pub content: Story,
@@ -654,7 +691,7 @@ impl CellMargins {
 }
 
 /// `w:tblPr`（`w:tblPrEx` 也用它，只是只有其中几项）。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TblPr {
     pub style_id: Option<String>,
     pub width: Option<Width>,
@@ -748,7 +785,7 @@ pub enum HeightRule {
 }
 
 /// `w:trPr`。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TrPr {
     /// `w:trHeight`：行高（twips）与它的含义。
     pub height: Option<(i32, HeightRule)>,
@@ -769,15 +806,16 @@ pub enum VMerge {
     Continue,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VAlign {
+    #[default]
     Top,
     Center,
     Bottom,
 }
 
 /// `w:tcPr`。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TcPr {
     pub width: Option<Width>,
     /// `w:gridSpan`：横跨几列。没写是 1。
@@ -812,7 +850,7 @@ impl TcPr {
 ///
 /// 例：12pt 宋体自然行高 17.4pt，linePitch=312twips(15.6pt) → 吸附成 31.2pt，
 /// 再乘 1.3 倍行距 = 40.6pt。忽略网格只会得到 22.6pt，差 45%。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DocGrid {
     /// 网格行距，twips。
     pub line_pitch: i32,
@@ -826,7 +864,7 @@ pub struct DocGrid {
 }
 
 /// `w:sectPr`：一节的页面设置。单位 twips。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SectPr {
     pub page_w: i32,
     pub page_h: i32,
@@ -870,7 +908,7 @@ pub enum SectionStart {
 }
 
 /// 首页、偶数页、其余页各用哪个页眉（或页脚）部件：关系 id。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct HeaderRefs {
     pub default: Option<String>,
     pub first: Option<String>,

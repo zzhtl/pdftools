@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::docx::model::{
-    Align, Anchor, AnchorPos, Block, Drawing, Para, Picture, RunItem, WrapKind,
+    Align, Anchor, AnchorPos, Block, Drawing, Geometry, Para, Picture, RunItem, Shape, VAlign,
+    WrapKind,
 };
 
 fn body(inner: &str) -> Document {
@@ -65,19 +66,23 @@ fn field_codes_are_not_text() {
     assert_eq!(text_of(paras(&doc)[0]), "7");
 }
 
-/// `mc:AlternateContent` 只取一个分支，不然同一个对象会出现两次。
+/// `mc:AlternateContent` 只取一个分支，不然同一个对象会出现两次：认识的特性（`wps`
+/// 形状）取 Choice，不认识的取 Fallback。
 #[test]
 fn alternate_content_yields_one_branch() {
     let doc = body(
         r#"<w:p><w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:docPr id="1" name="a" descr="新版"/></w:drawing></mc:Choice><mc:Fallback><w:pict><v:shape/></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>
-<mc:AlternateContent><mc:Choice Requires="wps"><w:p><w:r><w:t>新版</w:t></w:r></w:p></mc:Choice><mc:Fallback><w:p><w:r><w:t>兼容</w:t></w:r></w:p></mc:Fallback></mc:AlternateContent>"#,
+<mc:AlternateContent><mc:Choice Requires="w14"><w:p><w:r><w:t>新版</w:t></w:r></w:p></mc:Choice><mc:Fallback><w:p><w:r><w:t>兼容</w:t></w:r></w:p></mc:Fallback></mc:AlternateContent>"#,
     );
     let ps = paras(&doc);
     let items: Vec<&RunItem> = ps[0].runs.iter().flat_map(|r| &r.items).collect();
     assert_eq!(
         items,
-        vec![&RunItem::Drawing(Box::default())],
-        "只该有 Fallback 里那一个"
+        vec![&RunItem::Drawing(Box::new(Drawing {
+            alt: Some("新版".into()),
+            ..Default::default()
+        }))],
+        "只该有 Choice 里那一个"
     );
     assert_eq!(ps.len(), 2);
     assert_eq!(text_of(ps[1]), "兼容");
@@ -404,6 +409,7 @@ fn inline_pictures_are_read() {
                 crop: [25_000, 0, 10_000, 0],
             }),
             anchor: None,
+            shape: None,
         }
     );
     assert_eq!(drawing(1).picture, None);
@@ -472,5 +478,209 @@ fn anchored_pictures_are_read() {
     assert_eq!(
         (anchors[1].wrap, anchors[1].behind),
         (WrapKind::None, false)
+    );
+}
+
+fn drawings(doc: &Document) -> Vec<Drawing> {
+    paras(doc)
+        .iter()
+        .flat_map(|p| p.runs.iter().flat_map(|r| &r.items))
+        .filter_map(|i| match i {
+            RunItem::Drawing(d) => Some((**d).clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 形状（`wps:wsp`）：填充、轮廓、几何形状、翻转与旋转、文本框里的段落、文字边距与
+/// 竖直对齐。`a:noFill` 就是没有；主题色只认白与黑；轮廓没写颜色按黑色。
+#[test]
+fn shapes_and_text_boxes_are_read() {
+    let wsp = |sp_pr: &str, rest: &str| {
+        format!(
+            r#"<w:p><w:r><w:drawing><wp:inline><wp:extent cx="254000" cy="127000"/><wp:docPr id="1" name="s"/><a:graphic xmlns:a="a"><a:graphicData uri="wps"><wps:wsp xmlns:wps="wps"><wps:spPr>{sp_pr}</wps:spPr>{rest}</wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+        )
+    };
+    let doc = body(
+        &(wsp(
+            r#"<a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="FFF2CC"/></a:solidFill><a:ln w="12700"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:ln>"#,
+            r#"<wps:txbx><w:txbxContent><w:p><w:r><w:t>框内</w:t></w:r></w:p><w:p/></w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="12700" anchor="ctr"/>"#,
+        ) + &wsp(
+            r#"<a:xfrm flipH="1"><a:off x="0" y="0"/></a:xfrm><a:prstGeom prst="line"/><a:noFill/><a:ln w="6350"/>"#,
+            r#"<wps:style><a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef></wps:style><wps:bodyPr/>"#,
+        ) + &wsp(
+            r#"<a:xfrm rot="5400000"/><a:prstGeom prst="ellipse"/><a:solidFill><a:schemeClr val="accent1"/></a:solidFill><a:ln><a:noFill/></a:ln>"#,
+            "",
+        )),
+    );
+    let shapes: Vec<Shape> = drawings(&doc)
+        .into_iter()
+        .map(|d| {
+            assert_eq!(
+                (d.inline, d.extent, &d.picture),
+                (true, Some((254_000, 127_000)), &None)
+            );
+            d.shape.expect("是形状")
+        })
+        .collect();
+    let text = shapes[0].text.as_ref().expect("有文本框");
+    assert_eq!(text.len(), 2);
+    match &text[0] {
+        Block::Para(p) => assert_eq!(text_of(p), "框内"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        Shape {
+            text: None,
+            ..shapes[0].clone()
+        },
+        Shape {
+            geometry: Geometry::Rect,
+            fill: Some([0xFF, 0xF2, 0xCC]),
+            line: Some((12_700, [0, 0, 0])),
+            text: None,
+            insets: [0, 12_700, 91_440, 45_720],
+            text_align: VAlign::Center,
+            flip: [false; 2],
+            rotation: 0,
+        }
+    );
+    assert_eq!(
+        shapes[1],
+        Shape {
+            geometry: Geometry::Line,
+            fill: None,
+            line: Some((6_350, [0, 0, 0])),
+            text: None,
+            insets: [91_440, 45_720, 91_440, 45_720],
+            text_align: VAlign::Top,
+            flip: [true, false],
+            rotation: 0,
+        }
+    );
+    assert_eq!(
+        (
+            shapes[2].geometry,
+            shapes[2].fill,
+            shapes[2].line,
+            shapes[2].rotation
+        ),
+        (Geometry::Other, None, None, 5_400_000)
+    );
+}
+
+/// VML（`w:pict`）：样式里的位置与大小、`v:imagedata` 的图与裁剪、`v:textbox` 的
+/// 文字、填充与描边（缺省填白描黑，子元素 `v:fill` / `v:stroke` 可以改）、`w10:wrap`、
+/// z-index 为负是衬于文字下方；直线由两个端点定位置与方向；组合只留位置、大小与
+/// 替代文字。
+#[test]
+fn vml_shapes_are_read() {
+    let pict = |inner: &str| format!(r#"<w:p><w:r><w:pict>{inner}</w:pict></w:r></w:p>"#);
+    let doc = body(
+        &(pict(
+            r##"<v:shapetype id="_x0000_t75" coordsize="21600,21600"><v:path o:extrusionok="f"/></v:shapetype><v:shape type="#_x0000_t75" style="position:absolute;margin-left:80pt;margin-top:1in;width:100pt;height:50pt;z-index:-251657216;mso-position-horizontal-relative:page;mso-position-vertical:top;mso-position-vertical-relative:margin"><v:imagedata r:id="rId9" o:title="印" cropleft="6554f" croptop=".25"/><w10:wrap type="topAndBottom"/></v:shape>"##,
+        ) + &pict(
+            r#"<v:shape style="width:60pt;height:30pt"><v:imagedata r:id="rId9"/></v:shape>"#,
+        ) + &pict(
+            r##"<v:rect style="width:2in;height:1in" fillcolor="#fc0" strokecolor="red" strokeweight="2pt"><v:textbox inset="0,1pt,0,1pt"><w:txbxContent><w:p><w:r><w:t>框内</w:t></w:r></w:p></w:txbxContent></v:textbox></v:rect>"##,
+        ) + &pict(
+            r##"<v:line style="position:absolute;z-index:1" from="0,15.6pt" to="400pt,15pt" strokecolor="red" strokeweight="3pt"><v:stroke color="#00f"/></v:line>"##,
+        ) + &pict(
+            r#"<v:group alt="组合" style="width:10pt;height:10pt"><v:shape style="width:10pt;height:10pt"><v:imagedata r:id="rId9"/></v:shape></v:group>"#,
+        ) + &pict(
+            r#"<v:roundrect style="width:10pt;height:10pt" filled="f"><v:stroke on="f"/></v:roundrect>"#,
+        )),
+    );
+    let d = drawings(&doc);
+    assert_eq!(d.len(), 6);
+
+    assert_eq!(
+        (d[0].inline, d[0].extent, d[0].alt.as_deref(), &d[0].shape),
+        (false, Some((1_270_000, 635_000)), Some("印"), &None)
+    );
+    assert_eq!(
+        d[0].picture,
+        Some(Picture {
+            target: Some("rId9".into()),
+            crop: [10_001, 25_000, 0, 0],
+        })
+    );
+    assert_eq!(
+        d[0].anchor,
+        Some(Anchor {
+            h: AnchorPos {
+                from: Some("page".into()),
+                offset: Some(1_016_000),
+                align: None,
+            },
+            v: AnchorPos {
+                from: Some("margin".into()),
+                offset: Some(914_400),
+                align: Some("top".into()),
+            },
+            wrap: WrapKind::TopAndBottom,
+            behind: true,
+            dist: [0; 4],
+        })
+    );
+
+    assert_eq!(
+        (d[1].inline, d[1].extent, &d[1].anchor),
+        (true, Some((762_000, 381_000)), &None)
+    );
+    assert_eq!(
+        d[1].picture.as_ref().and_then(|p| p.target.as_deref()),
+        Some("rId9")
+    );
+
+    let text_box = d[2].shape.as_ref().expect("是形状");
+    assert_eq!(d[2].extent, Some((1_828_800, 914_400)));
+    assert_eq!(
+        (
+            text_box.geometry,
+            text_box.fill,
+            text_box.line,
+            text_box.insets
+        ),
+        (
+            Geometry::Rect,
+            Some([0xFF, 0xCC, 0x00]),
+            Some((25_400, [0xFF, 0, 0])),
+            [0, 12_700, 0, 12_700]
+        )
+    );
+    assert_eq!(text_box.text.as_ref().map(Vec::len), Some(1));
+
+    let line = d[3].shape.as_ref().expect("是形状");
+    assert_eq!(
+        (line.geometry, line.fill, line.line, line.flip),
+        (
+            Geometry::Line,
+            None,
+            Some((38_100, [0, 0, 0xFF])),
+            [true, false]
+        )
+    );
+    assert_eq!(d[3].extent, Some((5_080_000, 7_620)));
+    let a = d[3].anchor.as_ref().expect("浮动");
+    assert_eq!(
+        (&a.h.from, a.h.offset, &a.v.from, a.v.offset),
+        (
+            &Some("column".to_string()),
+            Some(0),
+            &Some("paragraph".to_string()),
+            Some(190_500)
+        )
+    );
+
+    assert_eq!(
+        (d[4].alt.as_deref(), d[4].extent, &d[4].picture, &d[4].shape),
+        (Some("组合"), Some((127_000, 127_000)), &None, &None)
+    );
+
+    let plain = d[5].shape.as_ref().expect("是形状");
+    assert_eq!(
+        (plain.geometry, plain.fill, plain.line),
+        (Geometry::RoundRect, None, None)
     );
 }

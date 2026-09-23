@@ -80,24 +80,45 @@ pub enum PaintOp {
         h: f32,
         color: [u8; 3],
     },
+    /// 之后的操作只在这个矩形里可见，直到配对的 [`PaintOp::EndClip`]。两者在同一串
+    /// 操作里成对出现（文本框里放不下的字）。
+    Clip {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    },
+    EndClip,
 }
 
 impl PaintOp {
     /// 纵向平移。测量时 y 相对于行的基线，放进页面时才加上基线的绝对位置。
     fn shifted(&self, dy: f32) -> PaintOp {
+        self.translated(0.0, dy)
+    }
+
+    /// 平移：对象先按左下角在原点画好，放进行里、页上时再挪过去。
+    fn translated(&self, dx: f32, dy: f32) -> PaintOp {
         let mut op = self.clone();
         match &mut op {
-            PaintOp::Text { y, .. } | PaintOp::Rect { y, .. } | PaintOp::Image { y, .. } => {
-                *y += dy
+            PaintOp::Text { x, y, .. }
+            | PaintOp::Rect { x, y, .. }
+            | PaintOp::Image { x, y, .. }
+            | PaintOp::Clip { x, y, .. } => {
+                *x += dx;
+                *y += dy;
             }
             PaintOp::Line { from, to, .. } => {
-                from.1 += dy;
-                to.1 += dy;
+                *from = (from.0 + dx, from.1 + dy);
+                *to = (to.0 + dx, to.1 + dy);
             }
-            PaintOp::Link { y1, y2, .. } => {
+            PaintOp::Link { x1, y1, x2, y2, .. } => {
+                *x1 += dx;
+                *x2 += dx;
                 *y1 += dy;
                 *y2 += dy;
             }
+            PaintOp::EndClip => {}
         }
         op
     }
@@ -249,8 +270,17 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
         warnings.push(Warning::new(
             WarningKind::UnsupportedElement,
             format!(
-                "{} 个行内的形状、图表或找不到的图片本版本画不出来，已按原大小画成灰框",
+                "{} 个组合、图表或找不到的图片本版本画不出来，已按原大小画成灰框",
                 doc.missing_objects
+            ),
+        ));
+    }
+    if doc.approximated_shapes > 0 {
+        warnings.push(Warning::new(
+            WarningKind::UnsupportedElement,
+            format!(
+                "{} 个形状本版本画不准：圆角矩形画成直角，旋转的按不旋转画，矩形与直线以外的形状（椭圆、箭头……）只画了框里的字",
+                doc.approximated_shapes
             ),
         ));
     }
@@ -330,12 +360,19 @@ fn measure_block(
     collapse: bool,
     value: &dyn Fn(&ir::Field) -> Option<String>,
 ) -> Measured {
+    // 形状里的字与单元格里的一样量。
+    let mut story = |blocks: &[ir::Block], env: &para::Env, book: &mut FontBook, caps: &[f32]| {
+        let measured = measure_blocks(blocks, env, book, collapse, value);
+        paginate::flow(&measured, caps, false, collapse)
+    };
     match block {
-        ir::Block::Para(p) => Measured::Para(para::measure(&with_fields(p, value), env, book)),
+        ir::Block::Para(p) => {
+            Measured::Para(para::measure(&with_fields(p, value), env, book, &mut story))
+        }
         ir::Block::Placeholder(ph) => Measured::Placeholder(
             placeholder_paras(ph)
                 .iter()
-                .map(|p| para::measure(p, env, book))
+                .map(|p| para::measure(p, env, book, &mut story))
                 .collect(),
         ),
         ir::Block::Table(t) => {
@@ -712,7 +749,7 @@ mod tests {
                 punct_hangs: true,
                 calib: &calib,
             };
-            let b = para::measure(&p, &env, &mut book);
+            let b = para::measure(&p, &env, &mut book, &mut |_, _, _, _| Vec::new());
             let para::ParaBody::Lines(lines) = &b.body else {
                 panic!("应当有一行字");
             };

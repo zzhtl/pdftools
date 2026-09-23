@@ -154,6 +154,11 @@ pub fn paint(
                     y2,
                     uri,
                 } => canvas.link([*x1, *y1, *x2, *y2], uri),
+                PaintOp::Clip { x, y, w, h } => {
+                    canvas.save();
+                    canvas.clip_rect(*x, *y, *w, *h);
+                }
+                PaintOp::EndClip => canvas.restore(),
             }
         }
         doc.add_page(canvas.finish());

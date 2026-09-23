@@ -449,7 +449,8 @@ impl Paginator {
             At::End => start + len - size,
         };
         let mut placed = Vec::new();
-        for f in &para.floats {
+        for float in &para.floats {
+            let f = &float.object;
             let h_area = match f.h.from {
                 _ if story => para.column,
                 F::Page => (0.0, geom.w_pt),
@@ -468,14 +469,19 @@ impl Paginator {
             };
             let x = place(h_area, f.width, f.h.at);
             let top = place(v_area, f.height, f.v.at);
-            let rect = [x, geom.h_pt - top - f.height, f.width, f.height];
+            let bottom = geom.h_pt - top - f.height;
             if f.wrap == ir::Wrap::TopAndBottom {
                 self.bands.push((
                     top - f.dist[0] - body_top,
                     top + f.height + f.dist[1] - body_top,
                 ));
             }
-            placed.push((f.behind, object_ops(&f.content, rect)));
+            let ops: Vec<PaintOp> = float
+                .ops
+                .iter()
+                .map(|op| op.translated(x, bottom))
+                .collect();
+            placed.push((f.behind, ops));
         }
         let page = self.pages.last_mut().expect("至少有一页");
         for (behind, ops) in placed {
@@ -723,21 +729,6 @@ impl TablePart {
         self.height += t.band(f.ri, f.at_top) + f.height;
         self.body = true;
         self.frags.push(f);
-    }
-}
-
-/// 一个浮动对象画出来的操作：`rect` 是左下角与宽高（PDF 坐标）。
-fn object_ops(content: &ir::ObjectContent, [x, y, w, h]: [f32; 4]) -> Vec<PaintOp> {
-    match content {
-        ir::ObjectContent::Image { part, crop } => vec![PaintOp::Image {
-            part: part.clone(),
-            x,
-            y,
-            w,
-            h,
-            crop: *crop,
-        }],
-        ir::ObjectContent::Missing { .. } => super::para::missing_box(x, y, w, h),
     }
 }
 
