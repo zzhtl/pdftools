@@ -2,9 +2,9 @@
 
 use std::ops::Range;
 
-use super::calib::{Calib, EmptyPara, HangingPunct, TrailingSpaces};
+use super::calib::{Calib, EmptyPara, HangingPunct, Justify, TrailingSpaces};
 use super::metrics::line_box;
-use super::text::{self, Hang, ShapedPara};
+use super::text::{self, Hang, Piece, ShapedPara};
 use super::PaintOp;
 use crate::docx::ir::{self, Align, Grid, LineSpacing};
 use crate::fonts::FontBook;
@@ -194,35 +194,19 @@ fn line(
         Align::Right => content_left + avail - line_width,
     };
 
-    // 两端对齐：把剩余空间摊进字间。段落最后一行不参与。
-    //
-    // 含半角空格的行暂不拉开：旧版把空间全交给词距（Tw），而 Tw 对双字节编码
-    // 从来不起作用，这些行实际一直是左对齐的。直接让词距生效会把整行的空间压到
-    // 一两个空格上（中西文混排里常见），比左对齐更难看。正确的分配规则（摊到每个
-    // 中文字之间，空格也分一份）要对着 LibreOffice 实测来定。
-    let mut char_spacing = 0.0f32;
-    if para.align == Align::Justify && !suppress_justify {
-        let slack = avail - indent - line_width;
-        let has_space = sp.text[measured.clone()].contains(' ');
-        if slack > 0.0 && !has_space {
-            let glyphs: usize = active
-                .iter()
-                .map(|p| p.glyphs_between(measured.start, measured.end).len())
-                .sum();
-            if glyphs > 1 {
-                char_spacing = slack / (glyphs - 1) as f32;
-            }
-        }
+    // 两端对齐：把剩余空间摊进字间。段落最后一行（以及换行符结束的行）不参与。
+    let slack = (para.align == Align::Justify && !suppress_justify)
+        .then_some(avail - indent - line_width)
+        .filter(|s| *s > 0.0);
+    let mut extras = match env.calib.justify {
+        Justify::Legacy => legacy_extras(sp, active, &range, &measured, slack),
+        Justify::Gaps => gap_extras(active, &range, &measured, slack),
     }
-    // 行尾有悬挂的内容时，它紧挨着最后一个可见的字伸出边距：
-    // 从最后一个可见的字起不再加字距，否则悬挂的标点会离开前一个字。
-    let hanging_from = (measured.end < range.end)
-        .then(|| sp.text[..measured.end].char_indices().next_back())
-        .flatten()
-        .map(|(i, _)| i);
+    .into_iter();
 
     let mut ops = Vec::new();
     for piece in active {
+        let extra_after = extras.next().unwrap_or_default();
         let glyphs = piece.glyphs_between(range.start, range.end);
         if glyphs.is_empty() {
             continue;
@@ -234,19 +218,6 @@ fn line(
         }
         let w = piece.width(range.start, range.end);
         let gr = piece.glyph_range(range.start, range.end);
-        let extra_after: Vec<f32> = match hanging_from {
-            None => vec![char_spacing; glyphs.len()],
-            Some(from) => glyphs
-                .iter()
-                .map(|g| {
-                    if piece.range.start + g.cluster as usize >= from {
-                        0.0
-                    } else {
-                        char_spacing
-                    }
-                })
-                .collect(),
-        };
         let extra: f32 = extra_after.iter().sum();
 
         ops.push(PaintOp::Text {
@@ -290,4 +261,98 @@ fn line(
         fit_height: metrics.fit_height,
         ops,
     }
+}
+
+/// 重写前的两端对齐：含半角空格的行不拉开，其余的行平均分给每个字形之后。
+/// 返回与 `active` 一一对应、每片每个字形之后的额外推进。
+fn legacy_extras(
+    sp: &ShapedPara,
+    active: &[Piece],
+    range: &Range<usize>,
+    measured: &Range<usize>,
+    slack: Option<f32>,
+) -> Vec<Vec<f32>> {
+    let mut char_spacing = 0.0f32;
+    if let Some(slack) = slack {
+        if !sp.text[measured.clone()].contains(' ') {
+            let glyphs: usize = active
+                .iter()
+                .map(|p| p.glyphs_between(measured.start, measured.end).len())
+                .sum();
+            if glyphs > 1 {
+                char_spacing = slack / (glyphs - 1) as f32;
+            }
+        }
+    }
+    // 行尾有悬挂的内容时，它紧挨着最后一个可见的字伸出边距：
+    // 从最后一个可见的字起不再加字距，否则悬挂的标点会离开前一个字。
+    let hanging_from = (measured.end < range.end)
+        .then(|| sp.text[..measured.end].char_indices().next_back())
+        .flatten()
+        .map(|(i, _)| i);
+    active
+        .iter()
+        .map(|piece| {
+            let glyphs = piece.glyphs_between(range.start, range.end);
+            match hanging_from {
+                None => vec![char_spacing; glyphs.len()],
+                Some(from) => glyphs
+                    .iter()
+                    .map(|g| {
+                        if piece.range.start + g.cluster as usize >= from {
+                            0.0
+                        } else {
+                            char_spacing
+                        }
+                    })
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+/// 见 [`Justify::Gaps`]。只在行内可见的部分里分；悬挂的空格、标点不分，
+/// 最后一个可见字形之后也不分。
+fn gap_extras(
+    active: &[Piece],
+    range: &Range<usize>,
+    measured: &Range<usize>,
+    slack: Option<f32>,
+) -> Vec<Vec<f32>> {
+    let mut extras: Vec<Vec<f32>> = active
+        .iter()
+        .map(|p| vec![0.0; p.glyphs_between(range.start, range.end).len()])
+        .collect();
+    let Some(slack) = slack else {
+        return extras;
+    };
+    // 可见字形，按排列顺序：(第几片, 片内第几个, 是汉字, 是空格)。
+    let mut visible = Vec::new();
+    for (pi, piece) in active.iter().enumerate() {
+        let gr = piece.glyph_range(range.start, range.end);
+        for (k, g) in piece.shaped.glyphs[gr.clone()].iter().enumerate() {
+            if piece.range.start + g.cluster as usize >= measured.end {
+                continue;
+            }
+            let space = piece.texts[gr.start + k] == " ";
+            let cjk = piece.class == crate::fonts::ScriptClass::EastAsian && !space;
+            visible.push((pi, k, cjk, space));
+        }
+    }
+    let targets: Vec<(usize, usize)> = if visible.iter().any(|g| g.3) {
+        visible.iter().filter(|g| g.3).map(|g| (g.0, g.1)).collect()
+    } else {
+        visible
+            .windows(2)
+            .filter(|w| w[0].2 || w[1].2)
+            .map(|w| (w[0].0, w[0].1))
+            .collect()
+    };
+    if !targets.is_empty() {
+        let share = slack / targets.len() as f32;
+        for (pi, k) in targets {
+            extras[pi][k] = share;
+        }
+    }
+    extras
 }

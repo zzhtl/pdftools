@@ -18,6 +18,21 @@ pub struct Calib {
     pub fixed_baseline: FixedBaseline,
     pub trailing_spaces: TrailingSpaces,
     pub hanging_punct: HangingPunct,
+    pub justify: Justify,
+}
+
+/// 两端对齐把一行剩下的空间分给哪些间隙。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Justify {
+    /// 含半角空格的行不拉开（实际是左对齐）；其余的行平均分给每个字形之后。
+    Legacy,
+    /// 有半角空格的行只拉开空格；没有空格的行分给汉字前后的间隙，西文、数字内部不拉开。
+    ///
+    /// 对照 LibreOffice 实测的结构：中文夹着西文词的行，词内的字母间距一点没变，
+    /// 余量都在汉字之间和中西文交界处；中西混排带空格的行，空格拿走了绝大部分余量。
+    /// 各处具体分多少 LibreOffice 另有细节（交界处约为字间的两倍，汉字在有空格的行里
+    /// 也分到一点），这里没有照搬。
+    Gaps,
 }
 
 /// 行尾标点能不能伸出右边距（段落写了 `w:overflowPunct w:val="0"` 时一律不能）。
@@ -130,6 +145,7 @@ impl Calib {
             fixed_baseline: FixedBaseline::Measured,
             trailing_spaces: TrailingSpaces::Hang,
             hanging_punct: HangingPunct::Punctuation,
+            justify: Justify::Gaps,
         }
     }
 
@@ -143,6 +159,7 @@ impl Calib {
             fixed_baseline: FixedBaseline::Legacy,
             trailing_spaces: TrailingSpaces::Counted,
             hanging_punct: HangingPunct::Never,
+            justify: Justify::Legacy,
         }
     }
 }

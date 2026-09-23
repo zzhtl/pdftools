@@ -15,7 +15,7 @@ mod para;
 mod text;
 
 pub use calib::{
-    Calib, EmptyPara, FixedBaseline, GridLayout, HangingPunct, PageBottom, ParaSpacing,
+    Calib, EmptyPara, FixedBaseline, GridLayout, HangingPunct, Justify, PageBottom, ParaSpacing,
     TrailingSpaces,
 };
 

@@ -1027,3 +1027,87 @@ fn sentence_punctuation_hangs_past_the_right_margin() {
         35
     );
 }
+
+/// 两端对齐：有半角空格的行只把空格拉开；没有空格的行拉开汉字前后的间隙，
+/// 西文词内部不拉开。两种行的可见文字都排满到右边距。
+#[test]
+fn justification_stretches_spaces_or_cjk_gaps_but_not_inside_words() {
+    if !require_cjk_font() {
+        return;
+    }
+    // 同一段文字排两遍：以「甲」开头的左对齐、以「乙」开头的两端对齐，逐字形相减。
+    let deltas = |name: &str, text: &str| -> (Vec<(String, f32)>, f32) {
+        let para = |first: &str, jc: &str| {
+            format!(
+                r#"<w:p><w:pPr><w:jc w:val="{jc}"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">{first}{text}</w:t></w:r></w:p>"#
+            )
+        };
+        let body = para("甲", "left") + &para("乙", "both");
+        let pages = common::pdftext::extract(&convert(&make_docx(name, &body)).value.pdf);
+        let line = |first: &str| {
+            pages[0]
+                .lines
+                .iter()
+                .find(|l| l.text.starts_with(first))
+                .unwrap()
+                .clone()
+        };
+        let (left, just) = (line("甲"), line("乙"));
+        let glyphs = |l: &common::pdftext::Line| -> Vec<(String, f32)> {
+            l.frags.iter().flat_map(|f| f.glyphs.clone()).collect()
+        };
+        let (a, b) = (glyphs(&left), glyphs(&just));
+        // 第 i 个字形之后多出来的推进。
+        let d: Vec<(String, f32)> = (1..a.len().min(b.len()))
+            .map(|i| {
+                (
+                    a[i - 1].0.clone(),
+                    (b[i].1 - a[i].1) - (b[i - 1].1 - a[i - 1].1),
+                )
+            })
+            .collect();
+        // 可见文字的右缘（去掉行尾空格）离右边距多远。
+        let right = just
+            .frags
+            .iter()
+            .flat_map(|f| {
+                f.glyphs
+                    .iter()
+                    .zip(f.glyphs.iter().skip(1).map(|g| g.1).chain([f.x + f.width]))
+                    .filter(|(g, _)| g.0 != " ")
+                    .map(|(_, end)| end)
+                    .collect::<Vec<_>>()
+            })
+            .fold(f32::MIN, f32::max);
+        (d, pages[0].width - 1588.0 / 20.0 - right)
+    };
+
+    let (d, gap) = deltas(
+        "justify_spaces.docx",
+        &"两端对齐 word 与 space 的分配规则 ".repeat(8),
+    );
+    for (after, extra) in &d {
+        if after != " " {
+            assert!(
+                extra.abs() < 0.01,
+                "「{after}」之后不该拉开，多了 {extra}pt"
+            );
+        }
+    }
+    assert!(d.iter().any(|(a, e)| a == " " && *e > 0.1), "空格应当拉开");
+    assert!(gap.abs() < 0.05, "可见文字应当排满到右边距，差 {gap}pt");
+
+    let (d, gap) = deltas("justify_words.docx", &"两端对齐Word分配规则ABC".repeat(8));
+    let latin = |s: &str| s.chars().all(|c| c.is_ascii_alphanumeric());
+    for w in d.windows(2) {
+        if latin(&w[0].0) && latin(&w[1].0) {
+            assert!(
+                w[0].1.abs() < 0.01,
+                "西文词内不该拉开：「{}」之后多了 {}pt",
+                w[0].0,
+                w[0].1
+            );
+        }
+    }
+    assert!(gap.abs() < 0.05, "可见文字应当排满到右边距，差 {gap}pt");
+}
