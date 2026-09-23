@@ -135,13 +135,15 @@ impl FontBook {
 
         if found.is_none() {
             // 找不到就按类别回退，并记下这次替换 —— 用户有权知道字体被换了。
+            // 哪一级都没写字体时按衬线体：Word 的缺省是 Times New Roman 与宋体，
+            // LibreOffice 读 docx 时也用 Liberation Serif 与 Noto Serif CJK。
             let chain = if east_asian {
-                if family.map(is_serif_cjk).unwrap_or(false) {
+                if family.is_none_or(is_serif_cjk) {
                     system::PDF_SERIF_PREFERENCE
                 } else {
                     system::PDF_SANS_PREFERENCE
                 }
-            } else if family.map(looks_serif).unwrap_or(false) {
+            } else if family.is_none_or(looks_serif) {
                 system::LATIN_SERIF_PREFERENCE
             } else {
                 system::LATIN_SANS_PREFERENCE
@@ -318,5 +320,24 @@ mod tests {
                 .any(|n| n.contains("DejaVu Sans") && n.contains("禁止内嵌")),
             "要说明字体因禁止内嵌被替换：{notes:?}"
         );
+    }
+
+    /// 哪一级都没写字体时按衬线体回退，与按「Times New Roman」「宋体」回退的
+    /// 首选一样。
+    #[test]
+    fn unnamed_fonts_fall_back_to_serif() {
+        let fonts = SystemFonts::shared();
+        let mut book = FontBook::with_system(fonts);
+        let chains = [
+            (false, system::LATIN_SERIF_PREFERENCE),
+            (true, system::PDF_SERIF_PREFERENCE),
+        ];
+        for (east_asian, chain) in chains {
+            let Some(serif) = fonts.find_embeddable(chain, false, false) else {
+                continue;
+            };
+            let got = book.resolve(None, east_asian, false, false).unwrap();
+            assert!(Arc::ptr_eq(&book.faces()[got.id], &serif.face));
+        }
     }
 }
