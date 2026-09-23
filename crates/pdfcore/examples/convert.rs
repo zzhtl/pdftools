@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "--compress" => {
             let data = std::fs::read(&args[1])?;
             let (report, timing) = timed(repeat, || {
-                pdfcore::pdf::read::compress::run(&data, Tier::Balanced, false, &NoProgress)
+                pdfcore::ops::pdf_compress::run(&data, Tier::Balanced, false, &NoProgress)
             })?;
             std::fs::write(&args[2], &report.value.pdf)?;
             println!(

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use pdfcore::imaging::Tier;
 use pdfcore::ops::images_to_pdf;
-use pdfcore::pdf::read::compress;
+use pdfcore::ops::pdf_compress as compress;
 use pdfcore::NoProgress;
 
 fn tmp() -> PathBuf {

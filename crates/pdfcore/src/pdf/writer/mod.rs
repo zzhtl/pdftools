@@ -106,15 +106,6 @@ impl DocBuilder {
         self.info = info;
     }
 
-    /// 直接访问底层写入器，用于写 XObject、字体这类独立对象。
-    pub fn pdf_mut(&mut self) -> &mut Pdf {
-        &mut self.pdf
-    }
-
-    pub fn alloc(&mut self) -> Ref {
-        self.alloc.next_ref()
-    }
-
     /// 同时借出写入器和分配器。
     ///
     /// 写字体、写 XObject 都需要「先要一个对象号，再往那个号里写内容」，

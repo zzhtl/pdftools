@@ -39,8 +39,6 @@ pub enum Flavor {
 pub enum Embedding {
     /// 可以内嵌子集。
     Allowed,
-    /// 允许内嵌，但不允许子集化 —— 只能整份嵌进去。
-    NoSubsetting,
     /// 字体作者禁止内嵌。我们尊重这个标志并换一个字体。
     Restricted,
 }

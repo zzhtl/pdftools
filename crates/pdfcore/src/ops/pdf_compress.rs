@@ -7,10 +7,10 @@
 use lopdf::{Document, Object, ObjectId};
 use rayon::prelude::*;
 
-use super::placement;
 use crate::bail_if_cancelled;
 use crate::error::{CoreError, Report, Result, Warning, WarningKind};
 use crate::imaging::{quality_of, Tier};
+use crate::pdf::read::placement;
 use crate::progress::{Progress, ProgressSink};
 
 pub struct CompressOutcome {

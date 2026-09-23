@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use pdfcore::imaging::Tier;
-use pdfcore::pdf::read::compress;
+use pdfcore::ops::pdf_compress as compress;
 use pdfcore::Progress;
 
 use crate::app::{tier_selector, App};

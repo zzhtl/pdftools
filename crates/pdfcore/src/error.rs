@@ -59,8 +59,6 @@ pub enum WarningKind {
     UnsupportedElement,
     /// 请求的字体不可用，换成了别的
     FontSubstituted,
-    /// 图片被降采样或重新编码
-    ImageRecompressed,
     /// 图片原样保留（重编码后反而更大）
     ImageKeptOriginal,
     /// 拿不到 EXIF 拍摄时间，退而使用文件修改时间。
