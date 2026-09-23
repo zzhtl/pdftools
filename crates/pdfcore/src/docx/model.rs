@@ -116,6 +116,8 @@ pub struct PPr {
     pub auto_space_digits: Option<bool>,
     /// `w:overflowPunct`：行尾标点可以伸出右边距。缺省为 true。
     pub overflow_punct: Option<bool>,
+    /// `w:tabs`：自定义制表位。样式里的与段落上的要合并，见 [`merge_tabs`]。
+    pub tabs: Vec<TabDef>,
     /// 本段挂了自动编号（`w:numPr`）。
     pub numbering: bool,
     /// `w:pPr/w:rPr`：段落标记自身的格式。它参与 run 的层叠，优先级低于 run 上的直接格式。
@@ -156,9 +158,51 @@ impl PPr {
         if other.overflow_punct.is_some() {
             self.overflow_punct = other.overflow_punct;
         }
+        merge_tabs(&mut self.tabs, &other.tabs);
         self.numbering |= other.numbering;
         self.mark_rpr.merge(&other.mark_rpr);
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabAlign {
+    Left,
+    Center,
+    Right,
+    Decimal,
+    /// 在该位置画一条竖线，不是制表位。
+    Bar,
+    /// 清掉样式里同一位置的制表位。
+    Clear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabLeader {
+    None,
+    Dot,
+    Hyphen,
+    Underscore,
+    MiddleDot,
+    Heavy,
+}
+
+/// `w:tabs/w:tab`。位置是 twips，从正文区左缘量起。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TabDef {
+    pub align: TabAlign,
+    pub leader: TabLeader,
+    pub pos: i32,
+}
+
+/// 样式链上的制表位逐级合并：同一位置的后者覆盖前者，`clear` 删掉该位置的。
+pub fn merge_tabs(base: &mut Vec<TabDef>, over: &[TabDef]) {
+    for t in over {
+        base.retain(|b| b.pos != t.pos);
+        if t.align != TabAlign::Clear {
+            base.push(*t);
+        }
+    }
+    base.sort_by_key(|t| t.pos);
 }
 
 /// 一串块级内容：正文、页眉页脚、单元格、文本框共用。
@@ -292,6 +336,8 @@ pub struct Styles {
 pub struct Settings {
     /// `w:compat/w:doNotUseHTMLParagraphAutoSpacing`。
     pub no_html_paragraph_spacing: bool,
+    /// `w:defaultTabStop`，twips。
+    pub default_tab_stop: Option<i32>,
 }
 
 #[derive(Debug, Clone)]

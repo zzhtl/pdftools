@@ -121,6 +121,45 @@ pub(super) struct ShapedPara {
     pub pieces: Vec<Piece>,
     /// UAX #14 的断行机会，按偏移升序。
     pub breaks: Vec<(usize, BreakOpportunity)>,
+    /// 制表符的偏移，升序。
+    pub tabs: Vec<usize>,
+}
+
+/// 制表符跳到哪里。位置都从正文区左缘量起（点）。
+pub(super) struct TabRules<'a> {
+    pub stops: &'a [ir::TabStop],
+    pub default: f32,
+    /// 悬挂缩进时，左缩进处有一个隐含的左对齐制表位（Word 的规矩：编号后的制表符
+    /// 靠它对齐到正文）。
+    pub implicit: Option<f32>,
+}
+
+/// 正好停在制表位上的文字，下一个制表符跳到再下一个位置。
+const TAB_EPS: f32 = 1e-3;
+
+impl TabRules<'_> {
+    /// 位置 `x` 之后的下一个制表位。自定义位优先；越过最后一个自定义位之后才用默认位。
+    pub fn next(&self, x: f32) -> ir::TabStop {
+        let implicit = self.implicit.map(|pos| ir::TabStop {
+            pos,
+            align: ir::TabAlign::Left,
+            leader: ir::TabLeader::None,
+        });
+        self.stops
+            .iter()
+            .copied()
+            .chain(implicit)
+            .filter(|t| t.pos > x + TAB_EPS)
+            .min_by(|a, b| a.pos.total_cmp(&b.pos))
+            .unwrap_or_else(|| {
+                let d = self.default.max(1.0);
+                ir::TabStop {
+                    pos: ((x + TAB_EPS) / d).floor() * d + d,
+                    align: ir::TabAlign::Left,
+                    leader: ir::TabLeader::None,
+                }
+            })
+    }
 }
 
 impl ShapedPara {
@@ -160,10 +199,67 @@ impl ShapedPara {
         start + line.len()
     }
 
+    /// 制表符（在 `tab` 处）从 `x` 跳到哪里，以及用的是哪个制表位。
+    /// `[tab + 1, seg_end)` 是它后面、到下一个制表符或行尾的文字：右对齐、居中、
+    /// 小数点位要按它的宽度往回让，但不会退到 `x` 之前。
+    pub fn tab_target(
+        &self,
+        x: f32,
+        tab: usize,
+        seg_end: usize,
+        rules: &TabRules,
+    ) -> (f32, ir::TabStop) {
+        let stop = rules.next(x);
+        let after = tab + 1;
+        let target = match stop.align {
+            ir::TabAlign::Right => stop.pos - self.width(after, seg_end),
+            ir::TabAlign::Center => stop.pos - self.width(after, seg_end) / 2.0,
+            ir::TabAlign::Decimal => {
+                let dot = self.text[after..seg_end]
+                    .find(['.', '．'])
+                    .map_or(seg_end, |i| after + i);
+                stop.pos - self.width(after, dot)
+            }
+            _ => stop.pos,
+        };
+        (target.max(x), stop)
+    }
+
+    /// 行 `[start, end)` 从 `x0` 开始排，右缘到哪里（都从正文区左缘量起）。
+    pub fn advance(&self, start: usize, end: usize, x0: f32, rules: &TabRules) -> f32 {
+        let first = self.tabs.partition_point(|t| *t < start);
+        let last = self.tabs.partition_point(|t| *t < end);
+        let tabs = &self.tabs[first..last];
+        let mut x = x0;
+        let mut seg = start;
+        for (i, &t) in tabs.iter().enumerate() {
+            x += self.width(seg, t);
+            let seg_end = tabs.get(i + 1).copied().unwrap_or(end);
+            x = self.tab_target(x, t, seg_end, rules).0;
+            seg = t + 1;
+        }
+        x + self.width(seg, end)
+    }
+
     /// 从 `start` 开始，找最后一个装得下的断行点。返回 (断点偏移, 是否是强制断行)。
-    pub fn next_break(&self, start: usize, avail: f32, hang: Hang) -> (usize, bool) {
+    /// `x0` 是本行起点（从正文区左缘量起），有制表符时要靠它定位。
+    pub fn next_break(
+        &self,
+        start: usize,
+        avail: f32,
+        hang: Hang,
+        x0: f32,
+        rules: &TabRules,
+    ) -> (usize, bool) {
         let first = self.breaks.partition_point(|(i, _)| *i <= start);
-        let fits = |idx| self.width(start, self.measured_end(start, idx, hang)) <= avail;
+        let fits = |idx| {
+            let end = self.measured_end(start, idx, hang);
+            if self.tabs.is_empty() {
+                self.width(start, end) <= avail
+            } else {
+                self.advance(start, end, x0, rules) - x0 <= avail
+            }
+        };
         let mut best: Option<usize> = None;
         for &(idx, kind) in &self.breaks[first..] {
             if kind == BreakOpportunity::Mandatory {
@@ -199,7 +295,12 @@ pub(super) fn is_page_break(c: char) -> bool {
     c == ir::PAGE_BREAK || c == ir::COLUMN_BREAK
 }
 
-pub(super) fn shape(para: &ir::Paragraph, book: &mut FontBook, typed_breaks: bool) -> ShapedPara {
+pub(super) fn shape(
+    para: &ir::Paragraph,
+    book: &mut FontBook,
+    typed_breaks: bool,
+    tab_stops: bool,
+) -> ShapedPara {
     let mut text = String::with_capacity(para.text.len());
     let mut spans: Vec<(Range<usize>, &ir::RunStyle)> = Vec::with_capacity(para.spans.len());
     for span in &para.spans {
@@ -207,8 +308,9 @@ pub(super) fn shape(para: &ir::Paragraph, book: &mut FontBook, typed_breaks: boo
         let symbol = symbol_font_of(&span.style, book);
         for c in para.text[span.range.clone()].chars() {
             text.push(match c {
-                // 与重写前一致：制表符当一个全角空格，真正的制表位还没做。
-                '\t' => '\u{3000}',
+                // 旧规则：制表符当一个全角空格。否则它是不绘制的控制字符，
+                // 排版时跳到制表位。
+                '\t' if !tab_stops => '\u{3000}',
                 ir::LINE_BREAK => '\n',
                 // 分页符、分栏符本身就是强制断行点（UAX #14 的 BK），也不绘制；
                 // 旧规则把它们都当换行。
@@ -299,10 +401,12 @@ pub(super) fn shape(para: &ir::Paragraph, book: &mut FontBook, typed_breaks: boo
         }
     }
     let breaks = linebreaks(&text).collect();
+    let tabs = text.match_indices('\t').map(|(i, _)| i).collect();
     ShapedPara {
         text,
         pieces,
         breaks,
+        tabs,
     }
 }
 
@@ -343,7 +447,22 @@ fn split_by_coverage(
         // 整形只会得到 .notdef —— 一条误报的缺字，还白占一个字宽，
         // 回退时更会平白多嵌一个字体。片本身要留着，空行的行高靠它撑起来。
         if c.is_control() {
-            out.push((start..end, primary));
+            // 制表符属于 ASCII，用西文字体：它的前导符（一串点）要按西文字体的点来画。
+            let font = if c == '\t' {
+                book.resolve(
+                    style
+                        .font_latin
+                        .as_deref()
+                        .or(style.font_east_asia.as_deref()),
+                    false,
+                    style.bold,
+                    style.italic,
+                )
+                .unwrap_or(primary)
+            } else {
+                primary
+            };
+            out.push((start..end, font));
             continue;
         }
         let font = if attaches_to_previous(c) {
@@ -403,7 +522,46 @@ mod tests {
             text: text.to_string(),
             pieces: Vec::new(),
             breaks: Vec::new(),
+            tabs: text.match_indices('\t').map(|(i, _)| i).collect(),
         }
+    }
+
+    fn stop(pos: f32, align: ir::TabAlign) -> ir::TabStop {
+        ir::TabStop {
+            pos,
+            align,
+            leader: ir::TabLeader::None,
+        }
+    }
+
+    #[test]
+    fn default_stops_count_from_the_margin() {
+        let rules = TabRules {
+            stops: &[],
+            default: 21.0,
+            implicit: None,
+        };
+        assert_eq!(rules.next(12.0).pos, 21.0);
+        assert_eq!(rules.next(21.0).pos, 42.0, "正好停在位上时跳到下一个");
+        assert_eq!(rules.next(62.0).pos, 63.0);
+    }
+
+    #[test]
+    fn custom_stops_come_before_default_ones() {
+        let stops = [
+            stop(50.0, ir::TabAlign::Left),
+            stop(200.0, ir::TabAlign::Right),
+        ];
+        let rules = TabRules {
+            stops: &stops,
+            default: 21.0,
+            implicit: None,
+        };
+        // 默认位 21、42 在自定义位 50 之前，不用。
+        assert_eq!(rules.next(12.0).pos, 50.0);
+        assert_eq!(rules.next(60.0).pos, 200.0);
+        // 越过最后一个自定义位之后才用默认位。
+        assert_eq!(rules.next(210.0).pos, 210.0 + 21.0 - 210.0 % 21.0);
     }
 
     const SPACES: Hang = Hang {

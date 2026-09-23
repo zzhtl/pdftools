@@ -19,6 +19,7 @@ use std::ops::Range;
 
 use super::layout::Calib;
 use super::model::{self, BreakKind, LineRule, PPr, RPr, RunItem};
+pub use super::model::{TabAlign, TabLeader};
 use super::resolve::Resolver;
 
 pub const LINE_BREAK: char = '\u{2028}';
@@ -111,6 +112,14 @@ pub struct Span {
     pub style: RunStyle,
 }
 
+/// 一个制表位。`pos` 是从正文区左缘量起的点数。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TabStop {
+    pub pos: f32,
+    pub align: TabAlign,
+    pub leader: TabLeader,
+}
+
 #[derive(Debug, Clone)]
 pub struct Paragraph {
     pub align: Align,
@@ -128,6 +137,8 @@ pub struct Paragraph {
     pub auto_space: bool,
     /// 行尾标点可以伸出右边距（`w:overflowPunct`，缺省 true）。
     pub overflow_punct: bool,
+    /// 自定义制表位，按位置升序。竖线位不在其中。
+    pub tabs: Vec<TabStop>,
     /// 本段挂了自动编号，但编号文字没有生成。
     pub numbering_dropped: bool,
     pub text: String,
@@ -177,6 +188,8 @@ pub struct Document {
     /// 相邻两段的段后距与段前距取较大值而不是相加（HTML 的规矩）。
     /// 文档没有设置 `w:doNotUseHTMLParagraphAutoSpacing` 时为真，见 `Calib::para_spacing`。
     pub html_paragraph_spacing: bool,
+    /// 默认制表位的间距（点）。`settings.xml` 没写时是 Word 的缺省 36pt。
+    pub default_tab_stop: f32,
     pub blocks: Vec<Block>,
 }
 
@@ -211,6 +224,7 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
         has_header_footer: s.has_header_footer,
         grid,
         html_paragraph_spacing: !doc.settings.no_html_paragraph_spacing,
+        default_tab_stop: doc.settings.default_tab_stop.map(tw).unwrap_or(36.0),
         blocks,
     }
 }
@@ -337,6 +351,16 @@ fn paragraph(
         // 而我们不在字符级区分这两类，统一按「非中日韩」处理。
         auto_space: ppr.auto_space_latin.unwrap_or(true) || ppr.auto_space_digits.unwrap_or(true),
         overflow_punct: ppr.overflow_punct.unwrap_or(true),
+        tabs: ppr
+            .tabs
+            .iter()
+            .filter(|t| !matches!(t.align, TabAlign::Bar | TabAlign::Clear))
+            .map(|t| TabStop {
+                pos: tw(t.pos),
+                align: t.align,
+                leader: t.leader,
+            })
+            .collect(),
         numbering_dropped: ppr.numbering,
         text,
         spans,

@@ -117,6 +117,9 @@ pub fn parse_settings(xml: &str) -> Settings {
             {
                 settings.no_html_paragraph_spacing = on_off(&e);
             }
+            Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == "defaultTabStop" => {
+                settings.default_tab_stop = attr_i32(&e, "val").filter(|v| *v > 0);
+            }
             Event::Eof => break,
             _ => {}
         }

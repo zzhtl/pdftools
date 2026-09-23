@@ -1141,3 +1141,77 @@ fn page_breaks_start_a_new_page() {
         top(2)
     );
 }
+
+/// 制表位：默认位按 `w:defaultTabStop` 从左边距起算；右对齐、小数点位把文字往回让；
+/// 前导符画成一串点。
+#[test]
+fn tabs_jump_to_their_stops() {
+    if !require_cjk_font() {
+        return;
+    }
+    let para = |tabs: &str, runs: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:tabs>{tabs}</w:tabs></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr>{runs}</w:r></w:p>"#
+        )
+    };
+    let body = para("", "<w:t>甲</w:t><w:tab/><w:t>乙</w:t>")
+        + &para(
+            r#"<w:tab w:val="right" w:leader="dot" w:pos="6000"/>"#,
+            "<w:t>丙</w:t><w:tab/><w:t>丁丁丁</w:t>",
+        )
+        + &para(
+            r#"<w:tab w:val="decimal" w:pos="5000"/>"#,
+            "<w:t>戊</w:t><w:tab/><w:t>1234.50</w:t>",
+        );
+    let path = DocxBuilder::new()
+        .body(&body)
+        .settings(r#"<w:defaultTabStop w:val="420"/>"#)
+        .build("tabs.docx");
+    let pages = common::pdftext::extract(&convert(&path).value.pdf);
+    let margin = 1588.0 / 20.0;
+    let glyphs = |first: char| -> Vec<(String, f32)> {
+        pages[0]
+            .lines
+            .iter()
+            .find(|l| l.text.starts_with(first))
+            .unwrap_or_else(|| panic!("找不到以「{first}」开头的行"))
+            .frags
+            .iter()
+            .flat_map(|f| f.glyphs.clone())
+            .collect()
+    };
+    let x = |g: &[(String, f32)], c: &str| g.iter().find(|(t, _)| t == c).unwrap().1 - margin;
+
+    let g = glyphs('甲');
+    assert!(
+        (x(&g, "乙") - 21.0).abs() < 0.01,
+        "默认制表位：{}",
+        x(&g, "乙")
+    );
+
+    let line = pages[0]
+        .lines
+        .iter()
+        .find(|l| l.text.starts_with('丙'))
+        .unwrap();
+    assert!(
+        (line.x1 - margin - 300.0).abs() < 0.01,
+        "右对齐制表位：文字右缘在 {}",
+        line.x1 - margin
+    );
+    let g = glyphs('丙');
+    let dots: Vec<f32> = g
+        .iter()
+        .filter(|(t, _)| t == ".")
+        .map(|(_, x)| *x - margin)
+        .collect();
+    assert!(dots.len() > 10, "前导点只有 {} 个", dots.len());
+    assert!(dots[0] >= 12.0 - 0.01 && *dots.last().unwrap() < x(&g, "丁"));
+
+    let g = glyphs('戊');
+    assert!(
+        (x(&g, ".") - 250.0).abs() < 0.01,
+        "小数点对齐：{}",
+        x(&g, ".")
+    );
+}

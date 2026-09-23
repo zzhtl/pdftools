@@ -2,9 +2,9 @@
 
 use std::ops::Range;
 
-use super::calib::{Breaks, Calib, EmptyPara, HangingPunct, Justify, TrailingSpaces};
+use super::calib::{Breaks, Calib, EmptyPara, HangingPunct, Justify, Tabs, TrailingSpaces};
 use super::metrics::line_box;
-use super::text::{self, Hang, Piece, ShapedPara};
+use super::text::{self, Hang, Piece, ShapedPara, TabRules};
 use super::PaintOp;
 use crate::docx::ir::{self, Align, Grid, LineSpacing};
 use crate::fonts::FontBook;
@@ -15,6 +15,8 @@ pub(super) struct Env<'a> {
     /// 栏左边缘的绝对 x（PDF 坐标）。
     pub left: f32,
     pub width: f32,
+    /// 默认制表位的间距（点）。
+    pub default_tab_stop: f32,
     pub calib: &'a Calib,
 }
 
@@ -46,7 +48,12 @@ pub(super) struct ParaBox {
 }
 
 pub(super) fn measure(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> ParaBox {
-    let shaped = text::shape(para, book, env.calib.breaks == Breaks::Typed);
+    let shaped = text::shape(
+        para,
+        book,
+        env.calib.breaks == Breaks::Typed,
+        env.calib.tabs == Tabs::Stops,
+    );
     let body = if !shaped.pieces.is_empty() {
         ParaBody::Lines(break_lines(para, &shaped, env, book))
     } else {
@@ -115,10 +122,29 @@ fn hang(para: &ir::Paragraph, calib: &Calib) -> Hang {
     }
 }
 
+fn tab_rules<'a>(para: &'a ir::Paragraph, env: &Env) -> TabRules<'a> {
+    TabRules {
+        stops: &para.tabs,
+        default: env.default_tab_stop,
+        implicit: (para.first_line < 0.0).then_some(para.indent_left),
+    }
+}
+
+/// 一行的起点，从正文区左缘量起。
+fn line_start(para: &ir::Paragraph, is_first: bool) -> f32 {
+    para.indent_left
+        + if is_first {
+            para.first_line.max(0.0)
+        } else {
+            0.0
+        }
+}
+
 fn break_lines(para: &ir::Paragraph, sp: &ShapedPara, env: &Env, book: &FontBook) -> Vec<Line> {
     let avail_first = env.width - para.indent_left - para.indent_right + para.first_line.min(0.0);
     let avail_rest = env.width - para.indent_left - para.indent_right;
     let first_indent = para.first_line.max(0.0);
+    let rules = tab_rules(para, env);
 
     let mut lines = Vec::new();
     let mut start = 0usize;
@@ -129,7 +155,13 @@ fn break_lines(para: &ir::Paragraph, sp: &ShapedPara, env: &Env, book: &FontBook
         } else {
             avail_rest
         };
-        let (end, mandatory) = sp.next_break(start, avail, hang(para, env.calib));
+        let (end, mandatory) = sp.next_break(
+            start,
+            avail,
+            hang(para, env.calib),
+            line_start(para, is_first),
+            &rules,
+        );
         let is_last = end >= sp.text.len();
         let mut l = line(
             para,
@@ -188,7 +220,14 @@ fn line(
 
     // 悬挂在右边距外的行尾空格、标点不参与对齐。
     let measured = range.start..sp.measured_end(range.start, range.end, hang(para, env.calib));
-    let line_width = sp.width(measured.start, measured.end);
+    let rules = tab_rules(para, env);
+    let has_tabs = sp.tabs.iter().any(|t| range.contains(t));
+    let line_width = if has_tabs {
+        let x0 = line_start(para, is_first);
+        sp.advance(measured.start, measured.end, x0, &rules) - x0
+    } else {
+        sp.width(measured.start, measured.end)
+    };
     let content_left = env.left + para.indent_left;
     let avail = env.width - para.indent_left - para.indent_right;
     let indent = if is_first {
@@ -203,8 +242,9 @@ fn line(
         Align::Right => content_left + avail - line_width,
     };
 
-    // 两端对齐：把剩余空间摊进字间。段落最后一行（以及换行符结束的行）不参与。
-    let slack = (para.align == Align::Justify && !suppress_justify)
+    // 两端对齐：把剩余空间摊进字间。段落最后一行（以及换行符结束的行）不参与；
+    // 有制表符的行也不参与 —— 制表位把文字钉在了固定位置上。
+    let slack = (para.align == Align::Justify && !suppress_justify && !has_tabs)
         .then_some(avail - indent - line_width)
         .filter(|s| *s > 0.0);
     let mut extras = match env.calib.justify {
@@ -213,9 +253,28 @@ fn line(
     }
     .into_iter();
 
+    // 跳制表位要知道当前 x 离正文区左缘多远；居中、右对齐的偏移整体加在后面。
+    let shift = x - (content_left + indent);
     let mut ops = Vec::new();
     for piece in active {
         let extra_after = extras.next().unwrap_or_default();
+        if has_tabs && &sp.text[piece.range.clone()] == "\t" {
+            let seg_end = sp
+                .tabs
+                .iter()
+                .copied()
+                .find(|t| *t > piece.range.start)
+                .unwrap_or(measured.end)
+                .min(measured.end)
+                .max(piece.range.end);
+            let from = x - shift - env.left;
+            let (to, stop) = sp.tab_target(from, piece.range.start, seg_end, &rules);
+            if let Some(op) = leader(piece, stop.leader, from, to, env.left + shift, book) {
+                ops.push(op);
+            }
+            x = env.left + shift + to;
+            continue;
+        }
         let glyphs = piece.glyphs_between(range.start, range.end);
         if glyphs.is_empty() {
             continue;
@@ -365,4 +424,45 @@ fn gap_extras(
         }
     }
     extras
+}
+
+/// 制表符前导符：从 `from` 到 `to`（从正文区左缘量起）填满一串同样的字符，右端对齐到 `to`。
+fn leader(
+    piece: &Piece,
+    kind: ir::TabLeader,
+    from: f32,
+    to: f32,
+    origin: f32,
+    book: &FontBook,
+) -> Option<PaintOp> {
+    let c = match kind {
+        ir::TabLeader::None => return None,
+        ir::TabLeader::Dot => ".",
+        ir::TabLeader::Hyphen => "-",
+        ir::TabLeader::Underscore | ir::TabLeader::Heavy => "_",
+        ir::TabLeader::MiddleDot => "·",
+    };
+    let face = book.face(piece.font);
+    let shaped = crate::fonts::shape_run(face, c, rustybuzz::script::LATIN);
+    let g = *shaped.glyphs.first()?;
+    let advance = g.x_advance as f32 * piece.size_pt / face.metrics().upem as f32;
+    if advance <= 0.0 {
+        return None;
+    }
+    let n = ((to - from) / advance).floor() as usize;
+    if n == 0 {
+        return None;
+    }
+    Some(PaintOp::Text {
+        font: piece.font,
+        size_pt: piece.size_pt,
+        x: origin + to - n as f32 * advance,
+        y: 0.0,
+        glyphs: vec![g; n],
+        unicode: vec![c.to_string(); n],
+        color: piece.color,
+        extra_after: vec![0.0; n],
+        synthetic_bold: piece.synthetic_bold,
+        synthetic_italic: piece.synthetic_italic,
+    })
 }

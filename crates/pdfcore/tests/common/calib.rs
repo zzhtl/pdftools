@@ -875,6 +875,193 @@ pub fn page_breaks() -> Vec<Measure> {
     v
 }
 
+/// 含「甲」的那一行里，字符 `c` 第一次出现的字形起点离左边距多远（左边距 1588 twips）。
+fn glyph_x(pages: &[PageText], c: &str) -> Option<f32> {
+    let line = pages
+        .iter()
+        .flat_map(|p| &p.lines)
+        .find(|l| l.text.contains('甲'))?;
+    line.frags
+        .iter()
+        .flat_map(|f| &f.glyphs)
+        .find(|(t, _)| t == c)
+        .map(|(_, x)| x - 1588.0 / 20.0)
+}
+
+/// 含「甲」的那一行里，最后一个字形的右缘离左边距多远。
+fn line_right(pages: &[PageText]) -> Option<f32> {
+    let line = pages
+        .iter()
+        .flat_map(|p| &p.lines)
+        .find(|l| l.text.contains('甲'))?;
+    Some(line.x1 - 1588.0 / 20.0)
+}
+
+/// P15：制表位。
+pub fn tabs() -> Vec<Measure> {
+    let para = |ppr: &str, runs: &str| {
+        format!(
+            r#"<w:p><w:pPr>{ppr}</w:pPr><w:r><w:rPr>{FONTS}<w:sz w:val="24"/></w:rPr>{runs}</w:r></w:p>"#
+        )
+    };
+    let tab_doc = |body: String, default_stop: Option<u32>| {
+        let settings = match default_stop {
+            Some(v) => format!(r#"<w:defaultTabStop w:val="{v}"/>{COMPAT_15}"#),
+            None => COMPAT_15.to_string(),
+        };
+        DocxBuilder::new().body(&body).settings(&settings)
+    };
+    let x_of = |c: &'static str| -> Extract { Box::new(move |p| glyph_x(p, c)) };
+    let mut v = vec![
+        Measure {
+            name: "P15 默认制表位 420".into(),
+            doc: tab_doc(para("", "<w:t>甲</w:t><w:tab/><w:t>乙</w:t>"), Some(420)),
+            unit: "pt",
+            value: x_of("乙"),
+        },
+        Measure {
+            name: "P15 默认制表位 不写".into(),
+            doc: tab_doc(para("", "<w:t>甲</w:t><w:tab/><w:t>乙</w:t>"), None),
+            unit: "pt",
+            value: x_of("乙"),
+        },
+        Measure {
+            name: "P15 两个制表符 420".into(),
+            doc: tab_doc(
+                para(
+                    "",
+                    "<w:t>甲</w:t><w:tab/><w:t>乙</w:t><w:tab/><w:t>丙</w:t>",
+                ),
+                Some(420),
+            ),
+            unit: "pt",
+            value: x_of("丙"),
+        },
+        Measure {
+            name: "P15 首行缩进 24pt 后的制表符 420".into(),
+            doc: tab_doc(
+                para(
+                    r#"<w:ind w:firstLine="480"/>"#,
+                    "<w:t>甲</w:t><w:tab/><w:t>乙</w:t>",
+                ),
+                Some(420),
+            ),
+            unit: "pt",
+            value: x_of("乙"),
+        },
+        Measure {
+            name: "P15 左缩进 50pt 后的制表符 420".into(),
+            doc: tab_doc(
+                para(
+                    r#"<w:ind w:left="1000"/>"#,
+                    "<w:t>甲</w:t><w:tab/><w:t>乙</w:t>",
+                ),
+                Some(420),
+            ),
+            unit: "pt",
+            value: x_of("乙"),
+        },
+        Measure {
+            name: "P15 悬挂缩进 左 42 悬挂 21".into(),
+            doc: tab_doc(
+                para(
+                    r#"<w:ind w:left="840" w:hanging="420"/>"#,
+                    "<w:t>甲</w:t><w:tab/><w:t>乙</w:t>",
+                ),
+                Some(420),
+            ),
+            unit: "pt",
+            value: x_of("乙"),
+        },
+        Measure {
+            name: "P15 自定义左对齐 150pt".into(),
+            doc: tab_doc(
+                para(
+                    r#"<w:tabs><w:tab w:val="left" w:pos="3000"/></w:tabs>"#,
+                    "<w:t>甲</w:t><w:tab/><w:t>乙</w:t>",
+                ),
+                Some(420),
+            ),
+            unit: "pt",
+            value: x_of("乙"),
+        },
+        Measure {
+            name: "P15 自定义右对齐 300pt 文字右缘".into(),
+            doc: tab_doc(
+                para(
+                    r#"<w:tabs><w:tab w:val="right" w:pos="6000"/></w:tabs>"#,
+                    "<w:t>甲</w:t><w:tab/><w:t>乙乙乙</w:t>",
+                ),
+                Some(420),
+            ),
+            unit: "pt",
+            value: Box::new(line_right),
+        },
+        Measure {
+            name: "P15 自定义居中 200pt 首字".into(),
+            doc: tab_doc(
+                para(
+                    r#"<w:tabs><w:tab w:val="center" w:pos="4000"/></w:tabs>"#,
+                    "<w:t>甲</w:t><w:tab/><w:t>乙乙乙乙</w:t>",
+                ),
+                Some(420),
+            ),
+            unit: "pt",
+            value: x_of("乙"),
+        },
+        Measure {
+            name: "P15 小数点对齐 250pt 小数点".into(),
+            doc: tab_doc(
+                para(
+                    r#"<w:tabs><w:tab w:val="decimal" w:pos="5000"/></w:tabs>"#,
+                    "<w:t>甲</w:t><w:tab/><w:t>1234.50</w:t>",
+                ),
+                Some(420),
+            ),
+            unit: "pt",
+            value: x_of("."),
+        },
+        Measure {
+            name: "P15 越过最后一个自定义位".into(),
+            doc: tab_doc(
+                para(
+                    r#"<w:tabs><w:tab w:val="left" w:pos="1000"/></w:tabs>"#,
+                    "<w:t>甲</w:t><w:tab/><w:t>乙</w:t><w:tab/><w:t>丙</w:t>",
+                ),
+                Some(420),
+            ),
+            unit: "pt",
+            value: x_of("丙"),
+        },
+        Measure {
+            name: "P15 前导点 右对齐 300pt 点数".into(),
+            doc: tab_doc(
+                para(
+                    r#"<w:tabs><w:tab w:val="right" w:leader="dot" w:pos="6000"/></w:tabs>"#,
+                    "<w:t>甲</w:t><w:tab/><w:t>乙</w:t>",
+                ),
+                Some(420),
+            ),
+            unit: "个",
+            value: Box::new(|p| {
+                let line = p
+                    .iter()
+                    .flat_map(|p| &p.lines)
+                    .find(|l| l.text.contains('甲'))?;
+                Some(line.text.chars().filter(|c| *c == '.' || *c == '·').count() as f32)
+            }),
+        },
+    ];
+    // 默认制表位前正好还差一点点：「甲」之后的第一个默认位离得太近时会不会跳到下一个。
+    v.push(Measure {
+        name: "P15 文字刚好越过默认位 420".into(),
+        doc: tab_doc(para("", "<w:t>甲乙</w:t><w:tab/><w:t>丙</w:t>"), Some(420)),
+        unit: "pt",
+        value: x_of("丙"),
+    });
+    v
+}
+
 pub fn all() -> Vec<Measure> {
     let mut v = empty_paragraphs();
     v.extend(default_size());
@@ -895,5 +1082,6 @@ pub fn all() -> Vec<Measure> {
     v.extend(punctuation_compression());
     v.extend(justification());
     v.extend(page_breaks());
+    v.extend(tabs());
     v
 }

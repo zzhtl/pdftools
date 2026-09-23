@@ -21,6 +21,21 @@ pub struct Calib {
     pub justify: Justify,
     pub breaks: Breaks,
     pub page_break_before: PageBreakBefore,
+    pub tabs: Tabs,
+}
+
+/// `w:tab` 怎么排。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tabs {
+    /// 每个制表符当一个全角空格。
+    IdeographicSpace,
+    /// 跳到下一个制表位：段落的自定义位优先，越过最后一个自定义位之后按
+    /// `w:defaultTabStop` 的整数倍（从正文区左缘量起，缩进不影响）；右对齐、居中、
+    /// 小数点位按后面那段文字的宽度往回让；前导符画成一串字符。
+    ///
+    /// 对照 LibreOffice 实测，默认位 21pt / 缺省 36pt、有首行缩进和左缩进、四种对齐、
+    /// 越过最后一个自定义位，误差都在 0.1pt 以内。
+    Stops,
 }
 
 /// `w:br` 的分页符、分栏符。
@@ -173,6 +188,7 @@ impl Calib {
             justify: Justify::Gaps,
             breaks: Breaks::Typed,
             page_break_before: PageBreakBefore::AnyPageTop,
+            tabs: Tabs::Stops,
         }
     }
 
@@ -189,6 +205,7 @@ impl Calib {
             justify: Justify::Legacy,
             breaks: Breaks::AsLineBreaks,
             page_break_before: PageBreakBefore::FirstPageTopOnly,
+            tabs: Tabs::IdeographicSpace,
         }
     }
 }

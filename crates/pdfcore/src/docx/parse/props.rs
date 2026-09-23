@@ -3,7 +3,7 @@
 use quick_xml::events::Event;
 
 use super::{attr, attr_i32, on_off, skip, xml_err, Rd};
-use crate::docx::model::{Align, DocGrid, LineRule, PPr, RPr, SectPr};
+use crate::docx::model::{Align, DocGrid, LineRule, PPr, RPr, SectPr, TabAlign, TabDef, TabLeader};
 use crate::error::Result;
 
 fn parse_color(s: &str) -> Option<[u8; 3]> {
@@ -105,6 +105,12 @@ pub(super) fn parse_ppr(r: &mut Rd) -> Result<(PPr, Option<SectPr>)> {
                 "autoSpaceDE" => ppr.auto_space_latin = Some(on_off(&e)),
                 "autoSpaceDN" => ppr.auto_space_digits = Some(on_off(&e)),
                 "overflowPunct" => ppr.overflow_punct = Some(on_off(&e)),
+                // 段落属性里的 `w:tab` 只会出现在 `w:tabs` 里。
+                "tab" => {
+                    if let Some(t) = parse_tab(&e) {
+                        ppr.tabs.push(t);
+                    }
+                }
                 _ => {}
             },
             Event::End(e) if e.local_name().as_ref() == "pPr" => break,
@@ -113,6 +119,31 @@ pub(super) fn parse_ppr(r: &mut Rd) -> Result<(PPr, Option<SectPr>)> {
         }
     }
     Ok((ppr, section))
+}
+
+fn parse_tab(e: &quick_xml::events::BytesStart) -> Option<TabDef> {
+    let align = match attr(e, "val")?.as_str() {
+        "left" | "start" | "num" => TabAlign::Left,
+        "center" => TabAlign::Center,
+        "right" | "end" => TabAlign::Right,
+        "decimal" => TabAlign::Decimal,
+        "bar" => TabAlign::Bar,
+        "clear" => TabAlign::Clear,
+        _ => return None,
+    };
+    let leader = match attr(e, "leader").as_deref() {
+        Some("dot") => TabLeader::Dot,
+        Some("hyphen") => TabLeader::Hyphen,
+        Some("underscore") => TabLeader::Underscore,
+        Some("middleDot") => TabLeader::MiddleDot,
+        Some("heavy") => TabLeader::Heavy,
+        _ => TabLeader::None,
+    };
+    Some(TabDef {
+        align,
+        leader,
+        pos: attr_i32(e, "pos")?,
+    })
 }
 
 pub(super) fn parse_sect_pr(r: &mut Rd) -> Result<SectPr> {

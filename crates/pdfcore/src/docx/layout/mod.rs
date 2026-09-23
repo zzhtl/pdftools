@@ -16,7 +16,7 @@ mod text;
 
 pub use calib::{
     Breaks, Calib, EmptyPara, FixedBaseline, GridLayout, HangingPunct, Justify, PageBottom,
-    PageBreakBefore, ParaSpacing, TrailingSpaces,
+    PageBreakBefore, ParaSpacing, Tabs, TrailingSpaces,
 };
 
 use super::ir;
@@ -79,6 +79,7 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
         grid: doc.grid,
         left: doc.page.margin_left,
         width: doc.page.content_width(),
+        default_tab_stop: doc.default_tab_stop,
         calib,
     };
     let collapse = doc.html_paragraph_spacing && calib.para_spacing == ParaSpacing::HtmlCollapse;
@@ -189,6 +190,7 @@ fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
         snap_to_grid: false,
         auto_space: true,
         overflow_punct: true,
+        tabs: Vec::new(),
         numbering_dropped: false,
         text,
         spans,
