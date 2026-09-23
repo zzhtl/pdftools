@@ -13,12 +13,20 @@
 //! cargo run -p pdfcore --example pdfdump -- --glyphs a.pdf
 //! ```
 //!
+//! `--paths` 打印画出来的线与面（边框、底纹、表格框线）：外框、颜色、线宽：
+//!
+//! ```text
+//! cargo run -p pdfcore --example pdfdump -- --paths a.pdf
+//! ```
+//!
 //! 解析与比对代码与集成测试共用（`tests/common/`），手工看到的和测试断言的是同一个东西。
 
 #![allow(dead_code)]
 
 #[path = "../tests/common/metrics.rs"]
 mod metrics;
+#[path = "../tests/common/pdfpaths.rs"]
+mod pdfpaths;
 #[path = "../tests/common/pdftext.rs"]
 mod pdftext;
 #[path = "../tests/common/raster.rs"]
@@ -26,14 +34,25 @@ mod raster;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let glyphs = args.first().is_some_and(|a| a == "--glyphs");
-    if glyphs {
+    let mode = match args.first().map(String::as_str) {
+        Some(m @ ("--glyphs" | "--paths")) => Some(m.to_string()),
+        _ => None,
+    };
+    if mode.is_some() {
         args.remove(0);
     }
-    if args.is_empty() || args.len() > 2 || (glyphs && args.len() != 1) {
-        eprintln!("用法：pdfdump [--glyphs] a.pdf [b.pdf]");
+    if args.is_empty() || args.len() > 2 || (mode.is_some() && args.len() != 1) {
+        eprintln!("用法：pdfdump [--glyphs | --paths] a.pdf [b.pdf]");
         std::process::exit(2);
     }
+    if mode.as_deref() == Some("--paths") {
+        print!(
+            "{}",
+            pdfpaths::dump(&pdfpaths::extract(&std::fs::read(&args[0])?))
+        );
+        return Ok(());
+    }
+    let glyphs = mode.is_some();
     if glyphs {
         for (i, page) in pdftext::extract(&std::fs::read(&args[0])?)
             .iter()
