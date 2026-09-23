@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use crate::bail_if_cancelled;
 use crate::error::{CoreError, Report, Result, Warning, WarningKind};
-use crate::imaging::{prepare_for_pdf, read_time, Fidelity, Tier};
-use crate::pdf::writer::{image::write_image, DocBuilder, DocInfo, PageSpec};
+use crate::imaging::{prepare_for_pdf, read_time, ColorData, Fidelity, Tier};
+use crate::pdf::writer::{DocBuilder, DocInfo, ImageData, ImageEncoding, PageSpec};
 use crate::progress::{Progress, ProgressSink};
 use crate::timestamp::{DatedFile, TimeSource, Timestamp};
 
@@ -101,10 +101,17 @@ pub fn run(
             times.push(t);
         }
 
-        let image_ref = {
-            let (pdf, alloc) = doc.parts();
-            write_image(pdf, alloc, &prepared)
+        let (encoding, gray) = match &prepared.color {
+            ColorData::Jpeg { bytes, gray } => (ImageEncoding::Jpeg(bytes), *gray),
+            ColorData::Raw { bytes, gray } => (ImageEncoding::Raw(bytes), *gray),
         };
+        let image_ref = doc.add_image(&ImageData {
+            width: prepared.width,
+            height: prepared.height,
+            gray,
+            encoding,
+            alpha: prepared.alpha.as_deref(),
+        });
 
         let mut page = PageSpec::new(prepared.page_w_pt, prepared.page_h_pt);
         page.images.push(("Im0".into(), image_ref));

@@ -10,6 +10,8 @@ pub mod text;
 
 use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref};
 
+pub use image::{ImageData, ImageEncoding};
+
 use crate::error::Result;
 
 /// 间接引用分配器。PDF 的对象编号从 1 开始。
@@ -114,6 +116,15 @@ impl DocBuilder {
     /// 两者必须同时可变借用。分开成两个方法会被借用检查器拒绝。
     pub fn parts(&mut self) -> (&mut Pdf, &mut RefAlloc) {
         (&mut self.pdf, &mut self.alloc)
+    }
+
+    /// 写入一张图，返回 XObject 的对象号。
+    ///
+    /// 这里不做去重：同一张图被多处引用时（页眉里的 logo），由调用方按确切的来源
+    /// （比如 docx 里的媒体部件名）缓存对象号。按内容哈希去重哪怕碰撞概率再低，
+    /// 也可能把一张证据图悄悄换成另一张。
+    pub fn add_image(&mut self, img: &ImageData) -> Ref {
+        image::write_image(&mut self.pdf, &mut self.alloc, img)
     }
 
     pub fn add_page(&mut self, spec: PageSpec) {
