@@ -804,6 +804,77 @@ pub fn justification() -> Vec<Measure> {
     v
 }
 
+/// P14：`w:br` 的分页符、分栏符之后，「乙」在第几页、离正文顶多远。
+pub fn page_breaks() -> Vec<Measure> {
+    let run =
+        |inner: &str| format!(r#"<w:r><w:rPr>{FONTS}<w:sz w:val="24"/></w:rPr>{inner}</w:r>"#);
+    let cases = [
+        (
+            "段中分页符",
+            format!(
+                "<w:p>{}</w:p>",
+                run(r#"<w:t>标记甲行</w:t><w:br w:type="page"/><w:t>标记乙行</w:t>"#)
+            ),
+        ),
+        (
+            "段末分页符",
+            format!(
+                "<w:p>{}</w:p>{}",
+                run(r#"<w:t>标记甲行</w:t><w:br w:type="page"/>"#),
+                marker("乙")
+            ),
+        ),
+        (
+            "只有分页符的段落",
+            format!(
+                "{}<w:p>{}</w:p>{}",
+                marker("甲"),
+                run(r#"<w:br w:type="page"/>"#),
+                marker("乙")
+            ),
+        ),
+        (
+            "分页符后接段前分页",
+            format!(
+                r#"<w:p>{}</w:p><w:p><w:pPr><w:pageBreakBefore/></w:pPr>{}</w:p>"#,
+                run(r#"<w:t>标记甲行</w:t><w:br w:type="page"/>"#),
+                run("<w:t>标记乙行</w:t>")
+            ),
+        ),
+        (
+            "分页符所在段有段后距",
+            format!(
+                r#"<w:p><w:pPr><w:spacing w:after="480"/></w:pPr>{}</w:p>{}"#,
+                run(r#"<w:t>标记甲行</w:t><w:br w:type="page"/>"#),
+                marker("乙")
+            ),
+        ),
+        (
+            "单栏里的分栏符",
+            format!(
+                "<w:p>{}</w:p>",
+                run(r#"<w:t>标记甲行</w:t><w:br w:type="column"/><w:t>标记乙行</w:t>"#)
+            ),
+        ),
+    ];
+    let mut v = Vec::new();
+    for (label, body) in cases {
+        v.push(Measure {
+            name: format!("P14 {label} 乙所在页"),
+            doc: doc(body.clone(), false),
+            unit: "页",
+            value: Box::new(|p| baseline(p, "乙").map(|(pg, _)| pg as f32 + 1.0)),
+        });
+        v.push(Measure {
+            name: format!("P14 {label} 乙离正文顶"),
+            doc: doc(body, false),
+            unit: "pt",
+            value: Box::new(|p| baseline(p, "乙").map(|(pg, y)| p[pg].height - 72.0 - y)),
+        });
+    }
+    v
+}
+
 pub fn all() -> Vec<Measure> {
     let mut v = empty_paragraphs();
     v.extend(default_size());
@@ -823,5 +894,6 @@ pub fn all() -> Vec<Measure> {
     v.extend(hanging_positions());
     v.extend(punctuation_compression());
     v.extend(justification());
+    v.extend(page_breaks());
     v
 }

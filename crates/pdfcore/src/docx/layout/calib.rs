@@ -19,6 +19,31 @@ pub struct Calib {
     pub trailing_spaces: TrailingSpaces,
     pub hanging_punct: HangingPunct,
     pub justify: Justify,
+    pub breaks: Breaks,
+    pub page_break_before: PageBreakBefore,
+}
+
+/// `w:br` 的分页符、分栏符。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Breaks {
+    /// 都当成换行。
+    AsLineBreaks,
+    /// 分页符之后的内容从下一页开始；单栏的节里分栏符也是这样。
+    ///
+    /// 对照 LibreOffice 实测：段中、段末、独占一段的分页符，后面的文字都在下一页的
+    /// 正文顶；只有分页符的那一段，段落标记不会在下一页再占一行；分页符所在段的
+    /// 段后距不带到新页上。
+    Typed,
+}
+
+/// `w:pageBreakBefore` 什么时候不另起新页。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageBreakBefore {
+    /// 只在文档第一页的页首。
+    FirstPageTopOnly,
+    /// 在任何一页的页首都不另起：分页符后面紧跟一个段前分页的段落，
+    /// LibreOffice 不会多出一张空白页。
+    AnyPageTop,
 }
 
 /// 两端对齐把一行剩下的空间分给哪些间隙。
@@ -146,6 +171,8 @@ impl Calib {
             trailing_spaces: TrailingSpaces::Hang,
             hanging_punct: HangingPunct::Punctuation,
             justify: Justify::Gaps,
+            breaks: Breaks::Typed,
+            page_break_before: PageBreakBefore::AnyPageTop,
         }
     }
 
@@ -160,6 +187,8 @@ impl Calib {
             trailing_spaces: TrailingSpaces::Counted,
             hanging_punct: HangingPunct::Never,
             justify: Justify::Legacy,
+            breaks: Breaks::AsLineBreaks,
+            page_break_before: PageBreakBefore::FirstPageTopOnly,
         }
     }
 }

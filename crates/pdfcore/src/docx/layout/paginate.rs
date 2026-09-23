@@ -1,5 +1,6 @@
 //! 分页：把测量好的块按顺序放进页面。
 
+use super::calib::{Calib, PageBreakBefore};
 use super::para::{Line, ParaBody, ParaBox};
 use super::Page;
 use crate::docx::ir::PageGeom;
@@ -17,11 +18,17 @@ pub(super) struct Paginator<'a> {
     collapse_spacing: bool,
     /// 当前页上刚加过的段后距。取较大值时，下一段的段前距只补差额。
     last_after: f32,
+    page_break_before: PageBreakBefore,
 }
 
 impl<'a> Paginator<'a> {
     /// `area` 是正文区：(离版心顶端的偏移, 高度)。
-    pub fn new(page: &'a PageGeom, (origin, capacity): (f32, f32), collapse_spacing: bool) -> Self {
+    pub fn new(
+        page: &'a PageGeom,
+        (origin, capacity): (f32, f32),
+        collapse_spacing: bool,
+        calib: &Calib,
+    ) -> Self {
         Self {
             page,
             origin,
@@ -30,6 +37,7 @@ impl<'a> Paginator<'a> {
             used: 0.0,
             collapse_spacing,
             last_after: 0.0,
+            page_break_before: calib.page_break_before,
         }
     }
 
@@ -52,8 +60,11 @@ impl<'a> Paginator<'a> {
     }
 
     pub fn place_para(&mut self, para: &ParaBox) {
-        // 只有文档第一页的页首不另起新页。与重写前一致。
-        if para.page_break_before && !(self.at_page_top() && self.pages.len() == 1) {
+        let at_top = match self.page_break_before {
+            PageBreakBefore::FirstPageTopOnly => self.at_page_top() && self.pages.len() == 1,
+            PageBreakBefore::AnyPageTop => self.at_page_top(),
+        };
+        if para.page_break_before && !at_top {
             self.new_page();
         }
         // 段前距在页首也照常生效。
@@ -82,6 +93,13 @@ impl<'a> Paginator<'a> {
                         self.commit(line);
                     }
                     next += n;
+                    if lines[next - 1].page_break_after {
+                        self.new_page();
+                        // 段落以分页符结束：段后距不带到新页上。
+                        if next == lines.len() {
+                            return;
+                        }
+                    }
                 }
             }
         }
@@ -113,6 +131,10 @@ fn fit_lines(lines: &[Line], mut used: f32, content_height: f32) -> usize {
         }
         used += line.height;
         n += 1;
+        // 分页符之后的行放到下一页。
+        if line.page_break_after {
+            break;
+        }
     }
     n
 }
@@ -128,6 +150,7 @@ mod tests {
                 height,
                 baseline: height * 0.8,
                 fit_height: height,
+                page_break_after: false,
                 ops: Vec::new(),
             })
             .collect()
@@ -158,6 +181,7 @@ mod tests {
             height,
             baseline: 20.0,
             fit_height,
+            page_break_after: false,
             ops: Vec::new(),
         };
         let l = [line(40.56, 31.2), line(40.56, 31.2)];

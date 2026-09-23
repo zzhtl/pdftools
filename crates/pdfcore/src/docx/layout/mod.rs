@@ -15,8 +15,8 @@ mod para;
 mod text;
 
 pub use calib::{
-    Calib, EmptyPara, FixedBaseline, GridLayout, HangingPunct, Justify, PageBottom, ParaSpacing,
-    TrailingSpaces,
+    Breaks, Calib, EmptyPara, FixedBaseline, GridLayout, HangingPunct, Justify, PageBottom,
+    PageBreakBefore, ParaSpacing, TrailingSpaces,
 };
 
 use super::ir;
@@ -82,7 +82,7 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
         calib,
     };
     let collapse = doc.html_paragraph_spacing && calib.para_spacing == ParaSpacing::HtmlCollapse;
-    let mut pages = paginate::Paginator::new(&doc.page, grid_area(doc, calib), collapse);
+    let mut pages = paginate::Paginator::new(&doc.page, grid_area(doc, calib), collapse, calib);
     let mut warnings = Vec::new();
 
     let mut numbered = 0usize;

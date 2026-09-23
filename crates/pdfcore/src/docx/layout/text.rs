@@ -194,7 +194,12 @@ impl ShapedPara {
     }
 }
 
-pub(super) fn shape(para: &ir::Paragraph, book: &mut FontBook) -> ShapedPara {
+/// 分页符、分栏符：以它们结尾的行之后要换页。
+pub(super) fn is_page_break(c: char) -> bool {
+    c == ir::PAGE_BREAK || c == ir::COLUMN_BREAK
+}
+
+pub(super) fn shape(para: &ir::Paragraph, book: &mut FontBook, typed_breaks: bool) -> ShapedPara {
     let mut text = String::with_capacity(para.text.len());
     let mut spans: Vec<(Range<usize>, &ir::RunStyle)> = Vec::with_capacity(para.spans.len());
     for span in &para.spans {
@@ -202,10 +207,12 @@ pub(super) fn shape(para: &ir::Paragraph, book: &mut FontBook) -> ShapedPara {
         let symbol = symbol_font_of(&span.style, book);
         for c in para.text[span.range.clone()].chars() {
             text.push(match c {
-                // 与重写前一致：制表符当一个全角空格，真正的制表位还没做；
-                // 分页符、分栏符也只当换行。
+                // 与重写前一致：制表符当一个全角空格，真正的制表位还没做。
                 '\t' => '\u{3000}',
-                ir::LINE_BREAK | ir::PAGE_BREAK | ir::COLUMN_BREAK => '\n',
+                ir::LINE_BREAK => '\n',
+                // 分页符、分栏符本身就是强制断行点（UAX #14 的 BK），也不绘制；
+                // 旧规则把它们都当换行。
+                ir::PAGE_BREAK | ir::COLUMN_BREAK if !typed_breaks => '\n',
                 c => symbol
                     .and_then(|family| pua::symbol_to_unicode(family, c))
                     .unwrap_or(c),

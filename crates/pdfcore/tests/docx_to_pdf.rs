@@ -1111,3 +1111,33 @@ fn justification_stretches_spaces_or_cjk_gaps_but_not_inside_words() {
     }
     assert!(gap.abs() < 0.05, "可见文字应当排满到右边距，差 {gap}pt");
 }
+
+/// `w:br w:type="page"`：之后的文字从下一页的正文顶开始；紧跟着的段前分页
+/// 不再多出一张空白页。
+#[test]
+fn page_breaks_start_a_new_page() {
+    if !require_cjk_font() {
+        return;
+    }
+    let run = |inner: &str| {
+        format!(
+            r#"<w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr>{inner}</w:r>"#
+        )
+    };
+    let body = format!(
+        r#"<w:p>{}</w:p><w:p><w:pPr><w:pageBreakBefore/></w:pPr>{}</w:p>"#,
+        run(r#"<w:t>第一页</w:t><w:br w:type="page"/><w:t>第二页</w:t><w:br w:type="page"/>"#),
+        run("<w:t>第三页</w:t>")
+    );
+    let pages = common::pdftext::extract(&convert(&make_docx("page_break.docx", &body)).value.pdf);
+    let texts: Vec<String> = pages.iter().map(|p| p.text()).collect();
+    assert_eq!(texts, ["第一页", "第二页", "第三页"]);
+    let top = |i: usize| pages[i].lines[0].y;
+    assert!(
+        (top(0) - top(1)).abs() < 0.01 && (top(1) - top(2)).abs() < 0.01,
+        "每页的首行应当在同一高度：{} {} {}",
+        top(0),
+        top(1),
+        top(2)
+    );
+}

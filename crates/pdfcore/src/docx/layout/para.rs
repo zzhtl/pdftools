@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use super::calib::{Calib, EmptyPara, HangingPunct, Justify, TrailingSpaces};
+use super::calib::{Breaks, Calib, EmptyPara, HangingPunct, Justify, TrailingSpaces};
 use super::metrics::line_box;
 use super::text::{self, Hang, Piece, ShapedPara};
 use super::PaintOp;
@@ -25,6 +25,8 @@ pub(super) struct Line {
     pub baseline: f32,
     /// 页底要容得下的高度（不超过 `height`）。
     pub fit_height: f32,
+    /// 本行以分页符结尾：放下之后换页。
+    pub page_break_after: bool,
     pub ops: Vec<PaintOp>,
 }
 
@@ -44,7 +46,7 @@ pub(super) struct ParaBox {
 }
 
 pub(super) fn measure(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> ParaBox {
-    let shaped = text::shape(para, book);
+    let shaped = text::shape(para, book, env.calib.breaks == Breaks::Typed);
     let body = if !shaped.pieces.is_empty() {
         ParaBody::Lines(break_lines(para, &shaped, env, book))
     } else {
@@ -100,6 +102,7 @@ fn mark_line(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> Option<Lin
         height: b.height,
         baseline: b.baseline,
         fit_height: b.fit_height,
+        page_break_after: false,
         ops: Vec::new(),
     })
 }
@@ -128,7 +131,7 @@ fn break_lines(para: &ir::Paragraph, sp: &ShapedPara, env: &Env, book: &FontBook
         };
         let (end, mandatory) = sp.next_break(start, avail, hang(para, env.calib));
         let is_last = end >= sp.text.len();
-        lines.push(line(
+        let mut l = line(
             para,
             sp,
             start..end,
@@ -137,7 +140,13 @@ fn break_lines(para: &ir::Paragraph, sp: &ShapedPara, env: &Env, book: &FontBook
             is_first,
             is_last || mandatory,
             is_last,
-        ));
+        );
+        l.page_break_after = mandatory
+            && sp.text[start..end]
+                .chars()
+                .next_back()
+                .is_some_and(text::is_page_break);
+        lines.push(l);
         start = end;
         is_first = false;
     }
@@ -259,6 +268,7 @@ fn line(
         height: metrics.height,
         baseline: metrics.baseline,
         fit_height: metrics.fit_height,
+        page_break_after: false,
         ops,
     }
 }
