@@ -25,6 +25,8 @@ pub struct Frag {
     /// BaseFont，去掉了子集前缀（`ABCDEF+`）。
     pub font: String,
     pub text: String,
+    /// 每个字形的原文与起点 x。量两端对齐把空间分到了哪里时用。
+    pub glyphs: Vec<(String, f32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -264,16 +266,24 @@ impl State {
         self.tm = mul([1.0, 0.0, 0.0, 1.0, tx, 0.0], self.tm);
     }
 
-    fn show_bytes(&mut self, font: &FontDec, bytes: &[u8], text: &mut String) {
+    fn show_bytes(
+        &mut self,
+        font: &FontDec,
+        bytes: &[u8],
+        text: &mut String,
+        glyphs: &mut Vec<(String, f32)>,
+    ) {
         let step = if font.two_byte { 2 } else { 1 };
         for chunk in bytes.chunks(step) {
             let code = be(chunk);
+            let before = text.len();
             match font.to_unicode.get(&code) {
                 Some(s) => text.push_str(s),
                 // 没有 ToUnicode 的简单字体：按 Latin-1 近似（WinAnsi 在可打印区与之一致）。
                 None if !font.two_byte => text.push(code as u8 as char),
                 None => {}
             }
+            glyphs.push((text[before..].to_string(), self.origin().0));
             let w = font.width(code) / 1000.0;
             let word = if !font.two_byte && code == 32 {
                 self.tw
@@ -289,14 +299,17 @@ impl State {
         let size = self.size * (m[2] * m[2] + m[3] * m[3]).sqrt();
         let (x, y) = self.origin();
         let mut text = String::new();
+        let mut glyphs = Vec::new();
 
         for o in operands {
             match o {
-                Object::String(bytes, _) => self.show_bytes(font, bytes, &mut text),
+                Object::String(bytes, _) => self.show_bytes(font, bytes, &mut text, &mut glyphs),
                 Object::Array(items) => {
                     for it in items {
                         match it {
-                            Object::String(bytes, _) => self.show_bytes(font, bytes, &mut text),
+                            Object::String(bytes, _) => {
+                                self.show_bytes(font, bytes, &mut text, &mut glyphs)
+                            }
                             other => {
                                 if let Ok(adj) = other.as_float() {
                                     self.advance(-adj / 1000.0 * self.size * self.th);
@@ -320,6 +333,7 @@ impl State {
             size,
             font: font.base.clone(),
             text,
+            glyphs,
         })
     }
 }

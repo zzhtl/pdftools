@@ -697,6 +697,113 @@ pub fn punctuation_compression() -> Vec<Measure> {
     .collect()
 }
 
+/// 以 `first` 开头的那一行里每个字形的 (原文, x)。
+fn line_glyphs(pages: &[PageText], first: &str) -> Option<Vec<(String, f32)>> {
+    pages
+        .iter()
+        .flat_map(|p| &p.lines)
+        .find(|l| l.text.starts_with(first))
+        .map(|l| {
+            l.frags
+                .iter()
+                .flat_map(|f| f.glyphs.iter().cloned())
+                .collect()
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GapKind {
+    Cjk,
+    LatinInner,
+    AfterSpace,
+    BeforeSpace,
+    CjkLatin,
+}
+
+fn gap_kind(a: &str, b: &str) -> Option<GapKind> {
+    let cjk = |s: &str| {
+        s.chars().next().is_some_and(|c| {
+            ('\u{3000}'..='\u{9fff}').contains(&c) || ('\u{ff00}'..='\u{ffef}').contains(&c)
+        })
+    };
+    let latin = |s: &str| s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric());
+    Some(match (a, b) {
+        (" ", _) => GapKind::AfterSpace,
+        (_, " ") => GapKind::BeforeSpace,
+        _ if cjk(a) && cjk(b) => GapKind::Cjk,
+        _ if latin(a) && latin(b) => GapKind::LatinInner,
+        _ if (cjk(a) && latin(b)) || (latin(a) && cjk(b)) => GapKind::CjkLatin,
+        _ => return None,
+    })
+}
+
+/// 两端对齐比左对齐在每个字形之后多加了多少（按间隙种类取平均）。
+/// 文档里同一段文字排两遍：以「甲」开头的左对齐、以「乙」开头的两端对齐。
+fn justify_extra(pages: &[PageText], kind: GapKind) -> Option<f32> {
+    let left = line_glyphs(pages, "甲")?;
+    let just = line_glyphs(pages, "乙")?;
+    let n = left.len().min(just.len());
+    let extra: Vec<f32> = (0..n).map(|i| just[i].1 - left[i].1).collect();
+    let deltas: Vec<f32> = (0..n.saturating_sub(1))
+        .filter(|&i| gap_kind(&left[i].0, &left[i + 1].0) == Some(kind))
+        .map(|i| extra[i + 1] - extra[i])
+        .collect();
+    (!deltas.is_empty()).then(|| deltas.iter().sum::<f32>() / deltas.len() as f32)
+}
+
+/// P13：两端对齐把一行剩下的空间分到哪里。
+pub fn justification() -> Vec<Measure> {
+    let variants: [(&str, String, &[GapKind]); 4] = [
+        (
+            "纯中文",
+            "测试两端对齐的分配规则".repeat(12),
+            &[GapKind::Cjk],
+        ),
+        (
+            "中文夹西文词",
+            "测试两端对齐Word分配规则ABC".repeat(10),
+            &[GapKind::Cjk, GapKind::LatinInner, GapKind::CjkLatin],
+        ),
+        (
+            "中西混排带空格",
+            "测试两端对齐 word 与 space 的分配 ".repeat(10),
+            &[
+                GapKind::Cjk,
+                GapKind::LatinInner,
+                GapKind::AfterSpace,
+                GapKind::BeforeSpace,
+            ],
+        ),
+        (
+            "纯西文",
+            "justification spreads extra space between words ".repeat(8),
+            &[
+                GapKind::LatinInner,
+                GapKind::AfterSpace,
+                GapKind::BeforeSpace,
+            ],
+        ),
+    ];
+    let mut v = Vec::new();
+    for (label, text, kinds) in variants {
+        let para = |first: &str, jc: &str| {
+            format!(
+                r#"<w:p><w:pPr><w:jc w:val="{jc}"/></w:pPr><w:r><w:rPr>{FONTS}<w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">{first}{text}</w:t></w:r></w:p>"#
+            )
+        };
+        let body = para("甲", "left") + &para("乙", "both");
+        for &kind in kinds {
+            v.push(Measure {
+                name: format!("P13 {label} {kind:?}"),
+                doc: doc(body.clone(), false),
+                unit: "pt",
+                value: Box::new(move |p| justify_extra(p, kind)),
+            });
+        }
+    }
+    v
+}
+
 pub fn all() -> Vec<Measure> {
     let mut v = empty_paragraphs();
     v.extend(default_size());
@@ -715,5 +822,6 @@ pub fn all() -> Vec<Measure> {
     v.extend(hanging_punctuation());
     v.extend(hanging_positions());
     v.extend(punctuation_compression());
+    v.extend(justification());
     v
 }
