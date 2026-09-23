@@ -1,6 +1,6 @@
 //! 行框：一行多高、基线在行框里的哪个位置。纯函数，只依赖字体度量与段落设置。
 
-use super::calib::{Calib, GridLayout, PageBottom};
+use super::calib::{Calib, FixedBaseline, GridLayout, PageBottom};
 use crate::docx::ir::{Grid, LineSpacing};
 
 /// 一行的竖向度量，单位点。
@@ -58,6 +58,13 @@ pub(super) fn line_box(
         GridLayout::Legacy => snap_extra,
         GridLayout::Centered => snap_extra / 2.0,
     };
+    let baseline = match (calib.fixed_baseline, spacing) {
+        (FixedBaseline::Measured, LineSpacing::Exact(pt)) => 0.8 * pt,
+        (FixedBaseline::Measured, LineSpacing::AtLeast(pt)) if pt > natural => {
+            ascent + above + (pt - natural)
+        }
+        _ => ascent + above,
+    };
     // 倍数多出来的空白都在文字下方（见上），它越不越过页底由规则决定。
     let fit_height = match (calib.page_bottom, spacing) {
         (PageBottom::TextOnly, LineSpacing::Multiple(_)) => height.min(natural),
@@ -65,7 +72,7 @@ pub(super) fn line_box(
     };
     LineBox {
         height,
-        baseline: ascent + above,
+        baseline,
         fit_height,
     }
 }
@@ -155,6 +162,29 @@ mod tests {
             &calib,
         );
         assert!((b.baseline - 13.812).abs() < 1e-4, "{b:?}");
+    }
+
+    /// 固定行距：基线在行高的 80% 处；最小行距撑高时多出的高度在文字上方。
+    #[test]
+    fn fixed_and_at_least_spacing_place_the_baseline_like_the_reference() {
+        let calib = Calib {
+            fixed_baseline: FixedBaseline::Measured,
+            ..Calib::legacy()
+        };
+        let (nat, asc) = (17.244, 13.812);
+        for (spacing, height, baseline) in [
+            (LineSpacing::Exact(30.0), 30.0, 24.0),
+            (LineSpacing::Exact(10.0), 10.0, 8.0),
+            (LineSpacing::AtLeast(30.0), 30.0, 13.812 + (30.0 - 17.244)),
+            // 自然行高已经够高：与单倍行距一样。
+            (LineSpacing::AtLeast(10.0), 17.244, 13.812),
+        ] {
+            let b = line_box(nat, asc, None, false, spacing, false, &calib);
+            assert!(
+                (b.height - height).abs() < 1e-3 && (b.baseline - baseline).abs() < 1e-3,
+                "{spacing:?}: {b:?}"
+            );
+        }
     }
 
     /// 自然行高正好落在网格整数倍上时不再多占一格。

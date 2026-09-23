@@ -15,6 +15,21 @@ pub struct Calib {
     pub grid: GridLayout,
     pub para_spacing: ParaSpacing,
     pub page_bottom: PageBottom,
+    pub fixed_baseline: FixedBaseline,
+}
+
+/// 固定行距、最小行距时，基线在行框里的位置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixedBaseline {
+    /// 与单倍行距一样摆，多出来（或少掉）的高度全在基线下方。
+    Legacy,
+    /// 对照 LibreOffice 实测（12pt 正文，固定 30pt / 10pt、最小 30pt / 10pt）：
+    /// - 固定行距：基线在行高的 80% 处，多出或少掉的高度按 8:2 分在基线上下；
+    /// - 最小行距把行撑高时，多出来的高度全在文字上方。
+    ///
+    /// 有行网格时 LibreOffice 干脆忽略固定行距与最小行距、照样吸附网格。这里没有跟：
+    /// Word 在这种情况下怎么排没有实测过，而固定行距是作者明确写下的数值，以它为准。
+    Measured,
 }
 
 /// 页底最后一行怎样才算放得下。
@@ -86,6 +101,7 @@ impl Calib {
             grid: GridLayout::Centered,
             para_spacing: ParaSpacing::HtmlCollapse,
             page_bottom: PageBottom::TextOnly,
+            fixed_baseline: FixedBaseline::Measured,
         }
     }
 
@@ -96,6 +112,7 @@ impl Calib {
             grid: GridLayout::Legacy,
             para_spacing: ParaSpacing::Sum,
             page_bottom: PageBottom::WholeLine,
+            fixed_baseline: FixedBaseline::Legacy,
         }
     }
 }
