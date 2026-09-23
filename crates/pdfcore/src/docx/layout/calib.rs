@@ -35,6 +35,20 @@ pub struct Calib {
     pub sections: Sections,
     pub header_footer: HeaderFooter,
     pub kerning: Kerning,
+    pub line_gap: LineGap,
+}
+
+/// 字体的行间距（hhea 的 lineGap，Liberation Serif 每 em 约 0.04）放在字的上面还是下面。
+/// 行高都算上它，只是基线的位置不同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineGap {
+    /// 放在下面：基线离行顶一个上伸。
+    Below,
+    /// 放在上面：基线离行顶「上伸 + 行间距」。对照 LibreOffice 实测：只有西文的行
+    /// 基线比放在下面低一个行间距（Liberation Serif 12pt 低 0.52pt、24pt 低 1.03pt，
+    /// Liberation Sans 12pt 低 0.40pt），多行段落每行都如此，有网格时也一样；
+    /// 夹着汉字的行由中文字体的上伸决定，不受影响。
+    Above,
 }
 
 /// 字距调整（字体里的 kern 对，如 AV、To、11）。
@@ -386,6 +400,7 @@ impl Calib {
             sections: Sections::Each,
             header_footer: HeaderFooter::Drawn,
             kerning: Kerning::Word,
+            line_gap: LineGap::Above,
         }
     }
 
@@ -416,6 +431,7 @@ impl Calib {
             sections: Sections::Last,
             header_footer: HeaderFooter::Warned,
             kerning: Kerning::Always,
+            line_gap: LineGap::Below,
         }
     }
 }

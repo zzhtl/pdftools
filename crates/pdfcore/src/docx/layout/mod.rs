@@ -17,8 +17,9 @@ mod text;
 
 pub use calib::{
     AutoSpace, Breaks, Calib, Cascade, CharClass, Decor, EmptyPara, FixedBaseline, Flow,
-    GridLayout, HangingIndent, HangingPunct, HeaderFooter, Justify, Kerning, ListNumbers, Overflow,
-    PageBottom, PageBreakBefore, ParaSpacing, RunFormat, Sections, Tabs, Theme, TrailingSpaces,
+    GridLayout, HangingIndent, HangingPunct, HeaderFooter, Justify, Kerning, LineGap, ListNumbers,
+    Overflow, PageBottom, PageBreakBefore, ParaSpacing, RunFormat, Sections, Tabs, Theme,
+    TrailingSpaces,
 };
 
 use super::ir;
@@ -621,5 +622,40 @@ fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
         text,
         spans,
         mark: style,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 西文字体的行间距算在字的上面：基线离行顶「上伸 + 行间距」。
+    /// 重写前的规则把它算在下面。
+    #[test]
+    fn line_gap_sits_above_the_text() {
+        let mut book = FontBook::new();
+        let p = placeholder_para("Abc".into(), false);
+        for (calib, above) in [(Calib::current(), true), (Calib::legacy(), false)] {
+            let env = para::Env {
+                grid: None,
+                left: 0.0,
+                width: 400.0,
+                default_tab_stop: 36.0,
+                calib: &calib,
+            };
+            let b = para::measure(&p, &env, &mut book);
+            let para::ParaBody::Lines(lines) = &b.body else {
+                panic!("应当有一行字");
+            };
+            let font = book.resolve(None, false, false, false).unwrap();
+            let m = book.face(font.id).metrics();
+            let gap = if above { m.line_gap as f32 } else { 0.0 };
+            let want = (m.ascender as f32 + gap) * 9.0 / m.upem as f32;
+            assert!(
+                (lines[0].baseline - want).abs() < 1e-3,
+                "{} vs {want}",
+                lines[0].baseline
+            );
+        }
     }
 }

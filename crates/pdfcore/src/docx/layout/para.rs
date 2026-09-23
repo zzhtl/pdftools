@@ -3,7 +3,8 @@
 use std::ops::Range;
 
 use super::calib::{
-    Calib, Decor, EmptyPara, Flow, HangingIndent, HangingPunct, Justify, Overflow, TrailingSpaces,
+    Calib, Decor, EmptyPara, Flow, HangingIndent, HangingPunct, Justify, LineGap, Overflow,
+    TrailingSpaces,
 };
 use super::metrics::line_box;
 use super::text::{self, Hang, Piece, ShapedPara, TabRules};
@@ -175,7 +176,12 @@ fn mark_line(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> Option<Lin
     let upem = m.upem as f32;
     // 与正文片段的自然行高、上伸同一算法（`Piece::natural_line_pt` / `ascent_pt`）。
     let unsnapped = (m.default_line_height() * mark.size_pt / upem).max(1.0);
-    let ascent = m.ascender as f32 * mark.size_pt / upem;
+    let gap = if env.calib.line_gap == LineGap::Above {
+        m.line_gap as f32
+    } else {
+        0.0
+    };
+    let ascent = (m.ascender as f32 + gap) * mark.size_pt / upem;
     let b = line_box(
         unsnapped,
         ascent,
@@ -308,7 +314,7 @@ fn line(
         .max(1.0);
     let ascent = active
         .iter()
-        .map(|p| p.ascent_pt(book))
+        .map(|p| p.ascent_pt(book, env.calib.line_gap == LineGap::Above))
         .fold(0.0f32, f32::max);
     let metrics = line_box(
         unsnapped,

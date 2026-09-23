@@ -133,9 +133,11 @@ impl Piece {
         &self.shaped.glyphs[r]
     }
 
-    pub fn ascent_pt(&self, book: &FontBook) -> f32 {
+    /// 基线离行顶多远。`gap_above`：字体的行间距算在上面（[`LineGap::Above`](super::calib::LineGap)）。
+    pub fn ascent_pt(&self, book: &FontBook, gap_above: bool) -> f32 {
         let m = book.face(self.metrics_font).metrics();
-        m.ascender as f32 * self.metrics_size_pt / m.upem as f32
+        let gap = if gap_above { m.line_gap as f32 } else { 0.0 };
+        (m.ascender as f32 + gap) * self.metrics_size_pt / m.upem as f32
     }
 
     pub fn natural_line_pt(&self, book: &FontBook) -> f32 {
