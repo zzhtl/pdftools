@@ -372,7 +372,12 @@ pub(super) fn shape(
                 let shaped = if is_unpainted(&text[part.clone()]) {
                     ShapedRun::empty()
                 } else {
-                    shape_run(face, &text[part.clone()], class.to_rustybuzz())
+                    let mut shaped = shape_run(face, &text[part.clone()], class.to_rustybuzz());
+                    if style.char_spacing != 0.0 {
+                        let units = style.char_spacing * upem / style.size_pt;
+                        shaped.add_letter_spacing(units.round() as i32);
+                    }
+                    shaped
                 };
                 collect_missing(&text[part.clone()], &shaped, book);
                 let texts = cluster_texts(&text[part.clone()], &shaped.glyphs)

@@ -24,6 +24,15 @@ pub struct Calib {
     pub tabs: Tabs,
     pub hanging_indent: HangingIndent,
     pub overflow: Overflow,
+    pub run_format: RunFormat,
+}
+
+/// 重写前没有实现的字符格式：字符间距、隐藏文字、`w:sym` 符号等。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunFormat {
+    /// 都不认：隐藏文字照常显示，`w:sym` 丢掉，字符间距为 0。
+    Legacy,
+    Full,
 }
 
 /// 悬挂缩进（首行缩进为负）的段落，首行从哪里开始。
@@ -212,6 +221,7 @@ impl Calib {
             tabs: Tabs::Stops,
             hanging_indent: HangingIndent::Outdent,
             overflow: Overflow::CharBoundary,
+            run_format: RunFormat::Full,
         }
     }
 
@@ -231,6 +241,7 @@ impl Calib {
             tabs: Tabs::IdeographicSpace,
             hanging_indent: HangingIndent::Legacy,
             overflow: Overflow::NextOpportunity,
+            run_format: RunFormat::Legacy,
         }
     }
 }

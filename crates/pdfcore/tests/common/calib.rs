@@ -1062,6 +1062,33 @@ pub fn tabs() -> Vec<Measure> {
     v
 }
 
+/// P16：字符间距（`w:rPr/w:spacing`，twips）。量第二、第三个字的起点。
+pub fn char_spacing() -> Vec<Measure> {
+    let para = |spacing: i32, text: &str| {
+        format!(
+            r#"<w:p><w:r><w:rPr>{FONTS}<w:spacing w:val="{spacing}"/><w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    };
+    let mut v = Vec::new();
+    for (label, spacing) in [("加宽 5pt", 100), ("紧缩 2pt", -40)] {
+        for c in ["测", "试"] {
+            v.push(Measure {
+                name: format!("P16 字间距 {label} 「{c}」起点"),
+                doc: doc(para(spacing, "甲测试"), false),
+                unit: "pt",
+                value: Box::new(move |p| glyph_x(p, c)),
+            });
+        }
+        v.push(Measure {
+            name: format!("P16 字间距 {label} 西文「b」起点"),
+            doc: doc(para(spacing, "甲ab"), false),
+            unit: "pt",
+            value: Box::new(|p| glyph_x(p, "b")),
+        });
+    }
+    v
+}
+
 pub fn all() -> Vec<Measure> {
     let mut v = empty_paragraphs();
     v.extend(default_size());
@@ -1083,5 +1110,6 @@ pub fn all() -> Vec<Measure> {
     v.extend(justification());
     v.extend(page_breaks());
     v.extend(tabs());
+    v.extend(char_spacing());
     v
 }

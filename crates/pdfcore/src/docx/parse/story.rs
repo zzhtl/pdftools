@@ -134,6 +134,16 @@ fn parse_run(r: &mut Rd) -> Result<Run> {
                     })),
                 "cr" => run.items.push(RunItem::Break(BreakKind::Line)),
                 "noBreakHyphen" => run.items.push(RunItem::NoBreakHyphen),
+                "sym" => {
+                    if let Some(code) =
+                        attr(&e, "char").and_then(|c| u32::from_str_radix(&c, 16).ok())
+                    {
+                        run.items.push(RunItem::Sym {
+                            font: attr(&e, "font"),
+                            code,
+                        });
+                    }
+                }
                 _ => {}
             },
             Event::End(e) if e.local_name().as_ref() == "r" => {

@@ -16,7 +16,7 @@ mod text;
 
 pub use calib::{
     Breaks, Calib, EmptyPara, FixedBaseline, GridLayout, HangingIndent, HangingPunct, Justify,
-    Overflow, PageBottom, PageBreakBefore, ParaSpacing, Tabs, TrailingSpaces,
+    Overflow, PageBottom, PageBreakBefore, ParaSpacing, RunFormat, Tabs, TrailingSpaces,
 };
 
 use super::ir;
@@ -172,6 +172,7 @@ fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
         color: PLACEHOLDER_COLOR,
         font_latin: None,
         font_east_asia: None,
+        char_spacing: 0.0,
     };
     let spans = vec![ir::Span {
         range: 0..text.len(),

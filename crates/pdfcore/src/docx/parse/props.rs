@@ -42,6 +42,8 @@ pub(super) fn parse_rpr(r: &mut Rd) -> Result<RPr> {
                     rpr.font_ascii = attr(&e, "ascii").or_else(|| attr(&e, "hAnsi"));
                     rpr.font_east_asia = attr(&e, "eastAsia");
                 }
+                "spacing" => rpr.spacing = attr_i32(&e, "val"),
+                "vanish" => rpr.vanish = Some(on_off(&e)),
                 _ => {}
             },
             Event::End(e) if e.local_name().as_ref() == "rPr" => break,

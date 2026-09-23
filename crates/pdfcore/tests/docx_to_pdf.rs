@@ -1258,3 +1258,64 @@ fn unbreakable_runs_are_split_at_character_boundaries() {
     let text: String = lines.iter().map(|l| l.text.as_str()).collect();
     assert!(text.ends_with("0123456789"), "字断丢了：{text}");
 }
+
+/// 字符间距（`w:rPr/w:spacing`）加在每个字后面；隐藏文字（`w:vanish`）不显示也不占位置。
+#[test]
+fn character_spacing_and_hidden_text() {
+    if !require_cjk_font() {
+        return;
+    }
+    let run = |extra: &str, text: &str| {
+        format!(
+            r#"<w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/>{extra}<w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r>"#
+        )
+    };
+    let body = format!(
+        "<w:p>{}</w:p><w:p>{}{}{}</w:p>",
+        run(r#"<w:spacing w:val="100"/>"#, "甲测试"),
+        run("", "乙"),
+        run("<w:vanish/>", "隐藏的字"),
+        run("", "丙")
+    );
+    let pages =
+        common::pdftext::extract(&convert(&make_docx("spacing_vanish.docx", &body)).value.pdf);
+    let margin = 1588.0 / 20.0;
+    let line = |first: char| {
+        pages[0]
+            .lines
+            .iter()
+            .find(|l| l.text.starts_with(first))
+            .unwrap()
+            .frags
+            .iter()
+            .flat_map(|f| f.glyphs.clone())
+            .collect::<Vec<_>>()
+    };
+    let g = line('甲');
+    let x = |c: &str| g.iter().find(|(t, _)| t == c).unwrap().1 - margin;
+    assert!((x("测") - 17.0).abs() < 0.01, "「测」在 {}", x("测"));
+    assert!((x("试") - 34.0).abs() < 0.01, "「试」在 {}", x("试"));
+
+    let g = line('乙');
+    let text: String = g.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(text, "乙丙", "隐藏文字不该出现");
+    assert!((g[1].1 - g[0].1 - 12.0).abs() < 0.01, "隐藏文字不该占位置");
+}
+
+/// `w:sym` 用 Wingdings 画的勾选框：本机没有 Wingdings 时换成真正的「☑」。
+#[test]
+fn sym_elements_become_real_symbols_without_the_font() {
+    if pdfcore::fonts::system::SystemFonts::shared()
+        .query("Wingdings", false, false)
+        .is_some()
+    {
+        eprintln!("跳过：本机装了 Wingdings，原样显示就是对的");
+        return;
+    }
+    if !require_cjk_font() {
+        return;
+    }
+    let body = r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:sym w:font="Wingdings" w:char="F0FE"/><w:t>同意</w:t><w:sym w:font="Wingdings" w:char="A8"/><w:t>不同意</w:t></w:r></w:p>"#;
+    let text = text_of(&convert(&make_docx("sym.docx", body)).value.pdf);
+    assert!(text.contains("☑同意◻不同意"), "抽回：{text}");
+}

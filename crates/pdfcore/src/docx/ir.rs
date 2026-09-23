@@ -17,7 +17,7 @@
 
 use std::ops::Range;
 
-use super::layout::Calib;
+use super::layout::{Calib, RunFormat};
 use super::model::{self, BreakKind, LineRule, PPr, RPr, RunItem};
 pub use super::model::{TabAlign, TabLeader};
 use super::resolve::Resolver;
@@ -103,6 +103,8 @@ pub struct RunStyle {
     pub font_latin: Option<String>,
     /// 中日韩字体家族名（来自 `w:rFonts/@w:eastAsia`）。
     pub font_east_asia: Option<String>,
+    /// 每个字后面额外加的间距（点），负数是紧缩。
+    pub char_spacing: f32,
 }
 
 /// 段落文字里的一段同格式区间。span 首尾相接、不重叠、都不为空。
@@ -235,7 +237,24 @@ fn push_paragraph(out: &mut Vec<Block>, p: &model::Para, resolver: &Resolver, ca
     let mut spans = Vec::with_capacity(p.runs.len());
     let mut drawings = Vec::new();
     for run in &p.runs {
-        let start = text.len();
+        let rpr = resolver.run(&ppr, &run.rpr);
+        let full = calib.run_format == RunFormat::Full;
+        // 隐藏文字不显示，也不占位置。
+        if full && rpr.vanish == Some(true) {
+            continue;
+        }
+        let style = run_style(&rpr, calib);
+        let mut start = text.len();
+        // 没有文字的 run（只有格式、只有一张图）不成 span：它不占位置，
+        // 也不该决定空段落的行高。
+        let close = |text: &String, start: usize, style: &RunStyle, spans: &mut Vec<Span>| {
+            if text.len() > start {
+                spans.push(Span {
+                    range: start..text.len(),
+                    style: style.clone(),
+                });
+            }
+        };
         for item in &run.items {
             match item {
                 RunItem::Text(t) => text.push_str(t),
@@ -245,16 +264,37 @@ fn push_paragraph(out: &mut Vec<Block>, p: &model::Para, resolver: &Resolver, ca
                 RunItem::Break(BreakKind::Column) => text.push(COLUMN_BREAK),
                 RunItem::NoBreakHyphen => text.push('\u{2011}'),
                 RunItem::Drawing { alt } => drawings.push(alt.clone()),
+                // 符号单独成一段，用它自己的字体。符号字体（Symbol、Wingdings）里的码位
+                // 写成单字节时，实际在私用区 U+F0xx。
+                RunItem::Sym { .. } if !full => {}
+                RunItem::Sym { font, code } => {
+                    let symbolic = font
+                        .as_deref()
+                        .is_some_and(super::super::fonts::pua::is_symbol_font);
+                    let code = if *code <= 0xFF && symbolic {
+                        0xF000 + code
+                    } else {
+                        *code
+                    };
+                    let Some(c) = char::from_u32(code) else {
+                        continue;
+                    };
+                    close(&text, start, &style, &mut spans);
+                    let at = text.len();
+                    text.push(c);
+                    spans.push(Span {
+                        range: at..text.len(),
+                        style: RunStyle {
+                            font_latin: font.clone().or_else(|| style.font_latin.clone()),
+                            font_east_asia: font.clone().or_else(|| style.font_east_asia.clone()),
+                            ..style.clone()
+                        },
+                    });
+                    start = text.len();
+                }
             }
         }
-        // 没有文字的 run（只有格式、只有一张图）不成 span：它不占位置，
-        // 也不该决定空段落的行高。
-        if text.len() > start {
-            spans.push(Span {
-                range: start..text.len(),
-                style: run_style(&resolver.run(&ppr, &run.rpr), calib),
-            });
-        }
+        close(&text, start, &style, &mut spans);
     }
 
     // 首行缩进按「字符」算时，用的是段落标记的东亚字号。
@@ -288,6 +328,10 @@ fn run_style(rpr: &RPr, calib: &Calib) -> RunStyle {
         color: rpr.color.unwrap_or([0, 0, 0]),
         font_latin: rpr.font_ascii.clone(),
         font_east_asia: rpr.font_east_asia.clone(),
+        char_spacing: match calib.run_format {
+            RunFormat::Full => rpr.spacing.map(tw).unwrap_or(0.0),
+            RunFormat::Legacy => 0.0,
+        },
     }
 }
 

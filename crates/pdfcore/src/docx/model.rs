@@ -46,6 +46,10 @@ pub struct RPr {
     /// `w:rFonts/@w:eastAsia`，中日韩字体。一个 run 需要两个字体，
     /// 少了哪个都会让身份证号或者汉字其中之一显示成错的样子。
     pub font_east_asia: Option<String>,
+    /// `w:spacing`：字符间距，twips。每个字后面加（负数是紧缩）。
+    pub spacing: Option<i32>,
+    /// `w:vanish`：隐藏文字。
+    pub vanish: Option<bool>,
 }
 
 impl RPr {
@@ -63,7 +67,9 @@ impl RPr {
             size_half_pt,
             color,
             font_ascii,
-            font_east_asia
+            font_east_asia,
+            spacing,
+            vanish
         );
     }
 }
@@ -241,6 +247,11 @@ pub enum RunItem {
     /// 图片、形状、嵌入对象（`w:drawing` / `w:pict` / `w:object`）。目前只取替代文字。
     Drawing {
         alt: Option<String>,
+    },
+    /// `w:sym`：用指定字体画的一个符号（Wingdings 的勾选框之类）。
+    Sym {
+        font: Option<String>,
+        code: u32,
     },
 }
 
