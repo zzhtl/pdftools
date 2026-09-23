@@ -343,3 +343,30 @@ fn fields_are_recorded_as_items() {
         ]
     );
 }
+
+/// 表格最多解析 16 层；再往里的不解析结构，字收成一段，段与段之间隔一个空格。
+#[test]
+fn deeply_nested_tables_become_text() {
+    let mut xml = "<w:p><w:r><w:t>最里层</w:t></w:r></w:p><w:p><w:r><w:t>第二段</w:t></w:r></w:p>"
+        .to_string();
+    for _ in 0..20 {
+        xml = format!("<w:tbl><w:tr><w:tc>{xml}</w:tc></w:tr></w:tbl><w:p/>");
+    }
+    let doc = body(&xml);
+    let mut depth = 0;
+    let mut blocks = &doc.body;
+    loop {
+        match blocks.first() {
+            Some(Block::Table(t)) => {
+                depth += 1;
+                blocks = &t.rows[0].cells[0].content;
+            }
+            Some(Block::Para(p)) => {
+                assert_eq!(text_of(p), "最里层 第二段");
+                break;
+            }
+            None => panic!("第 {depth} 层的单元格是空的"),
+        }
+    }
+    assert_eq!(depth, 16);
+}

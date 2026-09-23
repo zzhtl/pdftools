@@ -405,6 +405,7 @@ pub enum Block {
 #[derive(Debug, Clone)]
 pub struct Table {
     /// 各列的宽度（`w:tblGrid`）：相邻两条列边界（框线的中线）之间的距离。
+    /// 0 是不知道宽度的列（没写网格，单元格也没写宽度），排版时平分版心剩下的宽度。
     pub columns: Vec<f32>,
     /// 左对齐时，第一条列边界离版心左边多远。由 `w:tblInd` 按兼容模式折算，
     /// 见 [`Tables::Drawn`]。
@@ -568,7 +569,7 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
                 }
             }
             model::Block::Table(t) if calib.tables == Tables::Drawn => {
-                blocks.push(table(t, &ctx, &mut lists))
+                blocks.push(table(t, &ctx, &mut lists, false))
             }
             model::Block::Table(t) => blocks.push(Block::Placeholder(table_placeholder(t))),
         }
@@ -646,7 +647,7 @@ fn story_blocks(story: &model::Story, ctx: &Ctx) -> Vec<Block> {
         match block {
             model::Block::Para(p) => push_paragraph(&mut out, p, ctx, None),
             model::Block::Table(t) if ctx.calib.tables == Tables::Drawn => {
-                out.push(table(t, ctx, &mut None))
+                out.push(table(t, ctx, &mut None, false))
             }
             model::Block::Table(t) => out.push(Block::Placeholder(table_placeholder(t))),
         }
@@ -1096,7 +1097,8 @@ const DEFAULT_CELL_MARGINS: model::CellMargins = model::CellMargins {
 const MAX_COLUMNS: usize = 256;
 
 /// 表格：列宽、各格占哪几列哪几行、每格四边的框线与边距都在这里定下来。
-fn table(t: &model::Table, ctx: &Ctx, lists: &mut Option<Lists>) -> Block {
+/// `nested`：它在别的表格的单元格里。
+fn table(t: &model::Table, ctx: &Ctx, lists: &mut Option<Lists>, nested: bool) -> Block {
     let span_of = |c: &model::Cell| c.props.grid_span.unwrap_or(1).max(1) as usize;
     // 各行每一格从第几列开始。
     let starts: Vec<Vec<usize>> = t
@@ -1129,23 +1131,22 @@ fn table(t: &model::Table, ctx: &Ctx, lists: &mut Option<Lists>) -> Block {
     if ncols > MAX_COLUMNS {
         return Block::Placeholder(table_placeholder(t));
     }
-    // 列宽以 tblGrid 为准；网格缺列时用只占这一列的格写的宽度补，再不行就用已有列的平均宽度。
-    let mut columns: Vec<f32> = t.grid.iter().map(|&w| tw(w)).collect();
+    // 列宽以 tblGrid 为准；网格缺列时用只占这一列的格写的宽度（twips）补，
+    // 还不知道的记作 0，排版时平分版心剩下的宽度。
+    let mut columns: Vec<f32> = t.grid.iter().map(|&w| tw(w.max(0))).collect();
     if columns.len() < ncols {
-        let mut from_cells = vec![None; ncols];
+        let mut from_cells = vec![0.0; ncols];
         for (row, s) in t.rows.iter().zip(&starts) {
             for (c, &col) in row.cells.iter().zip(s) {
                 if let (1, Some(model::Width::Twips(w))) = (span_of(c), c.props.width) {
-                    from_cells[col].get_or_insert(tw(w));
+                    if from_cells[col] == 0.0 {
+                        from_cells[col] = tw(w.max(0));
+                    }
                 }
             }
         }
-        let fallback = match columns.len() {
-            0 => 72.0,
-            n => columns.iter().sum::<f32>() / n as f32,
-        };
         let known = columns.len();
-        columns.extend(from_cells[known..].iter().map(|w| w.unwrap_or(fallback)));
+        columns.extend_from_slice(&from_cells[known..]);
     }
 
     // 纵向合并：写着 vMerge（续）、上一行同一列也有格开头的，接在那一格下面。
@@ -1225,9 +1226,8 @@ fn table(t: &model::Table, ctx: &Ctx, lists: &mut Option<Lists>) -> Block {
                             model::Block::Para(p) => {
                                 push_paragraph(&mut blocks, p, ctx, lists.as_mut())
                             }
-                            // 嵌套的表格：本版本按占位处理。
                             model::Block::Table(inner) => {
-                                blocks.push(Block::Placeholder(table_placeholder(inner)))
+                                blocks.push(table(inner, ctx, lists, true))
                             }
                         }
                     }
@@ -1254,9 +1254,10 @@ fn table(t: &model::Table, ctx: &Ctx, lists: &mut Option<Lists>) -> Block {
         .collect();
 
     // Word 2013 起 `w:tblInd` 量到左框线的外沿；之前的版本让首格的文字与正文对齐，
-    // 表格往左让出单元格的左边距。
+    // 表格往左让出单元格的左边距 —— 这一条只管正文里的表格，嵌套的表格（LibreOffice
+    // 实测）两种兼容模式都量到左框线外沿。
     let indent = t.props.indent.map(tw).unwrap_or(0.0)
-        + if ctx.doc.settings.compat_mode.is_some_and(|m| m <= 14) {
+        + if !nested && ctx.doc.settings.compat_mode.is_some_and(|m| m <= 14) {
             let mut m = DEFAULT_CELL_MARGINS;
             m.merge(&t.props.cell_margins);
             -m.left.map(tw).unwrap_or(0.0)

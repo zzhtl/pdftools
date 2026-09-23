@@ -51,7 +51,7 @@ fn parse_blocks(
         match r.read_event().map_err(xml_err)? {
             Event::Start(e) => match e.local_name().as_ref() {
                 "p" => out.push(Block::Para(parse_paragraph(r)?)),
-                "tbl" => out.push(Block::Table(parse_table(r)?)),
+                "tbl" => out.push(Block::Table(parse_table(r, 1)?)),
                 "sectPr" => *section = Some(parse_sect_pr(r)?),
                 name if skips_subtree(name) => skip(r, name)?,
                 _ => {}
@@ -295,14 +295,19 @@ fn find_alt_text(r: &mut Rd, name: &str) -> Result<Option<String>> {
     Ok(alt)
 }
 
-fn parse_table(r: &mut Rd) -> Result<Table> {
+/// 表格最多嵌套几层。再往里的只留下文字：正常的文书不会嵌这么深，一层层递归下去
+/// 却可能把栈用完。
+const MAX_TABLE_DEPTH: usize = 16;
+
+/// 读一张表格。`depth`：它是第几层（正文里的是 1）。
+fn parse_table(r: &mut Rd, depth: usize) -> Result<Table> {
     let mut table = Table::default();
     loop {
         match r.read_event().map_err(xml_err)? {
             Event::Start(e) => match e.local_name().as_ref() {
                 "tblPr" => table.props = parse_tbl_pr(r, "tblPr")?,
                 "tblGrid" => table.grid = parse_grid(r)?,
-                "tr" => table.rows.push(parse_row(r)?),
+                "tr" => table.rows.push(parse_row(r, depth)?),
                 name if skips_subtree(name) => skip(r, name)?,
                 // 包在内容控件、customXml 里的行。
                 _ => {}
@@ -315,14 +320,14 @@ fn parse_table(r: &mut Rd) -> Result<Table> {
     Ok(table)
 }
 
-fn parse_row(r: &mut Rd) -> Result<Row> {
+fn parse_row(r: &mut Rd, depth: usize) -> Result<Row> {
     let mut row = Row::default();
     loop {
         match r.read_event().map_err(xml_err)? {
             Event::Start(e) => match e.local_name().as_ref() {
                 "trPr" => row.props = parse_tr_pr(r)?,
                 "tblPrEx" => row.exceptions = parse_tbl_pr(r, "tblPrEx")?,
-                "tc" => row.cells.push(parse_cell(r)?),
+                "tc" => row.cells.push(parse_cell(r, depth)?),
                 name if skips_subtree(name) => skip(r, name)?,
                 _ => {}
             },
@@ -335,14 +340,15 @@ fn parse_row(r: &mut Rd) -> Result<Row> {
 }
 
 /// 一个单元格：属性，以及与正文同样的块级内容。
-fn parse_cell(r: &mut Rd) -> Result<Cell> {
+fn parse_cell(r: &mut Rd, depth: usize) -> Result<Cell> {
     let mut cell = Cell::default();
     loop {
         match r.read_event().map_err(xml_err)? {
             Event::Start(e) => match e.local_name().as_ref() {
                 "tcPr" => cell.props = parse_tc_pr(r)?,
                 "p" => cell.content.push(Block::Para(parse_paragraph(r)?)),
-                "tbl" => cell.content.push(Block::Table(parse_table(r)?)),
+                "tbl" if depth >= MAX_TABLE_DEPTH => cell.content.push(Block::Para(table_text(r)?)),
+                "tbl" => cell.content.push(Block::Table(parse_table(r, depth + 1)?)),
                 name if skips_subtree(name) => skip(r, name)?,
                 // 内容控件、customXml 里的段落与表格。
                 _ => {}
@@ -356,4 +362,47 @@ fn parse_cell(r: &mut Rd) -> Result<Cell> {
         }
     }
     Ok(cell)
+}
+
+/// 嵌得太深的表格：不再解析结构，把里面的字收成一段，段与段之间隔一个空格。
+fn table_text(r: &mut Rd) -> Result<Para> {
+    let mut depth = 1usize;
+    let mut text = String::new();
+    let mut in_text = false;
+    loop {
+        match r.read_event().map_err(xml_err)? {
+            Event::Start(e) => match e.local_name().as_ref() {
+                "tbl" => depth += 1,
+                "t" => in_text = true,
+                _ => {}
+            },
+            Event::Text(t) if in_text => text.push_str(&t),
+            Event::GeneralRef(rf) if in_text => {
+                if let Some(c) = resolve_entity(&rf) {
+                    text.push(c);
+                }
+            }
+            Event::End(e) => match e.local_name().as_ref() {
+                "t" => in_text = false,
+                "p" if !text.is_empty() && !text.ends_with(' ') => text.push(' '),
+                "tbl" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    let run = Run {
+        items: vec![RunItem::Text(text.trim_end().to_string())],
+        ..Default::default()
+    };
+    Ok(Para {
+        runs: vec![run],
+        ..Default::default()
+    })
 }

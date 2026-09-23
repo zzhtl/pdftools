@@ -270,6 +270,99 @@ pub fn all() -> Vec<Probe> {
         )),
     );
 
+    // 嵌套表格、行首行尾空列（gridBefore、gridAfter）、没写列宽的表格。
+    let tbl = |pr: &str, grid: &[u32], rows: &str| {
+        let cols: String = grid
+            .iter()
+            .map(|w| format!(r#"<w:gridCol w:w="{w}"/>"#))
+            .collect();
+        format!(
+            r#"<w:tbl><w:tblPr>{pr}<w:tblBorders>{}{}{}{}{}{}</w:tblBorders></w:tblPr><w:tblGrid>{cols}</w:tblGrid>{rows}</w:tbl>"#,
+            border("top"),
+            border("left"),
+            border("bottom"),
+            border("right"),
+            border("insideH"),
+            border("insideV")
+        )
+    };
+    let tr = |cells: &[(u32, &str)]| {
+        let tcs: String = cells.iter().map(|&(w, t)| xcell(w, "", t)).collect();
+        format!("<w:tr>{tcs}</w:tr>")
+    };
+    // 内层表格要写 tblW：没写时 LibreOffice 把嵌套表格撑满整格（Word 按网格）。
+    let inner = tbl(
+        r#"<w:tblW w:w="3600" w:type="dxa"/>"#,
+        &[1800, 1800],
+        &(tr(&[
+            (1800, &probe_para("", "内一")),
+            (1800, &probe_para("", &filler(3, 12))),
+        ]) + &tr(&[
+            (1800, &probe_para("", "内二")),
+            (1800, &probe_para("", &filler(5, 30))),
+        ])),
+    );
+    let nested = tbl(
+        "",
+        &[2000, 6600],
+        &(0..6)
+            .map(|i| {
+                let content = if i % 2 == 0 {
+                    probe_para("", &filler(i, 40)) + &inner + &probe_para("", "嵌套之后")
+                } else {
+                    probe_para("", &filler(i, 80))
+                };
+                tr(&[
+                    (2000, &probe_para("", &format!("第{i}行"))),
+                    (6600, &content),
+                ])
+            })
+            .collect::<String>(),
+    );
+    let ragged = tbl(
+        "",
+        &[2150, 2150, 2150, 2150],
+        &(tr(&[
+            (2150, &probe_para("", "甲")),
+            (2150, &probe_para("", "乙")),
+            (2150, &probe_para("", "丙")),
+            (2150, &probe_para("", "丁")),
+        ]) + &format!(
+            r#"<w:tr><w:trPr><w:gridBefore w:val="1"/></w:trPr>{}{}{}</w:tr>"#,
+            xcell(2150, "", &probe_para("", "乙二")),
+            xcell(2150, "", &probe_para("", "丙二")),
+            xcell(2150, "", &probe_para("", "丁二"))
+        ) + &format!(
+            r#"<w:tr><w:trPr><w:gridAfter w:val="2"/></w:trPr>{}{}</w:tr>"#,
+            xcell(2150, "", &probe_para("", "甲三")),
+            xcell(2150, "", &probe_para("", "乙三"))
+        )),
+    );
+    let bare = format!(
+        r#"<w:tbl><w:tblPr><w:tblBorders>{}{}{}{}{}{}</w:tblBorders></w:tblPr><w:tr><w:tc>{}</w:tc><w:tc>{}</w:tc><w:tc>{}</w:tc></w:tr></w:tbl>"#,
+        border("top"),
+        border("left"),
+        border("bottom"),
+        border("right"),
+        border("insideH"),
+        border("insideV"),
+        probe_para("", &filler(7, 20)),
+        probe_para("", &filler(8, 20)),
+        probe_para("", &filler(9, 20))
+    );
+    add(
+        "table_nested",
+        DocxBuilder::new().body(
+            &(probe_para("", "嵌套表格")
+                + &nested
+                + &probe_para("", "参差的行")
+                + &ragged
+                + &probe_para("", "没写列宽")
+                + &bare
+                + &probe_para("", "表格之后的正文。")),
+        ),
+    );
+
     let numbering = r#"<w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="hybridMultilevel"/>
 <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="chineseCounting"/><w:lvlText w:val="%1、"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="420" w:hanging="420"/></w:pPr></w:lvl>
 <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="840" w:hanging="420"/></w:pPr></w:lvl>

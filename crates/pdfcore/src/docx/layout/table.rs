@@ -164,7 +164,20 @@ pub(super) fn measure(
     collapse: bool,
     measure_cell: &mut MeasureCell,
 ) -> TableBox {
-    let width: f32 = t.columns.iter().sum();
+    // 不知道宽度的列平分版心剩下的宽度，至少留 18pt（LibreOffice 没写宽度时也是平分）。
+    let unknown = t.columns.iter().filter(|w| **w <= 0.0).count();
+    let known: f32 = t.columns.iter().filter(|w| **w > 0.0).sum();
+    let share = if unknown > 0 {
+        ((env.width - known) / unknown as f32).max(18.0)
+    } else {
+        0.0
+    };
+    let columns: Vec<f32> = t
+        .columns
+        .iter()
+        .map(|&w| if w > 0.0 { w } else { share })
+        .collect();
+    let width: f32 = columns.iter().sum();
     let x0 = env.left
         + match t.align {
             ir::Align::Center => (env.width - width) / 2.0,
@@ -172,7 +185,7 @@ pub(super) fn measure(
             _ => t.indent,
         };
     let col_x: Vec<f32> = std::iter::once(x0)
-        .chain(t.columns.iter().scan(x0, |x, w| {
+        .chain(columns.iter().scan(x0, |x, w| {
             *x += w;
             Some(*x)
         }))
@@ -246,14 +259,12 @@ pub(super) fn measure(
     let bands: Vec<(f32, f32, f32)> = (0..table.rows.len())
         .map(|ri| {
             let tb = &table;
-            let own = || tb.rows[ri].cells.iter().filter(|c| !c.continued);
-            let band = own()
-                .flat_map(|c| (c.col..c.col + c.span).map(move |col| tb.top_edge(ri, c, col)))
-                .map(thickness)
-                .fold(0.0, f32::max);
-            let band_at_top = own()
-                .map(|c| thickness(c.borders.top.border))
-                .fold(0.0, f32::max);
+            let widest = |at_top: bool| {
+                (0..tb.col_x.len() - 1)
+                    .map(|col| thickness(tb.top_line(ri, col, at_top)))
+                    .fold(0.0, f32::max)
+            };
+            let (band, band_at_top) = (widest(false), widest(true));
             let closing = (0..tb.col_x.len() - 1)
                 .filter_map(|col| tb.owner(ri, col))
                 .map(|c| thickness(c.borders.bottom.border))
@@ -422,15 +433,29 @@ impl TableBox {
             .find(|o| o.col == c.col && !o.continued)
     }
 
-    /// 格 `c`（在第 `ri` 行）在第 `col` 列上方画的线：与上一行那一格的下边争。
-    fn top_edge(&self, ri: usize, c: &CellBox, col: usize) -> Option<Border> {
-        match ri.checked_sub(1) {
-            Some(above) => resolve(
-                self.owner(above, col)
-                    .map_or(Edge::default(), |a| a.borders.bottom),
+    /// 第 `ri` 行里盖住第 `col` 列的格（续格照原样返回）。
+    fn cell_at(&self, ri: usize, col: usize) -> Option<&CellBox> {
+        self.rows[ri]
+            .cells
+            .iter()
+            .find(|c| c.col <= col && col < c.col + c.span)
+    }
+
+    /// 第 `ri` 行上面、第 `col` 列这一段画什么线。`at_top`：这一行在本页上开头，只看
+    /// 本行（续格用开头那一格）的上边。否则与上一行的下边争；纵向合并的格里面没有线；
+    /// 本行这一列空着（`w:gridBefore`、`w:gridAfter`）时画上一行的下边。
+    fn top_line(&self, ri: usize, col: usize, at_top: bool) -> Option<Border> {
+        if at_top || ri == 0 {
+            return self.owner(ri, col)?.borders.top.border;
+        }
+        let above = self.owner(ri - 1, col);
+        match self.cell_at(ri, col) {
+            Some(c) if c.continued => None,
+            Some(c) => resolve(
+                above.map_or(Edge::default(), |a| a.borders.bottom),
                 c.borders.top,
             ),
-            None => c.borders.top.border,
+            None => above?.borders.bottom.border,
         }
     }
 
@@ -452,6 +477,12 @@ impl TableBox {
             cur -= band + f.height;
         }
         let bottom = |i: usize| tops[i].0 - tops[i].1 - frags[i].height;
+        // 第 `i` 段下面那条横线的粗细：下一段的上框线，最后一段是收口的下框线。竖线
+        // 一直画到它的下沿，把角补上。
+        let below = |i: usize| match tops.get(i + 1) {
+            Some(&(_, band)) => band,
+            None => self.rows[frags[i].ri].closing,
+        };
 
         // 底纹在最下，其上是文字，框线最后画：合并的格跨行时，后画的底纹不会盖住先画的框线。
         let (mut fills, mut text, mut lines) = (Vec::new(), Vec::new(), Vec::new());
@@ -472,7 +503,6 @@ impl TableBox {
                     .unwrap_or(i);
                 let low = bottom(j);
                 let (x1, x2) = (self.col_x[owner.col], self.col_x[owner.col + owner.span]);
-                let first = owner.col == 0 || self.owner(f.ri, owner.col - 1).is_none();
                 let last = self.owner(f.ri, owner.col + owner.span).is_none();
                 // 左框线与左边那一格的右边争；行里最右的格再画自己的右框线。
                 let left = match owner.col.checked_sub(1).and_then(|l| self.owner(f.ri, l)) {
@@ -543,30 +573,17 @@ impl TableBox {
                     }
                 }
 
-                // 行首、行尾的横线伸到竖框线的外沿，补上角。
-                let ends = (
-                    if first { thickness(left) / 2.0 } else { 0.0 },
-                    thickness(right) / 2.0,
-                );
-                for col in owner.col..owner.col + owner.span {
-                    let b = if f.at_top {
-                        owner.borders.top.border
-                    } else {
-                        self.top_edge(f.ri, owner, col)
-                    };
-                    if let Some(b) = b {
-                        let span = self.segment(
-                            col,
-                            (col == owner.col, col + 1 == owner.col + owner.span),
-                            ends,
-                        );
-                        lines.push((b, Side::Top, span, top));
-                    }
-                }
                 for (b, x) in [(left, x1), (right, x2)] {
                     if let Some(b) = b {
-                        lines.push((b, Side::Left, (low, top), x - b.thickness() / 2.0));
+                        let span = (low - below(j), top);
+                        lines.push((b, Side::Left, span, x - b.thickness() / 2.0));
                     }
+                }
+            }
+            for col in 0..self.col_x.len() - 1 {
+                if let Some(b) = self.top_line(f.ri, col, f.at_top) {
+                    let span = (self.col_x[col], self.col_x[col + 1]);
+                    lines.push((b, Side::Top, span, top));
                 }
             }
         }
@@ -581,31 +598,12 @@ impl TableBox {
     /// 在第 `ri` 行之后收口：画下框线，`y` 是它的上沿。返回它的粗细。
     pub fn close(&self, ri: usize, y: f32, ops: &mut Vec<PaintOp>) -> f32 {
         for col in 0..self.col_x.len() - 1 {
-            let Some(c) = self.owner(ri, col) else {
-                continue;
-            };
-            let Some(b) = c.borders.bottom.border else {
-                continue;
-            };
-            // 行首、行尾那一段伸到竖框线的外沿，补上下面的两个角。
-            let first = col == 0 || self.owner(ri, col - 1).is_none();
-            let last = self.owner(ri, col + 1).is_none();
-            let ends = (
-                thickness(c.borders.left.border) / 2.0,
-                thickness(c.borders.right.border) / 2.0,
-            );
-            let span = self.segment(col, (first, last), ends);
-            edge(ops, &b, Side::Top, span, y);
+            if let Some(b) = self.owner(ri, col).and_then(|c| c.borders.bottom.border) {
+                let span = (self.col_x[col], self.col_x[col + 1]);
+                edge(ops, &b, Side::Top, span, y);
+            }
         }
         self.rows[ri].closing
-    }
-
-    /// 第 `col` 列上一段横线的范围。`(first, last)`：它是行首、行尾那一段，两头各伸出
-    /// `ends` 那么多。
-    fn segment(&self, col: usize, (first, last): (bool, bool), ends: (f32, f32)) -> (f32, f32) {
-        let lo = self.col_x[col] - if first { ends.0 } else { 0.0 };
-        let hi = self.col_x[col + 1] + if last { ends.1 } else { 0.0 };
-        (lo, hi)
     }
 }
 

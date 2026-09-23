@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use common::docx::{para, DocxBuilder};
 use common::{require_cjk_font, tmp};
 use pdfcore::ops::docx_to_pdf;
-use pdfcore::{NoProgress, WarningKind};
+use pdfcore::NoProgress;
 
 /// 把一段 `<w:body>` 的内容包成一个可用的 .docx。
 fn make_docx(name: &str, body: &str) -> PathBuf {
@@ -128,10 +128,10 @@ fn first_text_x(pdf: &[u8]) -> f32 {
     panic!("内容流里找不到文本定位操作符");
 }
 
-/// 表格画出来，文字都在，不再报「未能渲染」。嵌套的表格本版本仍按占位处理：
-/// **必须留痕且保住文字** —— 对法律文书来说，悄悄丢一张表格是危险的。
+/// 表格与嵌套的表格都画出来，文字都在，不报「未能渲染」。嵌得太深（超过 16 层）的
+/// 只留下文字，不会把栈用完。
 #[test]
-fn tables_are_drawn_and_nested_ones_reported() {
+fn tables_and_nested_tables_are_drawn() {
     if !require_cjk_font() {
         return;
     }
@@ -144,26 +144,30 @@ fn tables_are_drawn_and_nested_ones_reported() {
 <w:tc><w:p><w:r><w:t>装箱单</w:t></w:r></w:p>{nested}</w:tc></w:tr>
 </w:tbl>"#
     );
-    let path = make_docx("table.docx", &body);
-    // 不比对重写前的引擎：它把内层表格的行也算作外层的行，占位说明写的行数不同。
-    let report = docx_to_pdf::run(&path, &NoProgress).expect("转换失败");
-
-    let reported: Vec<_> = report
-        .warnings
-        .iter()
-        .filter(|w| w.kind == WarningKind::UnsupportedElement && w.detail.contains("表格"))
-        .collect();
-    assert_eq!(
-        reported.len(),
-        1,
-        "只有嵌套的那张表格该报告，警告列表：{:?}",
-        report.warnings
-    );
-    assert!(reported[0].detail.contains("1 行 × 1 列"), "{reported:?}");
-
-    let got = text_of(&report.value.pdf);
-    for cell in ["条目一", "说明书", "条目二", "装箱单", "内层表格"] {
-        assert!(got.contains(cell), "表格单元格「{cell}」的文字丢了：{got}");
+    let mut deep = "<w:p><w:r><w:t>最里层</w:t></w:r></w:p>".to_string();
+    for _ in 0..40 {
+        deep = format!("<w:tbl><w:tr><w:tc>{deep}</w:tc></w:tr></w:tbl><w:p/>");
+    }
+    for (name, body, texts) in [
+        (
+            "table.docx",
+            body,
+            &["条目一", "说明书", "条目二", "装箱单", "内层表格"][..],
+        ),
+        ("table_deep.docx", deep, &["最里层"][..]),
+    ] {
+        let path = make_docx(name, &body);
+        // 不比对重写前的引擎：它把内层表格的行也算作外层的行，占位说明写的行数不同。
+        let report = docx_to_pdf::run(&path, &NoProgress).expect("转换失败");
+        assert!(
+            !report.warnings.iter().any(|w| w.detail.contains("表格")),
+            "{name}：{:?}",
+            report.warnings
+        );
+        let got = text_of(&report.value.pdf);
+        for text in texts {
+            assert!(got.contains(text), "{name}：「{text}」丢了：{got}");
+        }
     }
 }
 
@@ -259,6 +263,176 @@ fn table_geometry_follows_word() {
         assert!(centred_on(grid, 1.5), "兼容模式 {mode}：{paths:?}");
         assert!(centred_on(grid + 150.0, 1.0), "兼容模式 {mode}：{paths:?}");
         assert!(centred_on(grid + 300.0, 1.5), "兼容模式 {mode}：{paths:?}");
+    }
+}
+
+/// 嵌套的表格、参差的行、没写列宽的表格，都对照 LibreOffice 实测：
+/// - 嵌套表格的第一条列边界在所在单元格的文字左边往里半个左框线宽，两种兼容模式
+///   都是（Word 2010 往左让出边距的规则只管正文里的表格）；
+/// - 行首、行尾空着的列（gridBefore、gridAfter）：上下两行有一行在这一列有格就画横线；
+/// - 没写列宽的表格平分版心。
+#[test]
+fn nested_tables_and_ragged_rows_follow_word() {
+    use common::pdfpaths;
+    if !require_cjk_font() {
+        return;
+    }
+    let p = |text: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="400" w:lineRule="exact"/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    };
+    let borders = |outer: u32| -> String {
+        [
+            ("top", outer),
+            ("left", outer),
+            ("bottom", outer),
+            ("right", outer),
+            ("insideH", 4),
+            ("insideV", 4),
+        ]
+        .iter()
+        .map(|(side, sz)| {
+            format!(r#"<w:{side} w:val="single" w:sz="{sz}" w:space="0" w:color="000000"/>"#)
+        })
+        .collect()
+    };
+    let cell = |w: u32, content: &str| {
+        format!(r#"<w:tc><w:tcPr><w:tcW w:w="{w}" w:type="dxa"/></w:tcPr>{content}</w:tc>"#)
+    };
+    let table = |outer: u32, grid: &[u32], rows: &str| {
+        let cols: String = grid
+            .iter()
+            .map(|w| format!(r#"<w:gridCol w:w="{w}"/>"#))
+            .collect();
+        format!(
+            r#"<w:tbl><w:tblPr><w:tblBorders>{}</w:tblBorders></w:tblPr><w:tblGrid>{cols}</w:tblGrid>{rows}</w:tbl>"#,
+            borders(outer)
+        )
+    };
+    // 内层表格左框线 1.5pt。
+    let inner = table(
+        12,
+        &[1500, 1500],
+        &format!(
+            "<w:tr>{}{}</w:tr>",
+            cell(1500, &p("内甲")),
+            cell(1500, &p("内乙"))
+        ),
+    );
+    let outer = table(
+        4,
+        &[2000, 6000],
+        &format!(
+            "<w:tr>{}{}</w:tr>",
+            cell(2000, &p("外甲")),
+            cell(6000, &(inner + &p("")))
+        ),
+    );
+    let margin = 79.4;
+    for (mode, grid) in [("15", margin + 0.25), ("14", margin - 5.4)] {
+        let settings = format!(
+            r#"<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="{mode}"/></w:compat>"#
+        );
+        let path = DocxBuilder::new()
+            .settings(&settings)
+            .body(&(outer.clone() + &p("表后")))
+            .build(&format!("table_nested_{mode}.docx"));
+        // 不比对重写前的引擎：它把内层表格的行也算作外层的行。
+        let pdf = docx_to_pdf::run(&path, &NoProgress)
+            .expect("转换失败")
+            .value
+            .pdf;
+        let x_of = |text: &str| {
+            common::pdftext::extract(&pdf)[0]
+                .lines
+                .iter()
+                .flat_map(|l| &l.frags)
+                .find(|f| f.text.contains(text))
+                .map(|f| f.x)
+                .unwrap_or_else(|| panic!("找不到「{text}」"))
+        };
+        // 外层第二格的文字左边在 grid + 100 + 5.4；内层表格从那里再往里 0.75pt。
+        let inner_grid = grid + 100.0 + 5.4 + 0.75;
+        assert!(
+            (x_of("外甲") - (grid + 5.4)).abs() < 0.01,
+            "兼容模式 {mode}"
+        );
+        assert!(
+            (x_of("内甲") - (inner_grid + 5.4)).abs() < 0.01,
+            "兼容模式 {mode}"
+        );
+        assert!(
+            (x_of("内乙") - (inner_grid + 75.0 + 5.4)).abs() < 0.01,
+            "兼容模式 {mode}"
+        );
+    }
+
+    // 第二行空出第一列，第三行空出后两列；第一、二行之间的横线照样盖住第一列。
+    let rows = format!(
+        r#"<w:tr>{}{}{}</w:tr><w:tr><w:trPr><w:gridBefore w:val="1"/></w:trPr>{}{}</w:tr><w:tr><w:trPr><w:gridAfter w:val="2"/></w:trPr>{}</w:tr>"#,
+        cell(2000, &p("一甲")),
+        cell(2000, &p("一乙")),
+        cell(2000, &p("一丙")),
+        cell(2000, &p("二乙")),
+        cell(2000, &p("二丙")),
+        cell(2000, &p("三甲")),
+    );
+    let pdf = convert(&make_docx(
+        "table_ragged.docx",
+        &table(4, &[2000, 2000, 2000], &rows),
+    ))
+    .value
+    .pdf;
+    let lines = &common::pdftext::extract(&pdf)[0].lines;
+    let paths = &pdfpaths::extract(&pdf)[0];
+    let covered = |x: f32, y0: f32, y1: f32| {
+        paths.iter().any(|p| {
+            let [a, b, c, d] = p.covered();
+            p.w() > p.h() && a <= x && x <= c && y0 < b && d < y1
+        })
+    };
+    let col0 = margin + 0.25 + 50.0;
+    let col2 = margin + 0.25 + 250.0;
+    assert!(
+        covered(col0, lines[1].y, lines[0].y),
+        "第一、二行之间第一列：{paths:?}"
+    );
+    assert!(
+        covered(col2, lines[2].y, lines[1].y),
+        "第二、三行之间第三列：{paths:?}"
+    );
+    // 第二行开头空着，那里没有竖线；第三行的下框线只到第一列。
+    let vertical_at = |x: f32, y: f32| {
+        paths.iter().any(|p| {
+            let [a, b, c, d] = p.covered();
+            p.h() > p.w() && a <= x && x <= c && b <= y && y <= d
+        })
+    };
+    assert!(!vertical_at(margin + 0.25, lines[1].y));
+    assert!(vertical_at(margin + 0.25 + 100.0, lines[1].y));
+    assert!(!covered(col2, lines[2].y - 30.0, lines[2].y));
+
+    // 没写任何宽度的三列平分版心（436.5pt）。
+    let row = format!(
+        "<w:tr><w:tc>{}</w:tc><w:tc>{}</w:tc><w:tc>{}</w:tc></w:tr>",
+        p("平一"),
+        p("平二"),
+        p("平三")
+    );
+    let bare = format!(
+        r#"<w:tbl><w:tblPr><w:tblBorders>{}</w:tblBorders></w:tblPr>{row}</w:tbl>"#,
+        borders(4)
+    );
+    let pdf = convert(&make_docx("table_no_grid.docx", &bare)).value.pdf;
+    let frags: Vec<f32> = common::pdftext::extract(&pdf)[0].lines[0]
+        .frags
+        .iter()
+        .map(|f| f.x)
+        .collect();
+    for (k, x) in frags.iter().enumerate() {
+        let want = margin + 0.25 + k as f32 * 436.5 / 3.0 + 5.4;
+        assert!((x - want).abs() < 0.05, "{frags:?}");
     }
 }
 
