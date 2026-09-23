@@ -467,11 +467,12 @@ fn try_recompress(
         } else {
             img.to_rgb8().into_raw()
         };
-        let row = w as usize * if gray { 1 } else { 3 };
-        let flate_est = crate::imaging::estimate_flate_len(&raw, row);
+        let components = if gray { 1 } else { 3 };
+        let flate_est =
+            crate::imaging::estimate_flate_len(&raw, w as usize * components, components);
         if flate_est as f32 <= jpeg.len() as f32 * crate::imaging::LOSSLESS_TOLERANCE {
             Replacement {
-                data: crate::pdf::writer::deflate(&raw),
+                data: crate::pdf::writer::image::flate_image(&raw, w, components),
                 jpeg: false,
                 width: w,
                 height: h,
@@ -557,6 +558,15 @@ fn apply(doc: &mut Document, entry: &ImageEntry, r: Replacement) {
     stream.dict.set("Width", r.width as i64);
     stream.dict.set("Height", r.height as i64);
     stream.dict.set("BitsPerComponent", 8i64);
+    // 无损的数据按 PNG 预测压的（见 `flate_image`），解码要知道每行多宽、几个分量。
+    if !r.jpeg {
+        let mut parms = lopdf::Dictionary::new();
+        parms.set("Predictor", 15i64);
+        parms.set("Colors", if r.gray { 1i64 } else { 3 });
+        parms.set("BitsPerComponent", 8i64);
+        parms.set("Columns", r.width as i64);
+        stream.dict.set("DecodeParms", Object::Dictionary(parms));
+    }
     // 分量数只在「彩色转灰度」时变化，这时色彩空间必须跟着改；
     // 其余情况下分量数不变，原 /ColorSpace（含 ICCBased 引用）继续有效。
     if r.gray && entry.model == Ok(Model::Rgb) {

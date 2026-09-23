@@ -224,11 +224,13 @@ pub fn encode_jpeg(img: &DynamicImage, quality: u8, grayscale: bool) -> Result<V
     Ok(buf)
 }
 
-/// 估算原始像素经 Flate 压缩后的体积。
+/// 估算原始像素按 [`flate_image`](crate::pdf::writer::image::flate_image) 无损压缩后
+/// 的体积。`bpp` 是每个像素几个字节（灰度 1，RGB 3）。
 ///
-/// 整份 deflate 一遍太贵 —— 一张 1200 万像素的 RGB 图有 36 MB 原始数据，
+/// 整份压一遍太贵 —— 一张 1200 万像素的 RGB 图有 36 MB 原始数据，
 /// 而我们只是想知道个数量级。按行采样 1/8 再外推，flate 的压缩率在这个尺度上足够稳定。
-pub fn estimate_flate_len(raw: &[u8], row_bytes: usize) -> usize {
+/// 采样的行照样对着它真正的上一行做 PNG 预测，估出来的才与实际压缩一致。
+pub fn estimate_flate_len(raw: &[u8], row_bytes: usize, bpp: usize) -> usize {
     use flate2::write::ZlibEncoder;
     use std::io::Write;
 
@@ -236,11 +238,21 @@ pub fn estimate_flate_len(raw: &[u8], row_bytes: usize) -> usize {
         return raw.len();
     }
     const SAMPLE_EVERY: usize = 8;
-    let mut sample = Vec::with_capacity(raw.len() / SAMPLE_EVERY + row_bytes);
+    let zeros = vec![0u8; row_bytes];
+    let mut sample = Vec::with_capacity(raw.len() / SAMPLE_EVERY + 2 * row_bytes);
     let mut rows = 0usize;
     let mut offset = 0usize;
     while offset + row_bytes <= raw.len() {
-        sample.extend_from_slice(&raw[offset..offset + row_bytes]);
+        let above = match offset.checked_sub(row_bytes) {
+            Some(start) => &raw[start..offset],
+            None => &zeros,
+        };
+        crate::pdf::writer::image::predict_row(
+            above,
+            &raw[offset..offset + row_bytes],
+            bpp,
+            &mut sample,
+        );
         rows += 1;
         offset += row_bytes * SAMPLE_EVERY;
     }

@@ -8,6 +8,7 @@
 //!
 //! 加 `--repeat N` 会把同一次转换跑 N 遍，分别报告第一遍与其余各遍的平均耗时
 //! —— 第一遍含字体扫描等一次性开销，其余各遍反映的是缓存热了以后的真实速度。
+//! 图片转 PDF 缺省用无损档，`--tier high|balanced|extreme` 换档。
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -27,6 +28,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             n.max(1)
         }
         None => 1,
+    };
+    let tier = match args.iter().position(|a| a == "--tier") {
+        Some(i) => {
+            let tier = match args.get(i + 1).map(String::as_str) {
+                Some("lossless") => Tier::Lossless,
+                Some("high") => Tier::HighQuality,
+                Some("balanced") => Tier::Balanced,
+                Some("extreme") => Tier::Extreme,
+                _ => return Err("--tier 后面要跟 lossless / high / balanced / extreme".into()),
+            };
+            args.drain(i..i + 2);
+            tier
+        }
+        None => Tier::Lossless,
     };
     if args.is_empty() {
         eprintln!("用法见文件头注释");
@@ -66,12 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         out => {
             let images: Vec<PathBuf> = args[1..].iter().map(PathBuf::from).collect();
             let (report, timing) = timed(repeat, || {
-                pdfcore::ops::images_to_pdf::run(
-                    &images,
-                    Tier::Lossless,
-                    &Default::default(),
-                    &NoProgress,
-                )
+                pdfcore::ops::images_to_pdf::run(&images, tier, &Default::default(), &NoProgress)
             })?;
             std::fs::write(out, &report.value.pdf)?;
             println!(

@@ -14,7 +14,8 @@ image = { version = "0.25.10", default-features = false, features = [
     "jpeg", "png", "gif", "bmp", "tiff", "webp", "ico", "pnm", "tga", "qoi",
 ] }
 fast_image_resize = { version = "6.1.0", features = ["image"] }
-jpeg-encoder = "0.7.1"
+# simd：AVX2 的色彩转换与 DCT，运行时检测 CPU，不支持时自动用标量实现。
+jpeg-encoder = { version = "0.7.1", features = ["simd"] }
 kamadak-exif = "0.6.1"
 # lopdf 已经传递依赖了 chrono，直接用不增加编译成本
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

@@ -3,9 +3,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
+
 use crate::bail_if_cancelled;
 use crate::error::{CoreError, Report, Result, Warning, WarningKind};
-use crate::imaging::{prepare_for_pdf, read_time, ColorData, Fidelity, Tier};
+use crate::imaging::{
+    prepare_bytes, time_of, ColorData, Fidelity, ImageQuality, PreparedImage, Tier,
+};
 use crate::pdf::writer::{DocBuilder, DocInfo, ImageData, ImageEncoding, PageSpec};
 use crate::progress::{Progress, ProgressSink};
 use crate::timestamp::{DatedFile, TimeSource, Timestamp};
@@ -58,75 +62,88 @@ pub fn run(
 
     sink.emit(Progress::Started { total: paths.len() });
 
-    for (i, path) in paths.iter().enumerate() {
+    // 解码、缩放、压缩都吃 CPU，几张图同时准备；但一张 1200 万像素的图解开就是 36 MB，
+    // 不能全部一起上。按窗口来：一个窗口里的图同时准备，好了再按原来的顺序放进 PDF。
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(4);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .map_err(|e| CoreError::Image(format!("无法启动工作线程：{e}")))?;
+    let window = workers * 2;
+    let mut i = 0;
+    for chunk in paths.chunks(window) {
         bail_if_cancelled!(sink);
+        let loaded: Vec<_> = pool.install(|| {
+            chunk
+                .par_iter()
+                .map(|path| load(path, &quality, manual_times, sink))
+                .collect()
+        });
+        bail_if_cancelled!(sink);
+        for (path, (prepared, dated)) in chunk.iter().zip(loaded) {
+            i += 1;
+            let label = file_label(path);
+            // 单张图失败不能拖垮整批 —— 用户选了 200 张，不该因为其中一张损坏就全废。
+            let prepared = match prepared {
+                Ok(p) => p,
+                Err(e) => {
+                    warnings.push(Warning::new(
+                        WarningKind::ItemFailed,
+                        format!("{label}：{e}"),
+                    ));
+                    sink.emit(Progress::Item {
+                        done: i,
+                        total: paths.len(),
+                        label,
+                    });
+                    continue;
+                }
+            };
 
-        let label = file_label(path);
-        // 单张图失败不能拖垮整批 —— 用户选了 200 张，不该因为其中一张损坏就全废。
-        let prepared = match prepare_for_pdf(path, &quality) {
-            Ok(p) => p,
-            Err(e) => {
+            fidelity.push((path.clone(), prepared.fidelity));
+            if prepared.dropped_pages > 0 {
                 warnings.push(Warning::new(
-                    WarningKind::ItemFailed,
-                    format!("{label}：{e}"),
+                    WarningKind::UnsupportedElement,
+                    format!(
+                        "{label} 是多页 TIFF（共 {} 页），本版本只转换第一页",
+                        prepared.dropped_pages + 1
+                    ),
                 ));
-                sink.emit(Progress::Item {
-                    done: i + 1,
-                    total: paths.len(),
-                    label,
-                });
-                continue;
             }
-        };
+            if let Some(t) = dated {
+                times.push(t);
+            }
 
-        fidelity.push((path.clone(), prepared.fidelity));
-        if prepared.dropped_pages > 0 {
-            warnings.push(Warning::new(
-                WarningKind::UnsupportedElement,
-                format!(
-                    "{label} 是多页 TIFF（共 {} 页），本版本只转换第一页",
-                    prepared.dropped_pages + 1
-                ),
-            ));
+            let (encoding, gray) = match &prepared.color {
+                ColorData::Jpeg { bytes, gray } => (ImageEncoding::Jpeg(bytes), *gray),
+                ColorData::Raw { bytes, gray } => (ImageEncoding::Raw(bytes), *gray),
+                ColorData::Flate { bytes, gray } => (ImageEncoding::Flate(bytes), *gray),
+            };
+            let image_ref = doc.add_image(&ImageData {
+                width: prepared.width,
+                height: prepared.height,
+                gray,
+                encoding,
+                alpha: prepared.alpha.as_deref(),
+            });
+
+            let mut page = PageSpec::new(prepared.page_w_pt, prepared.page_h_pt);
+            page.images.push(("Im0".into(), image_ref));
+            // image XObject 的坐标系是 1×1 的单位方块，靠 cm 矩阵拉伸到整页。
+            page.content.save_state();
+            page.content.transform(prepared.placement_matrix());
+            page.content.x_object(pdf_writer::Name(b"Im0"));
+            page.content.restore_state();
+            doc.add_page(page);
+
+            sink.emit(Progress::Item {
+                done: i,
+                total: paths.len(),
+                label,
+            });
         }
-        // 手动指定优先于文件里读到的。
-        let dated = match manual_times.get(path) {
-            Some(when) => Some(DatedFile {
-                when: *when,
-                source: TimeSource::Manual,
-            }),
-            None => read_time(path),
-        };
-        if let Some(t) = dated {
-            times.push(t);
-        }
-
-        let (encoding, gray) = match &prepared.color {
-            ColorData::Jpeg { bytes, gray } => (ImageEncoding::Jpeg(bytes), *gray),
-            ColorData::Raw { bytes, gray } => (ImageEncoding::Raw(bytes), *gray),
-        };
-        let image_ref = doc.add_image(&ImageData {
-            width: prepared.width,
-            height: prepared.height,
-            gray,
-            encoding,
-            alpha: prepared.alpha.as_deref(),
-        });
-
-        let mut page = PageSpec::new(prepared.page_w_pt, prepared.page_h_pt);
-        page.images.push(("Im0".into(), image_ref));
-        // image XObject 的坐标系是 1×1 的单位方块，靠 cm 矩阵拉伸到整页。
-        page.content.save_state();
-        page.content.transform(prepared.placement_matrix());
-        page.content.x_object(pdf_writer::Name(b"Im0"));
-        page.content.restore_state();
-        doc.add_page(page);
-
-        sink.emit(Progress::Item {
-            done: i + 1,
-            total: paths.len(),
-            label,
-        });
     }
 
     if doc.page_count() == 0 {
@@ -203,6 +220,30 @@ pub fn run(
         },
         warnings,
     ))
+}
+
+/// 读一张图、取拍摄时间（手动指定的优先）、准备好放进 PDF。一张图只读一遍。
+fn load(
+    path: &Path,
+    quality: &ImageQuality,
+    manual_times: &HashMap<PathBuf, Timestamp>,
+    sink: &dyn ProgressSink,
+) -> (Result<PreparedImage>, Option<DatedFile>) {
+    if sink.is_cancelled() {
+        return (Err(CoreError::Cancelled), None);
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => return (Err(CoreError::io(path, e)), None),
+    };
+    let dated = match manual_times.get(path) {
+        Some(when) => Some(DatedFile {
+            when: *when,
+            source: TimeSource::Manual,
+        }),
+        None => time_of(&bytes, path),
+    };
+    (prepare_bytes(bytes, path, quality), dated)
 }
 
 fn file_label(path: &Path) -> String {

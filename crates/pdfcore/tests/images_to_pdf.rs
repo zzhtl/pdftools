@@ -435,3 +435,137 @@ fn accepted_extensions_match_compiled_decoders() {
         );
     }
 }
+
+/// PDF 里第 `page` 页（0 起）那张图解出来的样本、分量数（灰度 1，RGB 3）。
+fn page_image(pdf: &[u8], page: usize) -> (Vec<u8>, usize) {
+    let doc = lopdf::Document::load_mem(pdf).unwrap();
+    let page_id = doc.get_pages().values().copied().nth(page).unwrap();
+    let (resources, _) = doc.get_page_resources(page_id).unwrap();
+    let xobjects = resources
+        .unwrap()
+        .get(b"XObject")
+        .and_then(lopdf::Object::as_dict)
+        .unwrap();
+    let (_, reference) = xobjects.iter().next().unwrap();
+    let stream = doc
+        .get_object(reference.as_reference().unwrap())
+        .and_then(lopdf::Object::as_stream)
+        .unwrap();
+    let gray = stream
+        .dict
+        .get(b"ColorSpace")
+        .and_then(lopdf::Object::as_name)
+        .ok()
+        == Some(b"DeviceGray".as_ref());
+    (
+        stream.decompressed_content().unwrap(),
+        if gray { 1 } else { 3 },
+    )
+}
+
+/// 无损档里的 PNG：按行做 PNG 预测再压缩，解出来与源图逐像素一致；灰度图按灰度存，
+/// 不扩成 RGB。
+#[test]
+fn lossless_png_round_trips_through_the_pdf() {
+    let dir = tmp();
+    let rgb = screenshot(301, 97);
+    let gray = image::GrayImage::from_fn(123, 45, |x, y| image::Luma([(x * 2 + y * 3) as u8]));
+    let (rgb_path, gray_path) = (dir.join("rt_rgb.png"), dir.join("rt_gray.png"));
+    rgb.save(&rgb_path).unwrap();
+    gray.save(&gray_path).unwrap();
+
+    let report = images_to_pdf::run(
+        &[rgb_path, gray_path],
+        Tier::Lossless,
+        &Default::default(),
+        &NoProgress,
+    )
+    .unwrap();
+    let pdf = &report.value.pdf;
+    assert_eq!(page_image(pdf, 0), (rgb.into_raw(), 3));
+    assert_eq!(page_image(pdf, 1), (gray.into_raw(), 1));
+}
+
+/// 几张图同时准备，放进 PDF 还是原来的顺序；中间坏了一张不影响其余的。
+#[test]
+fn pages_keep_the_input_order() {
+    let dir = tmp();
+    let mut paths: Vec<PathBuf> = (0..11)
+        .map(|i| write_jpeg(&dir, &format!("order_{i}.jpg"), 100 + i * 37, 100))
+        .collect();
+    let broken = dir.join("order_broken.jpg");
+    std::fs::write(&broken, b"not an image").unwrap();
+    paths.insert(5, broken);
+
+    let report =
+        images_to_pdf::run(&paths, Tier::Lossless, &Default::default(), &NoProgress).unwrap();
+    let doc = lopdf::Document::load_mem(&report.value.pdf).unwrap();
+    let ratios: Vec<f32> = doc
+        .get_pages()
+        .values()
+        .map(|&id| {
+            let page = doc.get_dictionary(id).unwrap();
+            let b: Vec<f32> = page
+                .get(b"MediaBox")
+                .and_then(lopdf::Object::as_array)
+                .unwrap()
+                .iter()
+                .map(|v| v.as_float().unwrap())
+                .collect();
+            (b[2] - b[0]) / (b[3] - b[1])
+        })
+        .collect();
+    let expected: Vec<f32> = (0..11).map(|i| (100 + i * 37) as f32 / 100.0).collect();
+    assert_eq!(ratios.len(), expected.len());
+    for (got, want) in ratios.iter().zip(&expected) {
+        assert!((got - want).abs() < 0.01, "{ratios:?}");
+    }
+    assert_eq!(
+        report
+            .warnings
+            .iter()
+            .filter(|w| w.detail.starts_with("order_broken.jpg"))
+            .count(),
+        1,
+        "{:?}",
+        report.warnings
+    );
+}
+
+/// 进度报到第 3 张时取消：整个任务以「已取消」结束，不会把剩下的图做完。
+#[test]
+fn cancelling_stops_the_batch() {
+    use pdfcore::{Progress, ProgressSink};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CancelAt {
+        at: usize,
+        done: AtomicUsize,
+    }
+    impl ProgressSink for CancelAt {
+        fn emit(&self, p: Progress) {
+            if let Progress::Item { done, .. } = p {
+                self.done.store(done, Ordering::SeqCst);
+            }
+        }
+        fn is_cancelled(&self) -> bool {
+            self.done.load(Ordering::SeqCst) >= self.at
+        }
+    }
+
+    let dir = tmp();
+    let paths: Vec<PathBuf> = (0..40)
+        .map(|i| write_jpeg(&dir, &format!("cancel_{i}.jpg"), 64, 48))
+        .collect();
+    let sink = CancelAt {
+        at: 3,
+        done: AtomicUsize::new(0),
+    };
+    let result = images_to_pdf::run(&paths, Tier::Lossless, &Default::default(), &sink);
+    assert!(
+        matches!(result, Err(pdfcore::CoreError::Cancelled)),
+        "{:?}",
+        result.map(|r| r.value)
+    );
+    assert!(sink.done.load(Ordering::SeqCst) < paths.len());
+}

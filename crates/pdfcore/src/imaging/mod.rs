@@ -29,8 +29,11 @@ use probe::Dpi;
 pub enum ColorData {
     /// 已经是 JPEG 字节，PDF 里直接用 `/DCTDecode`，不解码不重编码。
     Jpeg { bytes: Vec<u8>, gray: bool },
-    /// 原始像素（8 位），PDF 里用 `/FlateDecode`。真无损。
+    /// 原始像素（8 位），写出时再无损压缩。
     Raw { bytes: Vec<u8>, gray: bool },
+    /// 已经无损压好的像素（[`flate_image`](crate::pdf::writer::image::flate_image)）：
+    /// 压缩很费时，在准备图片的线程里先做掉。
+    Flate { bytes: Vec<u8>, gray: bool },
 }
 
 /// 这张图最终是以什么保真度进入 PDF 的。会在界面上以徽章形式如实告诉用户。
@@ -154,10 +157,16 @@ pub fn page_size_pt(width: u32, height: u32, dpi: Option<Dpi>) -> (f32, f32) {
 /// 三个都没有时，退到文件系统时间，但会标成 `FileSystem` —— 那**不是**拍摄时间，
 /// 复制一次就被刷成当前时刻，调用方必须区别对待，不能拿它去填 PDF 的 `/CreationDate`。
 pub fn read_time(path: &Path) -> Option<crate::timestamp::DatedFile> {
+    let bytes = std::fs::read(path).unwrap_or_default();
+    time_of(&bytes, path)
+}
+
+/// 同 [`read_time`]，文件内容已经读进来了（`bytes`，读不到时传空的）。
+pub fn time_of(bytes: &[u8], path: &Path) -> Option<crate::timestamp::DatedFile> {
     use crate::timestamp::{DatedFile, TimeSource, Timestamp};
 
-    if let Ok(bytes) = std::fs::read(path) {
-        let meta = read_metadata(&bytes);
+    if !bytes.is_empty() {
+        let meta = read_metadata(bytes);
 
         if let Some(when) = meta.exif.as_deref().and_then(probe::capture_time) {
             return Some(DatedFile {
@@ -224,6 +233,13 @@ fn read_metadata(bytes: &[u8]) -> EmbeddedMetadata {
 
 /// 为放进 PDF 准备一张图。
 pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedImage> {
+    let bytes = std::fs::read(path).map_err(|e| CoreError::io(path, e))?;
+    prepare_bytes(bytes, path, quality)
+}
+
+/// 同 [`prepare_for_pdf`]，文件内容已经读进来了：取拍摄时间也用这一份，一张图只读一遍。
+/// 会占很多 CPU（解码、缩放、编码），可以在多个线程里同时准备不同的图。
+pub fn prepare_bytes(bytes: Vec<u8>, path: &Path, quality: &ImageQuality) -> Result<PreparedImage> {
     if probe::is_heif(path) {
         return Err(CoreError::Unsupported(format!(
             "{} 是 HEIC/HEIF 格式，本程序不支持。请先在系统相册里导出为 JPEG 或 PNG。",
@@ -231,7 +247,6 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
         )));
     }
 
-    let bytes = std::fs::read(path).map_err(|e| CoreError::io(path, e))?;
     let container = probe::sniff(&bytes);
     let dropped_pages = if container == probe::Container::Tiff {
         probe::tiff_page_count(&bytes)
@@ -316,9 +331,11 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
 
     let has_alpha = img.color().has_alpha();
     let alpha = has_alpha.then(|| extract_alpha(&img));
+    // 灰度的源图按灰度存，扩成 RGB 只会让体积翻三倍。
+    let gray = quality.grayscale || is_gray_source(&img);
 
     let (color, fidelity) = if quality.lossless_only() && !rescaled {
-        (raw_color(&img, quality.grayscale), Fidelity::Lossless)
+        (flate_color(&img, gray), Fidelity::Lossless)
     } else {
         // 到底该用 JPEG 还是无损存储？不靠「看起来像不像照片」这类猜测 ——
         // 试过用颜色数做判据，真实的白墙照片只有 0.8% 的不同色占比，
@@ -327,17 +344,10 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
         // 改成直接测量：两种编码各估一次体积，按实测结果决定。
         // 截图和线稿的 flate 体积远小于 JPEG，会自然选到无损；
         // 照片的无损体积是 JPEG 的十几倍，会自然选到 JPEG。不需要任何魔法阈值。
-        let jpeg = quality::encode_jpeg(&img, quality.jpeg_quality, quality.grayscale)?;
-        let raw = raw_color(&img, quality.grayscale);
-        let ColorData::Raw {
-            bytes: raw_bytes,
-            gray,
-        } = &raw
-        else {
-            unreachable!("raw_color 只返回 Raw")
-        };
-        let components = if *gray { 1 } else { 3 };
-        let flate_est = quality::estimate_flate_len(raw_bytes, w as usize * components);
+        let jpeg = quality::encode_jpeg(&img, quality.jpeg_quality, gray)?;
+        let raw = samples(&img, gray);
+        let components = if gray { 1 } else { 3 };
+        let flate_est = quality::estimate_flate_len(&raw, w as usize * components, components);
         let use_flate = (flate_est as f32) <= jpeg.len() as f32 * quality::LOSSLESS_TOLERANCE;
 
         // 护栏（所有档位）：降采样 + 重编码之后不比原文件小，就退回原图直通。
@@ -365,7 +375,10 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
 
         if use_flate {
             (
-                raw,
+                ColorData::Flate {
+                    bytes: crate::pdf::writer::image::flate_image(&raw, w, components),
+                    gray,
+                },
                 if rescaled {
                     Fidelity::Reencoded
                 } else {
@@ -373,13 +386,7 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
                 },
             )
         } else {
-            (
-                ColorData::Jpeg {
-                    bytes: jpeg,
-                    gray: quality.grayscale,
-                },
-                Fidelity::Reencoded,
-            )
+            (ColorData::Jpeg { bytes: jpeg, gray }, Fidelity::Reencoded)
         }
     };
 
@@ -425,8 +432,12 @@ pub fn prepare_embedded(bytes: &[u8]) -> Result<EmbeddedImage> {
     }
     let img = image::load_from_memory(bytes).map_err(|e| CoreError::Image(format!("{e}")))?;
     let alpha = img.color().has_alpha().then(|| extract_alpha(&img));
+    let gray = is_gray_source(&img);
     Ok(EmbeddedImage {
-        color: raw_color(&img, false),
+        color: ColorData::Raw {
+            bytes: samples(&img, gray),
+            gray,
+        },
         alpha,
         width: img.width(),
         height: img.height(),
@@ -444,17 +455,27 @@ pub fn decode_oriented(bytes: &[u8]) -> Result<image::DynamicImage> {
     Ok(img)
 }
 
-fn raw_color(img: &image::DynamicImage, grayscale: bool) -> ColorData {
-    if grayscale {
-        ColorData::Raw {
-            bytes: img.to_luma8().into_raw(),
-            gray: true,
-        }
+/// 源图本身就是灰度的（含带透明通道的灰度）。
+pub fn is_gray_source(img: &image::DynamicImage) -> bool {
+    use image::ColorType as C;
+    matches!(img.color(), C::L8 | C::La8 | C::L16 | C::La16)
+}
+
+/// 8 位的样本：灰度一个分量，否则 RGB 三个。
+fn samples(img: &image::DynamicImage, gray: bool) -> Vec<u8> {
+    if gray {
+        img.to_luma8().into_raw()
     } else {
-        ColorData::Raw {
-            bytes: img.to_rgb8().into_raw(),
-            gray: false,
-        }
+        img.to_rgb8().into_raw()
+    }
+}
+
+/// 无损压好的样本。
+fn flate_color(img: &image::DynamicImage, gray: bool) -> ColorData {
+    let components = if gray { 1 } else { 3 };
+    ColorData::Flate {
+        bytes: crate::pdf::writer::image::flate_image(&samples(img, gray), img.width(), components),
+        gray,
     }
 }
 

@@ -188,6 +188,7 @@ fn embed_image(doc: &mut DocBuilder, bytes: &[u8]) -> Option<Ref> {
     let (encoding, gray) = match &img.color {
         ColorData::Jpeg { bytes, gray } => (ImageEncoding::Jpeg(bytes), *gray),
         ColorData::Raw { bytes, gray } => (ImageEncoding::Raw(bytes), *gray),
+        ColorData::Flate { bytes, gray } => (ImageEncoding::Flate(bytes), *gray),
     };
     Some(doc.add_image(&ImageData {
         width: img.width,

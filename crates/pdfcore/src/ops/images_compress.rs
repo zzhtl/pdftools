@@ -172,7 +172,11 @@ fn compress_one(
         (buf.into_inner(), "png".to_string())
     } else {
         (
-            crate::imaging::encode_jpeg_image(&out_img, quality.jpeg_quality, quality.grayscale)?,
+            crate::imaging::encode_jpeg_image(
+                &out_img,
+                quality.jpeg_quality,
+                quality.grayscale || crate::imaging::is_gray_source(&out_img),
+            )?,
             "jpg".to_string(),
         )
     };
