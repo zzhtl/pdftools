@@ -62,16 +62,9 @@ pub fn run(
 
     sink.emit(Progress::Started { total: paths.len() });
 
-    // 解码、缩放、压缩都吃 CPU，几张图同时准备；但一张 1200 万像素的图解开就是 36 MB，
-    // 不能全部一起上。按窗口来：一个窗口里的图同时准备，好了再按原来的顺序放进 PDF。
-    let workers = std::thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .min(4);
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(workers)
-        .build()
-        .map_err(|e| CoreError::Image(format!("无法启动工作线程：{e}")))?;
-    let window = workers * 2;
+    // 几张图同时准备：一个窗口里的图一起做，好了再按原来的顺序放进 PDF。
+    let pool = crate::imaging::worker_pool()?;
+    let window = pool.current_num_threads() * 2;
     let mut i = 0;
     for chunk in paths.chunks(window) {
         bail_if_cancelled!(sink);

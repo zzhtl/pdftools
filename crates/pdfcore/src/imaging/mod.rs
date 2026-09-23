@@ -108,6 +108,18 @@ fn swaps_dimensions(o: image::metadata::Orientation) -> bool {
     )
 }
 
+/// 同时处理几张图的线程池。解码、缩放、编码都吃 CPU，但一张 1200 万像素的图解开就是
+/// 36 MB，不能全部一起上：最多 4 个线程，调用方再按窗口（线程数的两倍）分批。
+pub(crate) fn worker_pool() -> Result<rayon::ThreadPool> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(4);
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map_err(|e| CoreError::Image(format!("无法启动工作线程：{e}")))
+}
+
 /// A4 长边，单位点。没有可信 DPI 元数据时，长边归一到这个值。
 const A4_LONG_EDGE_PT: f32 = 841.89;
 /// PDF 单页尺寸上限是 14400 个用户空间单位。

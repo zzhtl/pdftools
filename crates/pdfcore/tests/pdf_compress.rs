@@ -359,3 +359,149 @@ fn cmyk_jpeg_is_kept_and_explained() {
     );
     assert_images_consistent(&report.value.pdf);
 }
+
+/// 两页：第一页的资源继承自上级 Pages 节点；第二页把图画在一个 Form XObject 里，
+/// 表单按 `form_scale` 缩小。两张图都是同样的 2400×3200 照片。
+fn pdf_with_inherited_and_form_images(form_scale: f32) -> Vec<u8> {
+    use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref};
+    let (w, h) = (2400u32, 3200u32);
+    let jpeg = common::images::jpeg_q(
+        &image::DynamicImage::ImageRgb8(common::images::photo(w, h)),
+        92,
+    );
+    let r = Ref::new;
+    let (catalog, pages, shared, page1, page2) = (r(1), r(2), r(3), r(4), r(5));
+    let (content1, content2, form, img1, img2) = (r(6), r(7), r(8), r(9), r(10));
+    let mut pdf = Pdf::new();
+    pdf.catalog(catalog).pages(pages);
+    pdf.pages(pages)
+        .kids([page1, page2])
+        .count(2)
+        .pair(Name(b"Resources"), shared);
+    pdf.indirect(shared)
+        .dict()
+        .insert(Name(b"XObject"))
+        .dict()
+        .pair(Name(b"Im0"), img1);
+    let full_page = |c: &mut Content, name: &[u8]| {
+        c.save_state();
+        c.transform([595.0, 0.0, 0.0, 842.0, 0.0, 0.0]);
+        c.x_object(Name(name));
+        c.restore_state();
+    };
+    {
+        let mut p = pdf.page(page1);
+        p.media_box(Rect::new(0.0, 0.0, 595.0, 842.0));
+        p.parent(pages);
+        p.contents(content1);
+        p.finish();
+    }
+    let mut c = Content::new();
+    full_page(&mut c, b"Im0");
+    pdf.stream(content1, &c.finish());
+    {
+        let mut p = pdf.page(page2);
+        p.media_box(Rect::new(0.0, 0.0, 595.0, 842.0));
+        p.parent(pages);
+        p.contents(content2);
+        p.resources().x_objects().pair(Name(b"Fm0"), form);
+        p.finish();
+    }
+    let mut c = Content::new();
+    c.x_object(Name(b"Fm0"));
+    pdf.stream(content2, &c.finish());
+    let mut inner = Content::new();
+    full_page(&mut inner, b"Im1");
+    let inner = inner.finish();
+    {
+        let mut f = pdf.form_xobject(form, &inner);
+        f.bbox(Rect::new(0.0, 0.0, 595.0, 842.0));
+        f.matrix([form_scale, 0.0, 0.0, form_scale, 0.0, 0.0]);
+        f.resources().x_objects().pair(Name(b"Im1"), img2);
+        f.finish();
+    }
+    for img in [img1, img2] {
+        let mut x = pdf.image_xobject(img, &jpeg);
+        x.width(w as i32);
+        x.height(h as i32);
+        x.bits_per_component(8);
+        x.color_space().device_rgb();
+        x.filter(pdf_writer::Filter::DctDecode);
+        x.finish();
+    }
+    pdf.finish()
+}
+
+/// 压缩后各张图的宽度，按对象号排。
+fn image_widths(pdf: &[u8]) -> Vec<i64> {
+    let doc = lopdf::Document::load_mem(pdf).unwrap();
+    doc.objects
+        .values()
+        .filter_map(|o| o.as_stream().ok())
+        .filter(|s| {
+            s.dict.get(b"Subtype").and_then(lopdf::Object::as_name).ok() == Some(b"Image".as_ref())
+        })
+        .map(|s| s.dict.get(b"Width").unwrap().as_i64().unwrap())
+        .collect()
+}
+
+/// 资源写在上级 Pages 节点里、图画在 Form XObject 里：这两种都要压到。
+/// 表单缩小一半画，图的有效分辨率就高一倍，要比铺满整页的那张缩得更小。
+#[test]
+fn inherited_resources_and_form_images_are_compressed() {
+    let original = pdf_with_inherited_and_form_images(0.5);
+    let report = compress::run(&original, Tier::Extreme, false, &NoProgress).unwrap();
+    let out = &report.value;
+    assert_eq!(out.recompressed, 2, "{:?}", report.warnings);
+    assert!(out.pdf.len() < original.len());
+    assert_images_consistent(&out.pdf);
+    let mut widths = image_widths(&out.pdf);
+    widths.sort();
+    assert_eq!(widths.len(), 2);
+    assert!(
+        (widths[0] as f32 / widths[1] as f32 - 0.5).abs() < 0.02,
+        "表单里缩小一半画的图应当缩成一半宽：{widths:?}"
+    );
+}
+
+/// 进度报到第 3 张时取消：整个任务以「已取消」结束。
+#[test]
+fn cancelling_stops_the_compression() {
+    use pdfcore::{Progress, ProgressSink};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CancelAt(AtomicUsize);
+    impl ProgressSink for CancelAt {
+        fn emit(&self, p: Progress) {
+            if let Progress::Item { done, .. } = p {
+                self.0.store(done, Ordering::SeqCst);
+            }
+        }
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::SeqCst) >= 3
+        }
+    }
+
+    let dir = tmp();
+    let paths: Vec<PathBuf> = (0..20)
+        .map(|i| {
+            let path = dir.join(format!("cancel_{i}.jpg"));
+            image::DynamicImage::ImageRgb8(common::images::photo(400, 300))
+                .save_with_format(&path, image::ImageFormat::Jpeg)
+                .unwrap();
+            path
+        })
+        .collect();
+    let original = images_to_pdf::run(&paths, Tier::Lossless, &Default::default(), &NoProgress)
+        .unwrap()
+        .value
+        .pdf;
+    let sink = CancelAt(AtomicUsize::new(0));
+    let result = compress::run(&original, Tier::Extreme, true, &sink);
+    assert!(
+        matches!(result, Err(pdfcore::CoreError::Cancelled)),
+        "{:?}",
+        result.map(|r| r.value.recompressed)
+    );
+    assert!(sink.0.load(Ordering::SeqCst) < paths.len());
+}

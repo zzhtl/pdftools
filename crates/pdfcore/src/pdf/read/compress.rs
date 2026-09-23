@@ -5,6 +5,7 @@
 //! 通常 0-5%。界面必须如实说明，否则每个文字 PDF 的用户都会来报 bug。
 
 use lopdf::{Document, Object, ObjectId};
+use rayon::prelude::*;
 
 use super::placement;
 use crate::bail_if_cancelled;
@@ -153,8 +154,8 @@ pub fn run(
 
     let mut warnings = Vec::new();
     let quality = quality_of(tier, grayscale);
-    let placements = placement::scan(&doc);
-    let entries = collect_images(&doc);
+    let scan = placement::scan(&doc);
+    let entries = collect_images(&doc, &scan.images);
 
     sink.emit(Progress::Started {
         total: entries.len().max(1),
@@ -172,28 +173,44 @@ pub fn run(
     let mut skips: std::collections::BTreeMap<Skip, usize> = Default::default();
 
     if !quality.lossless_only() {
-        for (i, entry) in entries.iter().enumerate() {
+        // 几张图同时解码、缩放、重编码（只读文档），得出的新数据再依次写回去。
+        let pool = crate::imaging::worker_pool()?;
+        let window = pool.current_num_threads() * 2;
+        let mut done = 0;
+        for chunk in entries.chunks(window) {
             bail_if_cancelled!(sink);
-
-            // 每张图独立隔离：一张图的怪色彩空间不该让整份文件失败。
-            match try_recompress(&doc, entry, &placements, &quality) {
-                Decision::Replace(r) => {
-                    apply(&mut doc, entry, r);
-                    outcome.recompressed += 1;
-                }
-                Decision::KeptOriginal => outcome.kept_original += 1,
-                Decision::AlreadyOptimal => outcome.already_optimal += 1,
-                Decision::Tiny => {}
-                Decision::Skip(reason) => {
-                    outcome.skipped += 1;
-                    *skips.entry(reason).or_default() += 1;
-                }
-            }
-            sink.emit(Progress::Item {
-                done: i + 1,
-                total: entries.len(),
-                label: format!("图片 {}/{}", i + 1, entries.len()),
+            let decisions: Vec<Option<Decision>> = pool.install(|| {
+                chunk
+                    .par_iter()
+                    .map(|entry| {
+                        // 每张图独立隔离：一张图的怪色彩空间不该让整份文件失败。
+                        (!sink.is_cancelled())
+                            .then(|| try_recompress(&doc, entry, &scan.placements, &quality))
+                    })
+                    .collect()
             });
+            bail_if_cancelled!(sink);
+            for (entry, decision) in chunk.iter().zip(decisions) {
+                match decision {
+                    Some(Decision::Replace(r)) => {
+                        apply(&mut doc, entry, r);
+                        outcome.recompressed += 1;
+                    }
+                    Some(Decision::KeptOriginal) => outcome.kept_original += 1,
+                    Some(Decision::AlreadyOptimal) => outcome.already_optimal += 1,
+                    Some(Decision::Tiny) | None => {}
+                    Some(Decision::Skip(reason)) => {
+                        outcome.skipped += 1;
+                        *skips.entry(reason).or_default() += 1;
+                    }
+                }
+                done += 1;
+                sink.emit(Progress::Item {
+                    done,
+                    total: entries.len(),
+                    label: format!("图片 {done}/{}", entries.len()),
+                });
+            }
         }
     }
 
@@ -207,14 +224,13 @@ pub fn run(
     doc.prune_objects();
     doc.renumber_objects();
 
+    // 按现代格式（对象流 + 交叉引用流）写，对象多的文件能再省一截；写不出来才退回
+    // 传统格式。只写一遍：以前两种各写一遍取小的，扫描件的输出要在内存里同时放两份。
     let mut buf = Vec::with_capacity(original_bytes);
-    doc.save_to(&mut buf)
-        .map_err(|e| CoreError::Pdf(format!("写出 PDF 失败：{e}")))?;
-
-    // 再试一次现代格式（对象流 + 交叉引用流），对对象多的文件通常还能再省一截。
-    let mut modern = Vec::with_capacity(buf.len());
-    if doc.save_modern(&mut modern).is_ok() && modern.len() < buf.len() {
-        buf = modern;
+    if doc.save_modern(&mut buf).is_err() {
+        buf.clear();
+        doc.save_to(&mut buf)
+            .map_err(|e| CoreError::Pdf(format!("写出 PDF 失败：{e}")))?;
     }
 
     // 整体护栏：压完反而更大就原样返回。这条把最糟的结果变成一句诚实的说明。
@@ -283,38 +299,44 @@ fn has_signature(doc: &Document) -> bool {
     })
 }
 
-fn collect_images(doc: &Document) -> Vec<ImageEntry> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-
-    for (_, page_id) in doc.get_pages() {
-        let Ok(images) = doc.get_page_images(page_id) else {
-            continue;
-        };
-        for img in images {
-            if !seen.insert(img.id) {
-                continue; // 同一张图被多页引用，只处理一次
-            }
-            let dict = img.origin_dict;
-            let filters = img.filters.unwrap_or_default();
-            out.push(ImageEntry {
-                id: img.id,
-                width: img.width.max(0) as u32,
-                height: img.height.max(0) as u32,
-                model: color_model(doc, dict, &filters, img.content),
-                bits: img.bits_per_component.unwrap_or(8).max(0) as u32,
+/// 扫描找到的图片（对象号）逐张读出元数据。
+fn collect_images(doc: &Document, ids: &[ObjectId]) -> Vec<ImageEntry> {
+    ids.iter()
+        .filter_map(|&id| {
+            let stream = doc.get_object(id).and_then(Object::as_stream).ok()?;
+            let dict = &stream.dict;
+            // 宽高之类可能写成间接引用。
+            let int = |key: &[u8]| {
+                dict.get(key)
+                    .ok()
+                    .and_then(|o| doc.dereference(o).ok())
+                    .and_then(|(_, o)| o.as_i64().ok())
+            };
+            let filters: Vec<String> = stream
+                .filters()
+                .map(|f| {
+                    f.iter()
+                        .map(|n| String::from_utf8_lossy(n).into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(ImageEntry {
+                id,
+                width: int(b"Width")?.max(0) as u32,
+                height: int(b"Height")?.max(0) as u32,
+                model: color_model(doc, dict, &filters, &stream.content),
+                bits: int(b"BitsPerComponent").unwrap_or(8).max(0) as u32,
                 has_smask: dict.get(b"SMask").is_ok() || dict.get(b"Mask").is_ok(),
                 is_mask: dict
                     .get(b"ImageMask")
                     .and_then(Object::as_bool)
                     .unwrap_or(false),
                 has_decode: dict.get(b"Decode").is_ok(),
-                stored_len: img.content.len(),
+                stored_len: stream.content.len(),
                 filters,
-            });
-        }
-    }
-    out
+            })
+        })
+        .collect()
 }
 
 /// 定出颜色模型。字典里声明的色彩空间与 JPEG 头里的实际分量数都要看：
