@@ -47,7 +47,12 @@ pub fn run_with(
         .as_deref()
         .map(parse::parse_styles)
         .unwrap_or_default();
-    let raw = parse::parse_document(&pkg.document, styles)?;
+    let settings = pkg
+        .settings
+        .as_deref()
+        .map(parse::parse_settings)
+        .unwrap_or_default();
+    let raw = parse::parse_document(&pkg.document, styles, settings)?;
     sink.emit(step(2, "解析内容"));
     bail_if_cancelled!(sink);
 

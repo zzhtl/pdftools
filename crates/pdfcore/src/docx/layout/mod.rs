@@ -14,7 +14,7 @@ mod paginate;
 mod para;
 mod text;
 
-pub use calib::{Calib, EmptyPara, GridLayout};
+pub use calib::{Calib, EmptyPara, GridLayout, ParaSpacing};
 
 use super::ir;
 use crate::error::{Warning, WarningKind};
@@ -78,7 +78,8 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
         width: doc.page.content_width(),
         calib,
     };
-    let mut pages = paginate::Paginator::new(&doc.page, grid_area(doc, calib));
+    let collapse = doc.html_paragraph_spacing && calib.para_spacing == ParaSpacing::HtmlCollapse;
+    let mut pages = paginate::Paginator::new(&doc.page, grid_area(doc, calib), collapse);
     let mut warnings = Vec::new();
 
     let mut numbered = 0usize;

@@ -282,10 +282,18 @@ pub struct Styles {
     pub default_paragraph_style: Option<String>,
 }
 
+/// `settings.xml` 里影响排版的开关。
+#[derive(Debug, Clone, Default)]
+pub struct Settings {
+    /// `w:compat/w:doNotUseHTMLParagraphAutoSpacing`。
+    pub no_html_paragraph_spacing: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Document {
     pub body: Story,
     /// `w:body` 末尾的 `w:sectPr`：最后一节（只有一节时就是全文）的页面设置。
     pub section: SectPr,
     pub styles: Styles,
+    pub settings: Settings,
 }

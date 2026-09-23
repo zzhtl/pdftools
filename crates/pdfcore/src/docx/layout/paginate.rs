@@ -13,17 +13,23 @@ pub(super) struct Paginator<'a> {
     pages: Vec<Page>,
     /// 当前页已用掉的垂直空间（从正文区顶部往下量）。
     used: f32,
+    /// 段后距与下一段的段前距取较大值，而不是相加。
+    collapse_spacing: bool,
+    /// 当前页上刚加过的段后距。取较大值时，下一段的段前距只补差额。
+    last_after: f32,
 }
 
 impl<'a> Paginator<'a> {
     /// `area` 是正文区：(离版心顶端的偏移, 高度)。
-    pub fn new(page: &'a PageGeom, (origin, capacity): (f32, f32)) -> Self {
+    pub fn new(page: &'a PageGeom, (origin, capacity): (f32, f32), collapse_spacing: bool) -> Self {
         Self {
             page,
             origin,
             capacity,
             pages: vec![Page::default()],
             used: 0.0,
+            collapse_spacing,
+            last_after: 0.0,
         }
     }
 
@@ -38,6 +44,7 @@ impl<'a> Paginator<'a> {
     fn new_page(&mut self) {
         self.pages.push(Page::default());
         self.used = 0.0;
+        self.last_after = 0.0;
     }
 
     fn at_page_top(&self) -> bool {
@@ -53,7 +60,11 @@ impl<'a> Paginator<'a> {
         //
         // 在页首吃掉段前距是 HTML 的习惯，LibreOffice 并不这么做：同一份文档，
         // 参照的首行基线距正文顶 40.3pt，而吃掉段前距只有 24.1pt，整页内容整体上移一截。
-        self.used += para.space_before;
+        if self.collapse_spacing {
+            self.used += (para.space_before - self.last_after).max(0.0);
+        } else {
+            self.used += para.space_before;
+        }
 
         match &para.body {
             ParaBody::Empty { height } => {
@@ -75,9 +86,11 @@ impl<'a> Paginator<'a> {
             }
         }
         self.used += para.space_after;
+        self.last_after = para.space_after;
     }
 
     fn commit(&mut self, line: &Line) {
+        self.last_after = 0.0;
         let base = self.page.h_pt - self.page.margin_top - self.origin - self.used - line.baseline;
         let page = self.pages.last_mut().expect("至少有一页");
         page.ops.extend(line.ops.iter().map(|op| op.shifted(base)));

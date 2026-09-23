@@ -9,7 +9,7 @@ mod story;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 
-use super::model::{Document, SectPr, Style, Styles};
+use super::model::{Document, SectPr, Settings, Style, Styles};
 use crate::error::{CoreError, Result};
 
 pub(crate) type Rd<'a> = Reader<&'a [u8]>;
@@ -81,7 +81,7 @@ pub(crate) fn skip(r: &mut Rd, name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn parse_document(xml: &str, styles: Styles) -> Result<Document> {
+pub fn parse_document(xml: &str, styles: Styles, settings: Settings) -> Result<Document> {
     let mut r = Reader::from_str(xml);
     let mut body = Vec::new();
     let mut section = SectPr::default();
@@ -102,7 +102,26 @@ pub fn parse_document(xml: &str, styles: Styles) -> Result<Document> {
         body,
         section,
         styles,
+        settings,
     })
+}
+
+/// 解析 `settings.xml`。坏了不影响转换：读不到的开关按缺省处理。
+pub fn parse_settings(xml: &str) -> Settings {
+    let mut r = Reader::from_str(xml);
+    let mut settings = Settings::default();
+    while let Ok(ev) = r.read_event() {
+        match ev {
+            Event::Start(e) | Event::Empty(e)
+                if e.local_name().as_ref() == "doNotUseHTMLParagraphAutoSpacing" =>
+            {
+                settings.no_html_paragraph_spacing = on_off(&e);
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    settings
 }
 
 /// 解析 `styles.xml`：文档默认值 + 段落/字符样式定义。

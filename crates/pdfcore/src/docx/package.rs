@@ -18,6 +18,7 @@ pub struct Package {
     pub document: String,
     pub styles: Option<String>,
     pub numbering: Option<String>,
+    pub settings: Option<String>,
     /// 关系 id → 目标路径（用于把 `a:blip r:embed` 解析成 media 文件）。
     pub rels: HashMap<String, String>,
     /// 部件路径 → 字节。只收 word/media/ 下的图片。
@@ -51,6 +52,7 @@ pub fn open(path: &Path) -> Result<Package> {
     let mut document = None;
     let mut styles = None;
     let mut numbering = None;
+    let mut settings = None;
     let mut rels_xml = None;
     let mut core_xml = None;
     let mut media = HashMap::new();
@@ -77,6 +79,7 @@ pub fn open(path: &Path) -> Result<Package> {
             "word/document.xml"
                 | "word/styles.xml"
                 | "word/numbering.xml"
+                | "word/settings.xml"
                 | "word/_rels/document.xml.rels"
                 | "docProps/core.xml"
         );
@@ -100,6 +103,7 @@ pub fn open(path: &Path) -> Result<Package> {
             "word/document.xml" => document = Some(text),
             "word/styles.xml" => styles = Some(text),
             "word/numbering.xml" => numbering = Some(text),
+            "word/settings.xml" => settings = Some(text),
             "docProps/core.xml" => core_xml = Some(text),
             _ => rels_xml = Some(text),
         }
@@ -114,6 +118,7 @@ pub fn open(path: &Path) -> Result<Package> {
         document,
         styles,
         numbering,
+        settings,
         rels: rels_xml.as_deref().map(parse_rels).unwrap_or_default(),
         media,
     })

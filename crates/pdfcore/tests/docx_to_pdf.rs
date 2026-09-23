@@ -936,3 +936,40 @@ fn empty_paragraphs_that_do_not_fit_go_to_the_next_page() {
         .expect("找不到最后一段");
     assert_eq!(last_page, 2, "共 {} 页", pages.len());
 }
+
+/// 上一段的段后距与下一段的段前距：文档没有设置 `doNotUseHTMLParagraphAutoSpacing`
+/// 时取较大值（LibreOffice 实测），设置了才相加。
+#[test]
+fn paragraph_spacing_collapses_unless_the_document_opts_out() {
+    if !require_cjk_font() {
+        return;
+    }
+    let line = |tag: &str, before: u32, after: u32| {
+        format!(
+            r#"<w:p><w:pPr><w:spacing w:before="{before}" w:after="{after}"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>标记{tag}行</w:t></w:r></w:p>"#
+        )
+    };
+    let body = line("甲", 0, 240) + &line("乙", 360, 0) + &line("丙", 0, 0) + &line("丁", 0, 0);
+    let extra = |name: &str, settings: &str| {
+        let path = DocxBuilder::new()
+            .body(&body)
+            .settings(settings)
+            .build(name);
+        let pages = common::pdftext::extract(&convert(&path).value.pdf);
+        let gap = |a, b| common::calib::gap(&pages, a, b).expect("标记行不在同一页");
+        gap("甲", "乙") - gap("丙", "丁")
+    };
+    let collapsed = extra("spacing_collapse.docx", "");
+    let summed = extra(
+        "spacing_sum.docx",
+        "<w:compat><w:doNotUseHTMLParagraphAutoSpacing/></w:compat>",
+    );
+    assert!(
+        (collapsed - 18.0).abs() < 0.01,
+        "段后 12 + 段前 18 应当取 18：{collapsed}"
+    );
+    assert!(
+        (summed - 30.0).abs() < 0.01,
+        "设置了兼容选项应当相加：{summed}"
+    );
+}

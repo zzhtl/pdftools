@@ -13,6 +13,23 @@ pub struct Calib {
     pub default_size_pt: f32,
     pub empty_para: EmptyPara,
     pub grid: GridLayout,
+    pub para_spacing: ParaSpacing,
+}
+
+/// 上一段的段后距与下一段的段前距怎么合并。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParaSpacing {
+    /// 相加。
+    Sum,
+    /// 文档没有设置 `w:doNotUseHTMLParagraphAutoSpacing` 时取两者较大值，设置了才相加。
+    ///
+    /// 对照 LibreOffice 实测：段后 4 + 段前 8 → 8，段后 18 + 段前 12 → 18，有无网格、
+    /// 单倍或 1.3 倍行距都一样；加上这个兼容选项后变回相加。参照语料里「正文 → 小标题」
+    /// 的间距因此比相加少 3pt，与这条吻合。
+    ///
+    /// OOXML 规范说这个选项只管「自动」段落间距；Word 对写明数值的间距是否也这样合并，
+    /// 没有实测过。
+    HtmlCollapse,
 }
 
 /// 行网格（`w:docGrid` 为 lines 等类型）下，行在格子里、网格在版心里怎么摆。
@@ -54,6 +71,7 @@ impl Calib {
             default_size_pt: 10.0,
             empty_para: EmptyPara::MarkLine,
             grid: GridLayout::Centered,
+            para_spacing: ParaSpacing::HtmlCollapse,
         }
     }
 
@@ -62,6 +80,7 @@ impl Calib {
             default_size_pt: 10.5,
             empty_para: EmptyPara::Legacy,
             grid: GridLayout::Legacy,
+            para_spacing: ParaSpacing::Sum,
         }
     }
 }

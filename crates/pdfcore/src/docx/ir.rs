@@ -172,6 +172,9 @@ pub struct Document {
     pub has_header_footer: bool,
     /// 文档的行网格。None 表示没有网格或网格类型不吸附。
     pub grid: Option<Grid>,
+    /// 相邻两段的段后距与段前距取较大值而不是相加（HTML 的规矩）。
+    /// 文档没有设置 `w:doNotUseHTMLParagraphAutoSpacing` 时为真，见 `Calib::para_spacing`。
+    pub html_paragraph_spacing: bool,
     pub blocks: Vec<Block>,
 }
 
@@ -205,6 +208,7 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
         },
         has_header_footer: s.has_header_footer,
         grid,
+        html_paragraph_spacing: !doc.settings.no_html_paragraph_spacing,
         blocks,
     }
 }

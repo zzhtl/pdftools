@@ -7,7 +7,7 @@ fn body(inner: &str) -> Document {
     let xml = format!(
         r#"<w:document xmlns:w="w" xmlns:mc="mc" xmlns:wp="wp" xmlns:v="v"><w:body>{inner}</w:body></w:document>"#
     );
-    parse_document(&xml, Styles::default()).expect("解析失败")
+    parse_document(&xml, Styles::default(), Settings::default()).expect("解析失败")
 }
 
 fn paras(doc: &Document) -> Vec<&Para> {
@@ -159,4 +159,14 @@ fn breaks_keep_their_kind() {
             RunItem::NoBreakHyphen,
         ]
     );
+}
+
+#[test]
+fn html_paragraph_spacing_switch() {
+    let on = parse_settings(
+        r#"<w:settings><w:compat><w:doNotUseHTMLParagraphAutoSpacing/><w:useFELayout/></w:compat></w:settings>"#,
+    );
+    let off = parse_settings(r#"<w:settings><w:compat><w:useFELayout/></w:compat></w:settings>"#);
+    assert!(on.no_html_paragraph_spacing);
+    assert!(!off.no_html_paragraph_spacing);
 }
