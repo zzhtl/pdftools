@@ -16,9 +16,9 @@ mod script;
 mod text;
 
 pub use calib::{
-    AutoSpace, Breaks, Calib, Cascade, CharClass, EmptyPara, FixedBaseline, Flow, GridLayout,
-    HangingIndent, HangingPunct, Justify, Overflow, PageBottom, PageBreakBefore, ParaSpacing,
-    RunFormat, Tabs, Theme, TrailingSpaces,
+    AutoSpace, Breaks, Calib, Cascade, CharClass, Decor, EmptyPara, FixedBaseline, Flow,
+    GridLayout, HangingIndent, HangingPunct, Justify, Overflow, PageBottom, PageBreakBefore,
+    ParaSpacing, RunFormat, Tabs, Theme, TrailingSpaces,
 };
 
 use super::ir;
@@ -43,11 +43,10 @@ pub enum PaintOp {
         synthetic_bold: bool,
         synthetic_italic: bool,
     },
-    /// 虚线、点线样式的下划线：一条水平线。`dash` 是 PDF 的虚线样式（线段、间隔交替）。
+    /// 虚线、点线：下划线与段落边框。`dash` 是 PDF 的虚线样式（线段、间隔交替）。
     Line {
-        x1: f32,
-        x2: f32,
-        y: f32,
+        from: (f32, f32),
+        to: (f32, f32),
         width: f32,
         color: [u8; 3],
         dash: Vec<f32>,
@@ -75,7 +74,11 @@ impl PaintOp {
     fn shifted(&self, dy: f32) -> PaintOp {
         let mut op = self.clone();
         match &mut op {
-            PaintOp::Text { y, .. } | PaintOp::Rect { y, .. } | PaintOp::Line { y, .. } => *y += dy,
+            PaintOp::Text { y, .. } | PaintOp::Rect { y, .. } => *y += dy,
+            PaintOp::Line { from, to, .. } => {
+                from.1 += dy;
+                to.1 += dy;
+            }
             PaintOp::Link { y1, y2, .. } => {
                 *y1 += dy;
                 *y2 += dy;
@@ -126,6 +129,7 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
     if calib.flow == Flow::Word {
         contextual_spacing(&doc.blocks, &mut measured);
     }
+    join_boxes(&mut measured);
 
     let numbered = doc
         .blocks
@@ -231,6 +235,16 @@ fn contextual_spacing(blocks: &[ir::Block], measured: &mut [Measured]) {
     }
 }
 
+/// 相邻段落的边框、底纹、缩进都相同时合成一个框。占位块把相邻关系隔开。
+fn join_boxes(measured: &mut [Measured]) {
+    for i in 1..measured.len() {
+        let (head, tail) = measured.split_at_mut(i);
+        if let (Measured::Para(a), Measured::Para(b)) = (&mut head[i - 1], &tail[0]) {
+            a.joins_next = a.decor.is_some() && a.decor == b.decor;
+        }
+    }
+}
+
 /// 正文能用的竖向区间：(离版心顶端的偏移, 高度)。见 [`GridLayout::Centered`]。
 fn grid_area(doc: &ir::Document, calib: &Calib) -> (f32, f32) {
     let height = doc.page.content_height();
@@ -295,6 +309,8 @@ fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
         keep_lines: false,
         widow_control: false,
         contextual_spacing: false,
+        borders: ir::Borders::default(),
+        shading: None,
         style_id: None,
         numbering_dropped: false,
         text,

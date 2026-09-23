@@ -30,6 +30,24 @@ pub struct Calib {
     pub theme: Theme,
     pub char_class: CharClass,
     pub auto_space: AutoSpace,
+    pub decor: Decor,
+}
+
+/// 段落边框（`w:pBdr`）与段落底纹（`w:shd`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decor {
+    /// 不画，也不占位置。
+    Ignored,
+    /// 对照 LibreOffice 实测：
+    /// - 上、下边框各占「线厚 + `w:space`」的高度：框顶紧贴段前距之下，隔着距离才是
+    ///   第一行；下边框同理。左右边框画在缩进之外（再往外隔 `w:space`），不挤文字；
+    ///   有左右边框时上下边框横向伸到左右边框的外沿。双线是两条线中间隔一条线宽。
+    /// - 相邻段落的边框、底纹、缩进都相同时合成一个框：中间没有上下边框，段距算在
+    ///   框里；写了 `w:between` 时中间画一条线，线上下各隔它的 `w:space`。
+    /// - 跨页时框在断开处各自收口：前一页照样画下边框（放不放得下要算上它），
+    ///   后一页重新画上边框。
+    /// - 底纹铺满整个框（含边框与距离）；没有边框时就是各行的范围，不占高度。
+    Boxes,
 }
 
 /// 中西文之间的自动间距（`w:autoSpaceDE` / `w:autoSpaceDN`，0.2em）加在哪里。
@@ -304,6 +322,7 @@ impl Calib {
             theme: Theme::Resolved,
             char_class: CharClass::Blocks,
             auto_space: AutoSpace::Letters,
+            decor: Decor::Boxes,
         }
     }
 
@@ -329,6 +348,7 @@ impl Calib {
             theme: Theme::Ignored,
             char_class: CharClass::Legacy,
             auto_space: AutoSpace::Legacy,
+            decor: Decor::Ignored,
         }
     }
 }

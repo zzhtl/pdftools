@@ -104,13 +104,12 @@ pub fn paint(
                 }
                 PaintOp::Rect { x, y, w, h, color } => canvas.fill_rect(*x, *y, *w, *h, *color),
                 PaintOp::Line {
-                    x1,
-                    x2,
-                    y,
+                    from,
+                    to,
                     width,
                     color,
                     dash,
-                } => canvas.stroke_line((*x1, *y), (*x2, *y), *width, *color, Some(dash)),
+                } => canvas.stroke_line(*from, *to, *width, *color, Some(dash)),
                 PaintOp::Link {
                     x1,
                     y1,

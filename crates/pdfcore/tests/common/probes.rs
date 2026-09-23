@@ -274,5 +274,73 @@ pub fn all() -> Vec<Probe> {
         DocxBuilder::new().styles(styles).body(&styled),
     );
 
+    // 段落边框与底纹：红头线、上下框、带缩进的四边框、合成一个框的相邻段落
+    // （有无分隔线）、双线、粗线、底纹，再加一段跨页的带框段落。
+    let side = |s: &str, val: &str, sz: u32, space: u32, color: &str| {
+        format!(r#"<w:{s} w:val="{val}" w:sz="{sz}" w:space="{space}" w:color="{color}"/>"#)
+    };
+    let boxed = |sz: u32, space: u32, between: bool| {
+        let mut s: String = ["top", "left", "bottom", "right"]
+            .iter()
+            .map(|s| side(s, "single", sz, space, "000000"))
+            .collect();
+        if between {
+            s += &side("between", "single", sz, space, "000000");
+        }
+        format!("<w:pBdr>{s}</w:pBdr>")
+    };
+    let shd = r#"<w:shd w:val="clear" w:color="auto" w:fill="D9D9D9"/>"#;
+    let indent = r#"<w:ind w:left="720" w:right="720"/>"#;
+    let groups: Vec<Vec<String>> = vec![
+        vec![probe_para(
+            &format!(
+                r#"<w:pBdr>{}</w:pBdr><w:jc w:val="center"/>"#,
+                side("bottom", "single", 12, 1, "FF0000")
+            ),
+            &filler(1, 10),
+        )],
+        vec![probe_para(
+            &format!(
+                "<w:pBdr>{}{}</w:pBdr>",
+                side("top", "single", 8, 4, "000000"),
+                side("bottom", "single", 8, 4, "000000")
+            ),
+            &filler(2, 60),
+        )],
+        vec![probe_para(&(boxed(4, 4, false) + indent), &filler(3, 60))],
+        (0..2)
+            .map(|i| probe_para(&boxed(4, 1, false), &filler(4 + i, 30)))
+            .collect(),
+        (0..2)
+            .map(|i| probe_para(&boxed(4, 1, true), &filler(6 + i, 30)))
+            .collect(),
+        vec![probe_para(
+            &format!(
+                "<w:pBdr>{}</w:pBdr>",
+                side("bottom", "double", 6, 1, "000000")
+            ),
+            &filler(8, 30),
+        )],
+        vec![probe_para(&(shd.to_string() + indent), &filler(9, 60))],
+        vec![probe_para(&(boxed(4, 4, false) + shd), &filler(10, 30))],
+        vec![probe_para(
+            &format!(
+                "<w:pBdr>{}</w:pBdr>",
+                side("bottom", "single", 24, 0, "000000")
+            ),
+            &filler(11, 30),
+        )],
+    ];
+    let mut bordered: String = groups
+        .iter()
+        .enumerate()
+        .map(|(i, g)| probe_para("", &filler(20 + i, 30)) + &g.concat())
+        .collect();
+    bordered += &(0..12)
+        .map(|i| probe_para("", &filler(40 + i, 30)))
+        .collect::<String>();
+    bordered += &probe_para(&(boxed(4, 4, false) + shd), &filler(60, 240));
+    add("paragraph_borders", DocxBuilder::new().body(&bordered));
+
     v
 }

@@ -1,9 +1,9 @@
 //! 分页：把测量好的块按顺序放进页面。
 
 use super::calib::{Calib, PageBreakBefore};
-use super::para::{Line, ParaBody, ParaBox};
-use super::Page;
-use crate::docx::ir::PageGeom;
+use super::para::{Line, ParaBody, ParaBox, ParaDecor};
+use super::{Page, PaintOp};
+use crate::docx::ir::{self, BorderStyle, PageGeom};
 
 pub(super) struct Paginator<'a> {
     page: &'a PageGeom,
@@ -19,6 +19,16 @@ pub(super) struct Paginator<'a> {
     /// 当前页上刚加过的段后距。取较大值时，下一段的段前距只补差额。
     last_after: f32,
     page_break_before: PageBreakBefore,
+    /// 正在画的段落框。同一组的段落共用一个框；换页时在旧页收口，新页上重新开。
+    open: Option<OpenBox>,
+}
+
+struct OpenBox {
+    decor: ParaDecor,
+    /// 框顶在哪（与 `used` 同一个量法）。
+    top: f32,
+    /// 开框时本页已有几个绘制操作。底纹插在这个位置，画在文字下面。
+    ops_at: usize,
 }
 
 impl<'a> Paginator<'a> {
@@ -38,6 +48,7 @@ impl<'a> Paginator<'a> {
             collapse_spacing,
             last_after: 0.0,
             page_break_before: calib.page_break_before,
+            open: None,
         }
     }
 
@@ -45,11 +56,13 @@ impl<'a> Paginator<'a> {
         self.pages.len() - 1
     }
 
-    pub fn finish(self) -> Vec<Page> {
+    pub fn finish(mut self) -> Vec<Page> {
+        self.close_box();
         self.pages
     }
 
     fn new_page(&mut self) {
+        self.close_box();
         self.pages.push(Page::default());
         self.used = 0.0;
         self.last_after = 0.0;
@@ -77,12 +90,14 @@ impl<'a> Paginator<'a> {
         let mut last_after = self.last_after;
         let mut need = 0.0;
         for p in chain {
-            need += self.gap_before(p, last_after) + p.body_height() + p.space_after;
+            need += self.gap_before(p, last_after) + p.body_height() + p.decor_height();
+            need += p.space_after;
             last_after = p.space_after;
         }
         if let Some(n) = next {
             if !n.page_break_before {
-                need += self.gap_before(n, last_after) + n.first_line_height();
+                let top = n.decor.as_ref().map_or(0.0, ParaDecor::top);
+                need += self.gap_before(n, last_after) + top + n.first_line_height();
             }
         }
         if self.used + need > self.capacity + FIT_TOLERANCE {
@@ -101,10 +116,18 @@ impl<'a> Paginator<'a> {
         // 段中不分页：整段放不下、又不在页首，就整段挪到下一页。
         if para.keep_lines
             && !self.at_page_top()
-            && self.used + self.gap_before(para, self.last_after) + para.body_height()
+            && self.used
+                + self.gap_before(para, self.last_after)
+                + para.body_height()
+                + para.decor_height()
                 > self.capacity + FIT_TOLERANCE
         {
             self.new_page();
+        }
+        // 上一段留着的框：同一组就接着用（段距算在框里），否则先收口。
+        let continuing = matches!((&self.open, &para.decor), (Some(o), Some(d)) if o.decor == *d);
+        if !continuing {
+            self.close_box();
         }
         // 段前距在页首也照常生效。
         //
@@ -118,18 +141,33 @@ impl<'a> Paginator<'a> {
 
         match &para.body {
             ParaBody::Empty { height } => {
+                if let Some(d) = &para.decor {
+                    let lead = self.lead(d);
+                    self.start_lines(d, lead);
+                }
                 self.used += height;
             }
             ParaBody::Lines(lines) => {
+                // 框的下边框也要放得下：跨页时前一页照样收口。
+                let reserve = para.decor.as_ref().map_or(0.0, ParaDecor::bottom);
                 let mut next = 0;
                 while next < lines.len() {
-                    let mut n = fit_lines(&lines[next..], self.used, self.capacity);
+                    let lead = para.decor.as_ref().map_or(0.0, |d| self.lead(d));
+                    let mut n = fit_lines(
+                        &lines[next..],
+                        self.used + lead,
+                        self.capacity - reserve,
+                        self.at_page_top(),
+                    );
                     if para.widow_control {
                         n = widow_orphan(lines.len(), next, n, &lines[..], self.at_page_top());
                     }
                     if n == 0 {
                         self.new_page();
                         continue;
+                    }
+                    if let Some(d) = &para.decor {
+                        self.start_lines(d, lead);
                     }
                     for line in &lines[next..next + n] {
                         self.commit(line);
@@ -145,8 +183,80 @@ impl<'a> Paginator<'a> {
                 }
             }
         }
+        if !para.joins_next {
+            self.close_box();
+        }
         self.used += para.space_after;
         self.last_after = para.space_after;
+    }
+
+    /// 本页接下来要放 `d` 框里的行，第一行之前还要占多高：框还没开就是上边框，
+    /// 接着上一段的框就是分隔线（有的话）。
+    fn lead(&self, d: &ParaDecor) -> f32 {
+        if self.open.is_some() {
+            d.between()
+        } else {
+            d.top()
+        }
+    }
+
+    /// 放第一行之前：开框，或者在同一个框里画上一段与本段之间的分隔线。
+    fn start_lines(&mut self, d: &ParaDecor, lead: f32) {
+        if self.open.is_some() {
+            if let Some(b) = d.borders.between {
+                let y = self.y(self.used + b.space);
+                let page = self.pages.last_mut().expect("至少有一页");
+                edge(&mut page.ops, &b, Side::Top, (d.left, d.right), y);
+            }
+        } else {
+            let ops_at = self.pages.last().map_or(0, |p| p.ops.len());
+            self.open = Some(OpenBox {
+                decor: d.clone(),
+                top: self.used,
+                ops_at,
+            });
+        }
+        self.used += lead;
+    }
+
+    /// 收口：加上下边框占的高度，画出底纹与四边。
+    fn close_box(&mut self) {
+        let Some(b) = self.open.take() else {
+            return;
+        };
+        let d = &b.decor;
+        self.used += d.bottom();
+        let (top, bottom) = (self.y(b.top), self.y(self.used));
+        let page = self.pages.last_mut().expect("至少有一页");
+        if let Some(color) = d.fill {
+            let fill = PaintOp::Rect {
+                x: d.left,
+                y: bottom,
+                w: d.right - d.left,
+                h: top - bottom,
+                color,
+            };
+            page.ops.insert(b.ops_at, fill);
+        }
+        let ops = &mut page.ops;
+        let (across, up) = ((d.left, d.right), (bottom, top));
+        if let Some(e) = &d.borders.top {
+            edge(ops, e, Side::Top, across, top);
+        }
+        if let Some(e) = &d.borders.bottom {
+            edge(ops, e, Side::Bottom, across, bottom);
+        }
+        if let Some(e) = &d.borders.left {
+            edge(ops, e, Side::Left, up, d.left);
+        }
+        if let Some(e) = &d.borders.right {
+            edge(ops, e, Side::Right, up, d.right);
+        }
+    }
+
+    /// 从正文区顶部往下 `used` 处的 y（PDF 坐标）。
+    fn y(&self, used: f32) -> f32 {
+        self.page.h_pt - self.page.margin_top - self.origin - used
     }
 
     fn commit(&mut self, line: &Line) {
@@ -187,13 +297,84 @@ fn widow_orphan(total: usize, next: usize, n: usize, lines: &[Line], at_top: boo
 /// 在 f32 里累加出来会比网格区的 686.4pt 多一点点，不留余量就会少排一行。
 const FIT_TOLERANCE: f32 = 1e-3;
 
+/// 框的哪一边。
+#[derive(Clone, Copy)]
+enum Side {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+/// 画一条边框线。`outer` 是它的外沿（上边框的上沿、左边框的左沿），线往框里长；
+/// `span` 是它沿线方向的范围。
+fn edge(ops: &mut Vec<PaintOp>, b: &ir::Border, side: Side, (lo, hi): (f32, f32), outer: f32) {
+    let inward = match side {
+        Side::Top | Side::Right => -1.0,
+        Side::Bottom | Side::Left => 1.0,
+    };
+    let horizontal = matches!(side, Side::Top | Side::Bottom);
+    let w = b.width;
+    // 离外沿 `from` 处起、一条线宽的带子。
+    let band = |from: f32| {
+        let (a, c) = (outer + inward * from, outer + inward * (from + w));
+        let (p0, p1) = (a.min(c), a.max(c));
+        if horizontal {
+            PaintOp::Rect {
+                x: lo,
+                y: p0,
+                w: hi - lo,
+                h: p1 - p0,
+                color: b.color,
+            }
+        } else {
+            PaintOp::Rect {
+                x: p0,
+                y: lo,
+                w: p1 - p0,
+                h: hi - lo,
+                color: b.color,
+            }
+        }
+    };
+    match b.style {
+        BorderStyle::Double => {
+            ops.push(band(0.0));
+            ops.push(band(2.0 * w));
+        }
+        BorderStyle::Dotted | BorderStyle::Dashed => {
+            let mid = outer + inward * w / 2.0;
+            let unit = w.max(0.5);
+            let dash = if b.style == BorderStyle::Dotted {
+                vec![unit, unit]
+            } else {
+                vec![unit * 6.0, unit * 3.0]
+            };
+            let (from, to) = if horizontal {
+                ((lo, mid), (hi, mid))
+            } else {
+                ((mid, lo), (mid, hi))
+            };
+            ops.push(PaintOp::Line {
+                from,
+                to,
+                width: w,
+                color: b.color,
+                dash,
+            });
+        }
+        _ => ops.push(band(0.0)),
+    }
+}
+
 /// 从已用高度 `used` 开始，当前页还放得下前几行。
 ///
-/// 页首（什么都还没放）的那一行无论多高都放得下 —— 否则一行比整页还高时永远排不出去。
-fn fit_lines(lines: &[Line], mut used: f32, content_height: f32) -> usize {
+/// 页首（`at_top`，本页什么都还没放）的那一行无论多高都放得下 —— 否则一行比整页
+/// 还高时永远排不出去。
+fn fit_lines(lines: &[Line], mut used: f32, content_height: f32, at_top: bool) -> usize {
     let mut n = 0;
     for line in lines {
-        if used + line.fit_height > content_height + FIT_TOLERANCE && used > f32::EPSILON {
+        if used + line.fit_height > content_height + FIT_TOLERANCE && !(at_top && n == 0) {
             break;
         }
         used += line.height;
@@ -226,9 +407,9 @@ mod tests {
     #[test]
     fn fits_until_the_next_line_would_cross_the_bottom() {
         let l = lines(&[20.0, 20.0, 20.0]);
-        assert_eq!(fit_lines(&l, 0.0, 60.0), 3);
-        assert_eq!(fit_lines(&l, 0.0, 59.9), 2);
-        assert_eq!(fit_lines(&l, 45.0, 60.0), 0);
+        assert_eq!(fit_lines(&l, 0.0, 60.0, true), 3);
+        assert_eq!(fit_lines(&l, 0.0, 59.9, true), 2);
+        assert_eq!(fit_lines(&l, 45.0, 60.0, false), 0);
     }
 
     /// 网格区正好放满 22 行：浮点累加误差不能让最后一行被挤到下一页。
@@ -238,7 +419,7 @@ mod tests {
         let grid = crate::docx::ir::Grid { pitch_pt: 15.6 };
         let area = (697.9f32 / grid.pitch_pt).floor() * grid.pitch_pt;
         let l = lines(&[grid.snap(17.388); 23]);
-        assert_eq!(fit_lines(&l, 0.0, area), 22);
+        assert_eq!(fit_lines(&l, 0.0, area, true), 22);
     }
 
     /// 行距倍数在文字下方多出来的空白可以越过页底。
@@ -252,8 +433,8 @@ mod tests {
             ops: Vec::new(),
         };
         let l = [line(40.56, 31.2), line(40.56, 31.2)];
-        assert_eq!(fit_lines(&l, 0.0, 72.0), 2);
-        assert_eq!(fit_lines(&l, 0.0, 71.0), 1);
+        assert_eq!(fit_lines(&l, 0.0, 72.0, true), 2);
+        assert_eq!(fit_lines(&l, 0.0, 71.0, true), 1);
     }
 
     #[test]
@@ -274,7 +455,7 @@ mod tests {
     #[test]
     fn a_line_taller_than_the_page_still_goes_on_an_empty_page() {
         let l = lines(&[500.0, 20.0]);
-        assert_eq!(fit_lines(&l, 0.0, 100.0), 1);
-        assert_eq!(fit_lines(&l, 10.0, 100.0), 0);
+        assert_eq!(fit_lines(&l, 0.0, 100.0, true), 1);
+        assert_eq!(fit_lines(&l, 10.0, 100.0, false), 0);
     }
 }

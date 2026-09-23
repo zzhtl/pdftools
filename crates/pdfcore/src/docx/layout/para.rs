@@ -3,7 +3,7 @@
 use std::ops::Range;
 
 use super::calib::{
-    Calib, EmptyPara, Flow, HangingIndent, HangingPunct, Justify, Overflow, TrailingSpaces,
+    Calib, Decor, EmptyPara, Flow, HangingIndent, HangingPunct, Justify, Overflow, TrailingSpaces,
 };
 use super::metrics::line_box;
 use super::text::{self, Hang, Piece, ShapedPara, TabRules};
@@ -49,7 +49,58 @@ pub(super) struct ParaBox {
     pub keep_next: bool,
     pub keep_lines: bool,
     pub widow_control: bool,
+    /// 段落边框与底纹。
+    pub decor: Option<ParaDecor>,
+    /// 与下一段合成同一个框（边框、底纹、缩进都相同）。排完所有段落后才知道。
+    pub joins_next: bool,
     pub body: ParaBody,
+}
+
+/// 段落边框与底纹围成的框。横向位置在测量时就定了；纵向由分页决定 ——
+/// 框在哪一页开、哪一页收，跨页时两边各自收口。见 [`Decor::Boxes`]。
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ParaDecor {
+    /// 框的左、右外沿（绝对 x）。
+    pub left: f32,
+    pub right: f32,
+    pub borders: ir::Borders,
+    pub fill: Option<[u8; 3]>,
+}
+
+impl ParaDecor {
+    /// 框顶到第一行：上边框的厚度加上它与文字的距离。
+    pub fn top(&self) -> f32 {
+        self.borders.top.map_or(0.0, |b| b.thickness() + b.space)
+    }
+
+    /// 最后一行到框底。
+    pub fn bottom(&self) -> f32 {
+        self.borders.bottom.map_or(0.0, |b| b.thickness() + b.space)
+    }
+
+    /// 同一个框里两段之间的分隔线，连同它上下的距离。
+    pub fn between(&self) -> f32 {
+        self.borders
+            .between
+            .map_or(0.0, |b| b.space + b.thickness() + b.space)
+    }
+}
+
+fn decor(para: &ir::Paragraph, env: &Env) -> Option<ParaDecor> {
+    let b = para.borders;
+    if env.calib.decor == Decor::Ignored || (b == ir::Borders::default() && para.shading.is_none())
+    {
+        return None;
+    }
+    // 左边框从缩进（悬挂缩进时是首行的位置）往外：先隔开距离，再是线。
+    let indent = para.indent_left.min(para.indent_left + para.first_line);
+    let outside = |b: Option<ir::Border>| b.map_or(0.0, |b| b.space + b.thickness());
+    Some(ParaDecor {
+        left: env.left + indent - outside(b.left),
+        right: env.left + env.width - para.indent_right + outside(b.right),
+        borders: b,
+        fill: para.shading,
+    })
 }
 
 impl ParaBox {
@@ -59,6 +110,11 @@ impl ParaBox {
             ParaBody::Empty { height } => *height,
             ParaBody::Lines(lines) => lines.iter().map(|l| l.height).sum(),
         }
+    }
+
+    /// 边框占的高度：上、下边框各自的厚度与距离。
+    pub fn decor_height(&self) -> f32 {
+        self.decor.as_ref().map_or(0.0, |d| d.top() + d.bottom())
     }
 
     /// 第一行在页底要容得下的高度。
@@ -96,6 +152,8 @@ pub(super) fn measure(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> P
         keep_next: flow && para.keep_next,
         keep_lines: flow && para.keep_lines,
         widow_control: flow && para.widow_control,
+        decor: decor(para, env),
+        joins_next: false,
         body,
     }
 }
@@ -418,9 +476,8 @@ fn decorate(ops: &mut Vec<PaintOp>, u: ir::Underline, x: f32, w: f32, size: f32,
         color: u.color,
     };
     let dashed = |width: f32, dash: Vec<f32>| PaintOp::Line {
-        x1: x,
-        x2: x + w,
-        y: y + width / 2.0,
+        from: (x, y + width / 2.0),
+        to: (x + w, y + width / 2.0),
         width,
         color: u.color,
         dash,

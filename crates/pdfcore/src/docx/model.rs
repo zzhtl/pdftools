@@ -231,6 +231,10 @@ pub struct PPr {
     pub widow_control: Option<bool>,
     /// `w:contextualSpacing`：与同一样式的相邻段落之间不加段距。
     pub contextual_spacing: Option<bool>,
+    /// `w:pBdr`：段落边框。
+    pub borders: ParaBorders,
+    /// `w:shd`：段落底纹。`Some(None)` 是明确写了没有底纹。
+    pub shading: Option<Option<[u8; 3]>>,
     /// 本段挂了自动编号（`w:numPr`）。
     pub numbering: bool,
     /// `w:pPr/w:rPr`：段落标记自身的格式。它参与 run 的层叠，优先级低于 run 上的直接格式。
@@ -276,9 +280,55 @@ impl PPr {
             ($($f:ident),*) => { $( if other.$f.is_some() { self.$f = other.$f; } )* };
         }
         take!(keep_next, keep_lines, widow_control, contextual_spacing);
+        self.borders.merge(&other.borders);
+        if other.shading.is_some() {
+            self.shading = other.shading;
+        }
         self.numbering |= other.numbering;
         self.mark_rpr.merge(&other.mark_rpr);
     }
+}
+
+/// `w:pBdr` 的各条边。样式链上逐条覆盖：写了 `w:val="nil"` 的边会盖掉样式里的边框。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ParaBorders {
+    pub top: Option<Border>,
+    pub left: Option<Border>,
+    pub bottom: Option<Border>,
+    pub right: Option<Border>,
+    /// 相邻的同样边框的段落之间画的线。
+    pub between: Option<Border>,
+}
+
+impl ParaBorders {
+    fn merge(&mut self, other: &ParaBorders) {
+        macro_rules! take {
+            ($($f:ident),*) => { $( if other.$f.is_some() { self.$f = other.$f; } )* };
+        }
+        take!(top, left, bottom, right, between);
+    }
+}
+
+/// 一条边框线。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Border {
+    pub style: BorderStyle,
+    /// `w:sz`：线宽，八分之一磅。双线时是每一条的宽度。
+    pub size_eighths: i32,
+    /// `w:space`：与文字的距离，磅。
+    pub space_pt: i32,
+    /// None 是 auto（跟文字一个颜色，按黑色画）。
+    pub color: Option<[u8; 3]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorderStyle {
+    /// `nil` / `none`：没有这条边。
+    None,
+    Single,
+    Double,
+    Dotted,
+    Dashed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

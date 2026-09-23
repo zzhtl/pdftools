@@ -4,8 +4,8 @@ use quick_xml::events::Event;
 
 use super::{attr, attr_i32, on_off, skip, xml_err, Rd};
 use crate::docx::model::{
-    Align, DocGrid, FontRef, LineRule, PPr, RPr, SectPr, TabAlign, TabDef, TabLeader, ThemeFont,
-    Underline, UnderlineStyle, VertAlign,
+    Align, Border, BorderStyle, DocGrid, FontRef, LineRule, PPr, RPr, SectPr, TabAlign, TabDef,
+    TabLeader, ThemeFont, Underline, UnderlineStyle, VertAlign,
 };
 use crate::error::Result;
 
@@ -23,6 +23,65 @@ fn parse_color(s: &str) -> Option<[u8; 3]> {
         u8::from_str_radix(&s[2..4], 16).ok()?,
         u8::from_str_radix(&s[4..6], 16).ok()?,
     ])
+}
+
+/// `w:shd` 实际的填充色。`w:val` 是图案：`clear` 只有底色（`w:fill`），`solid`
+/// 全是前景色（`w:color`），`pctN` 是前景色按 N% 盖在底色上；其余图案按底色画。
+/// 没有颜色（auto、`nil`）时返回 None。
+fn parse_shd(e: &quick_xml::events::BytesStart) -> Option<[u8; 3]> {
+    let val = attr(e, "val").unwrap_or_default();
+    let color = |name| {
+        attr(e, name)
+            .filter(|c| !c.eq_ignore_ascii_case("auto"))
+            .and_then(|c| parse_color(&c))
+    };
+    let fill = color("fill");
+    if val == "nil" {
+        return None;
+    }
+    if val == "solid" {
+        return Some(color("color").unwrap_or([0, 0, 0]));
+    }
+    if let Some(pct) = val.strip_prefix("pct").and_then(|p| p.parse::<u32>().ok()) {
+        let (fg, bg) = (
+            color("color").unwrap_or([0, 0, 0]),
+            fill.unwrap_or([0xFF, 0xFF, 0xFF]),
+        );
+        let t = pct.min(100) as f32 / 100.0;
+        return Some(std::array::from_fn(|i| {
+            (bg[i] as f32 * (1.0 - t) + fg[i] as f32 * t).round() as u8
+        }));
+    }
+    fill
+}
+
+/// `w:pBdr` 里的一条边。多线样式（三线、粗细线）近似成双线，其余线型近似成单线。
+fn parse_border(e: &quick_xml::events::BytesStart) -> Border {
+    let style = match attr(e, "val").as_deref() {
+        None | Some("nil") | Some("none") => BorderStyle::None,
+        Some("dotted") => BorderStyle::Dotted,
+        Some("dashed" | "dashSmallGap" | "dotDash" | "dotDotDash" | "dashDotStroked") => {
+            BorderStyle::Dashed
+        }
+        Some(v)
+            if v == "double"
+                || v == "triple"
+                || v.starts_with("thinThick")
+                || v.starts_with("thickThin") =>
+        {
+            BorderStyle::Double
+        }
+        _ => BorderStyle::Single,
+    };
+    Border {
+        style,
+        // 没写线宽时按 Word 的缺省 1/2 磅。
+        size_eighths: attr_i32(e, "sz").unwrap_or(4).max(0),
+        space_pt: attr_i32(e, "space").unwrap_or(0).max(0),
+        color: attr(e, "color")
+            .filter(|c| !c.eq_ignore_ascii_case("auto"))
+            .and_then(|c| parse_color(&c)),
+    }
 }
 
 fn parse_underline(e: &quick_xml::events::BytesStart) -> Underline {
@@ -94,14 +153,7 @@ pub(super) fn parse_rpr(r: &mut Rd) -> Result<RPr> {
                 "strike" => rpr.strike = Some(on_off(&e)),
                 "dstrike" => rpr.double_strike = Some(on_off(&e)),
                 "highlight" => rpr.highlight = Some(attr(&e, "val").as_deref().and_then(highlight)),
-                "shd" => {
-                    rpr.shading = Some(
-                        attr(&e, "fill")
-                            .as_deref()
-                            .filter(|f| !f.eq_ignore_ascii_case("auto"))
-                            .and_then(parse_color),
-                    )
-                }
+                "shd" => rpr.shading = Some(parse_shd(&e)),
                 "sz" => rpr.size_half_pt = attr_i32(&e, "val").map(|v| v.max(1) as u32),
                 "color" => rpr.color = attr(&e, "val").as_deref().and_then(parse_color),
                 "rFonts" => {
@@ -200,6 +252,13 @@ pub(super) fn parse_ppr(r: &mut Rd) -> Result<(PPr, Option<SectPr>)> {
                 "keepLines" => ppr.keep_lines = Some(on_off(&e)),
                 "widowControl" => ppr.widow_control = Some(on_off(&e)),
                 "contextualSpacing" => ppr.contextual_spacing = Some(on_off(&e)),
+                "shd" => ppr.shading = Some(parse_shd(&e)),
+                // `w:pBdr` 的各条边。这些名字在 `w:pPr` 里只会出现在 `w:pBdr` 下面。
+                "top" => ppr.borders.top = Some(parse_border(&e)),
+                "left" | "start" => ppr.borders.left = Some(parse_border(&e)),
+                "bottom" => ppr.borders.bottom = Some(parse_border(&e)),
+                "right" | "end" => ppr.borders.right = Some(parse_border(&e)),
+                "between" => ppr.borders.between = Some(parse_border(&e)),
                 // 段落属性里的 `w:tab` 只会出现在 `w:tabs` 里。
                 "tab" => {
                     if let Some(t) = parse_tab(&e) {

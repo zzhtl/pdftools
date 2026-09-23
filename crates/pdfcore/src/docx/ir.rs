@@ -19,7 +19,7 @@ use std::ops::Range;
 
 use super::layout::{Calib, Cascade, RunFormat, Theme};
 use super::model::{self, BreakKind, FontRef, LineRule, PPr, RPr, RunItem, ThemeScript};
-pub use super::model::{TabAlign, TabLeader, UnderlineStyle, VertAlign};
+pub use super::model::{BorderStyle, TabAlign, TabLeader, UnderlineStyle, VertAlign};
 use super::resolve::Resolver;
 
 pub const LINE_BREAK: char = '\u{2028}';
@@ -166,6 +166,9 @@ pub struct Paragraph {
     pub keep_lines: bool,
     pub widow_control: bool,
     pub contextual_spacing: bool,
+    pub borders: Borders,
+    /// 段落底纹的颜色。
+    pub shading: Option<[u8; 3]>,
     /// 段落样式（没写 `w:pStyle` 时是默认段落样式）。判断「同一样式的相邻段落」用。
     pub style_id: Option<String>,
     /// 本段挂了自动编号，但编号文字没有生成。
@@ -174,6 +177,60 @@ pub struct Paragraph {
     pub spans: Vec<Span>,
     /// 段落标记（¶）的格式。空段落的行高由它决定。
     pub mark: RunStyle,
+}
+
+/// 段落边框的一条线，单位已换成点。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Border {
+    /// 不会是 [`BorderStyle::None`]：没有的边不出现在 [`Borders`] 里。
+    pub style: BorderStyle,
+    /// 一条线的宽度。双线是两条这么宽的线，中间再隔一条线宽。
+    pub width: f32,
+    /// 与文字的距离。
+    pub space: f32,
+    pub color: [u8; 3],
+}
+
+impl Border {
+    /// 这条边一共占多厚。
+    pub fn thickness(&self) -> f32 {
+        match self.style {
+            BorderStyle::Double => self.width * 3.0,
+            _ => self.width,
+        }
+    }
+}
+
+/// 段落边框（`w:pBdr`）。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Borders {
+    pub top: Option<Border>,
+    pub left: Option<Border>,
+    pub bottom: Option<Border>,
+    pub right: Option<Border>,
+    /// 相邻的、边框相同的段落之间的线。
+    pub between: Option<Border>,
+}
+
+impl Borders {
+    fn from_model(b: &model::ParaBorders) -> Self {
+        let side = |b: Option<model::Border>| {
+            b.filter(|b| b.style != BorderStyle::None && b.size_eighths > 0)
+                .map(|b| Border {
+                    style: b.style,
+                    width: b.size_eighths as f32 / 8.0,
+                    space: b.space_pt as f32,
+                    color: b.color.unwrap_or([0, 0, 0]),
+                })
+        };
+        Self {
+            top: side(b.top),
+            left: side(b.left),
+            bottom: side(b.bottom),
+            right: side(b.right),
+            between: side(b.between),
+        }
+    }
 }
 
 /// 本版本画不出来的内容。它是 IR 的一等公民，而不是一个被丢掉的分支 ——
@@ -201,6 +258,8 @@ pub struct Placeholder {
     pub text: Vec<String>,
 }
 
+// 块几乎都是段落，占位块少见：给段落装箱省不下多少内存，反倒每段多一次分配。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum Block {
     Para(Paragraph),
@@ -591,6 +650,8 @@ fn paragraph(
         keep_lines: ppr.keep_lines.unwrap_or(false),
         widow_control: ppr.widow_control.unwrap_or(true),
         contextual_spacing: ppr.contextual_spacing.unwrap_or(false),
+        borders: Borders::from_model(&ppr.borders),
+        shading: ppr.shading.flatten(),
         style_id: None,
         numbering_dropped: ppr.numbering,
         text,

@@ -226,3 +226,37 @@ fn theme_font_scheme_and_language() {
     );
     assert_eq!(settings.theme_font_lang_east_asia.as_deref(), Some("zh-CN"));
 }
+
+#[test]
+fn paragraph_borders_and_shading() {
+    use crate::docx::model::BorderStyle;
+    let doc = body(
+        r#"<w:p><w:pPr><w:pBdr><w:top w:val="single" w:sz="12" w:space="1" w:color="FF0000"/><w:left w:val="nil"/><w:bottom w:val="thinThickSmallGap" w:sz="6" w:space="4" w:color="auto"/><w:between w:val="dashSmallGap"/></w:pBdr><w:shd w:val="pct20" w:color="auto" w:fill="FFFFFF"/></w:pPr></w:p>
+<w:p><w:pPr><w:shd w:val="solid" w:color="00FF00" w:fill="FF0000"/></w:pPr><w:r><w:rPr><w:shd w:val="clear" w:color="auto" w:fill="auto"/></w:rPr><w:t>甲</w:t></w:r></w:p>"#,
+    );
+    let ps = paras(&doc);
+    let b = &ps[0].ppr.borders;
+    let top = b.top.unwrap();
+    assert_eq!(
+        (top.style, top.size_eighths, top.space_pt, top.color),
+        (BorderStyle::Single, 12, 1, Some([0xFF, 0, 0]))
+    );
+    assert_eq!(
+        b.left.unwrap().style,
+        BorderStyle::None,
+        "nil 要能盖掉样式里的边"
+    );
+    let bottom = b.bottom.unwrap();
+    assert_eq!((bottom.style, bottom.color), (BorderStyle::Double, None));
+    assert_eq!(b.between.unwrap().style, BorderStyle::Dashed);
+    assert_eq!(b.right, None);
+    // 20% 的黑色图案盖在白底上。
+    assert_eq!(ps[0].ppr.shading, Some(Some([204, 204, 204])));
+    // solid 全是前景色，不是底色。
+    assert_eq!(ps[1].ppr.shading, Some(Some([0, 0xFF, 0])));
+    assert_eq!(
+        ps[1].runs[0].rpr.shading,
+        Some(None),
+        "auto 底色等于没有底纹"
+    );
+}

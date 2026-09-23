@@ -1693,3 +1693,105 @@ fn autospace_only_between_ideographs_and_alphanumerics() {
         );
     }
 }
+
+/// 段落边框与底纹：红头线、合成一个框的相邻段落、分隔线、底纹，以及跨页时框在
+/// 两页各自收口。几何关系都按相对量断言，不依赖字体度量。
+#[test]
+fn paragraph_borders_and_shading_are_drawn() {
+    use common::pdfpaths::{self, Path};
+    if !require_cjk_font() {
+        return;
+    }
+    // 固定行距 20pt：一页 34 行，与字体无关。
+    let p = |ppr: &str, text: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:spacing w:line="400" w:lineRule="exact"/>{ppr}</w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    };
+    let side = |s: &str, color: &str, sz: u32, space: u32| {
+        format!(r#"<w:{s} w:val="single" w:sz="{sz}" w:space="{space}" w:color="{color}"/>"#)
+    };
+    let red = format!("<w:pBdr>{}</w:pBdr>", side("bottom", "FF0000", 12, 1));
+    let boxed = |between: bool, space: u32| {
+        let mut s: String = ["top", "left", "bottom", "right"]
+            .iter()
+            .map(|s| side(s, "000000", 4, space))
+            .collect();
+        if between {
+            s += &side("between", "000000", 4, space);
+        }
+        format!("<w:pBdr>{s}</w:pBdr>")
+    };
+    let convert_body = |name: &str, body: &str| {
+        let pdf = convert(&make_docx(name, body)).value.pdf;
+        (common::pdftext::extract(&pdf), pdfpaths::extract(&pdf), pdf)
+    };
+    let color_is = |p: &Path, c: [f32; 3]| p.color.iter().zip(c).all(|(a, b)| (a - b).abs() < 0.01);
+    let horizontal = |paths: &[Path], c: [f32; 3]| -> Vec<Path> {
+        paths
+            .iter()
+            .filter(|p| color_is(p, c) && p.w() > p.h())
+            .cloned()
+            .collect()
+    };
+    const RED: [f32; 3] = [1.0, 0.0, 0.0];
+    const BLACK: [f32; 3] = [0.0, 0.0, 0.0];
+
+    // 红头线：下边框 1.5pt、距文字 1pt，本段因此高出 2.5pt；线横跨整个版心。
+    let gap = |pages: &[common::pdftext::PageText]| pages[0].lines[0].y - pages[0].lines[1].y;
+    let (plain, _, _) = convert_body("red_plain.docx", &(p("", "标题") + &p("", "正文")));
+    let (text, paths, _) = convert_body("red_line.docx", &(p(&red, "标题") + &p("", "正文")));
+    assert!((gap(&text) - gap(&plain) - 2.5).abs() < 0.01);
+    let line = &horizontal(&paths[0], RED)[..];
+    assert_eq!(line.len(), 1, "{paths:?}");
+    assert!((line[0].h() - 1.5).abs() < 0.01 && (line[0].w() - 436.5).abs() < 0.05);
+    assert!(line[0].bbox[1] > text[0].lines[1].y && line[0].bbox[3] < text[0].lines[0].y);
+
+    // 边框相同的相邻段落合成一个框：中间没有横线，左边框从头连到尾；
+    // 写了 between 才在中间画一条。
+    for (between, name) in [(false, "box_group.docx"), (true, "box_between.docx")] {
+        let body = p(&boxed(between, 1), "框一") + &p(&boxed(between, 1), "框二");
+        let (text, paths, _) = convert_body(name, &body);
+        assert_eq!(horizontal(&paths[0], BLACK).len(), 2 + between as usize);
+        let left = paths[0]
+            .iter()
+            .filter(|p| color_is(p, BLACK) && p.h() > p.w())
+            .map(|p| p.bbox[0])
+            .fold(f32::MAX, f32::min);
+        let spans_both = paths[0].iter().any(|p| {
+            p.bbox[0] == left && p.bbox[3] > text[0].lines[0].y && p.bbox[1] < text[0].lines[1].y
+        });
+        assert!(spans_both, "左边框应当连通两段：{paths:?}");
+    }
+
+    // 底纹盖住文字所在的行，而且先画、在文字下面。
+    let shd = r#"<w:shd w:val="clear" w:color="auto" w:fill="D9D9D9"/>"#;
+    let (text, paths, pdf) = convert_body("shading.docx", &p(shd, "底纹"));
+    let fill = paths[0]
+        .iter()
+        .find(|p| !p.stroke && color_is(p, [0.85; 3]))
+        .expect("应有底纹");
+    assert!(fill.bbox[1] < text[0].lines[0].y && text[0].lines[0].y < fill.bbox[3]);
+    let ops: Vec<String> = all_content_ops(&pdf)
+        .into_iter()
+        .map(|o| o.operator)
+        .collect();
+    let first = |names: &[&str]| ops.iter().position(|o| names.contains(&o.as_str()));
+    assert!(first(&["f"]) < first(&["Tj", "TJ"]), "底纹要画在文字下面");
+
+    // 跨页：前 30 行填充后第一页还剩 97.9pt。上下边框各占 9.5pt，8 行的带框段落
+    // 只放得下 3 行 —— 不给下边框留地方的话会放 4 行。两页各自是一个完整的框。
+    let filler: String = (0..30).map(|i| p("", &format!("填充{i}"))).collect();
+    let body = filler + &p(&boxed(false, 9), &"边框段落".repeat(70));
+    let (text, paths, _) = convert_body("box_split.docx", &body);
+    assert_eq!(text.len(), 2);
+    assert_eq!(text[0].lines.len(), 33, "第一页：30 行填充 + 3 行带框");
+    for (page, paths) in paths.iter().enumerate() {
+        assert_eq!(
+            horizontal(paths, BLACK).len(),
+            2,
+            "第 {} 页的框要收口",
+            page + 1
+        );
+    }
+}
