@@ -41,7 +41,16 @@ pub enum PaintOp {
         synthetic_bold: bool,
         synthetic_italic: bool,
     },
-    /// 下划线、删除线、占位框的边都用矩形画。
+    /// 虚线、点线样式的下划线：一条水平线。`dash` 是 PDF 的虚线样式（线段、间隔交替）。
+    Line {
+        x1: f32,
+        x2: f32,
+        y: f32,
+        width: f32,
+        color: [u8; 3],
+        dash: Vec<f32>,
+    },
+    /// 下划线、删除线、底色、占位框的边都用矩形画。
     Rect {
         x: f32,
         y: f32,
@@ -56,7 +65,7 @@ impl PaintOp {
     fn shifted(&self, dy: f32) -> PaintOp {
         let mut op = self.clone();
         match &mut op {
-            PaintOp::Text { y, .. } | PaintOp::Rect { y, .. } => *y += dy,
+            PaintOp::Text { y, .. } | PaintOp::Rect { y, .. } | PaintOp::Line { y, .. } => *y += dy,
         }
         op
     }
@@ -167,8 +176,10 @@ fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
         size_pt: 9.0,
         bold: false,
         italic: false,
-        underline: false,
+        underline: None,
         strike: false,
+        double_strike: false,
+        background: None,
         color: PLACEHOLDER_COLOR,
         font_latin: None,
         font_east_asia: None,

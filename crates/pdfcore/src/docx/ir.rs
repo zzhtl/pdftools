@@ -19,7 +19,7 @@ use std::ops::Range;
 
 use super::layout::{Calib, RunFormat};
 use super::model::{self, BreakKind, LineRule, PPr, RPr, RunItem};
-pub use super::model::{TabAlign, TabLeader};
+pub use super::model::{TabAlign, TabLeader, UnderlineStyle};
 use super::resolve::Resolver;
 
 pub const LINE_BREAK: char = '\u{2028}';
@@ -96,8 +96,11 @@ pub struct RunStyle {
     pub size_pt: f32,
     pub bold: bool,
     pub italic: bool,
-    pub underline: bool,
+    pub underline: Option<Underline>,
     pub strike: bool,
+    pub double_strike: bool,
+    /// 文字背后的底色：突出显示，没有的话是底纹。
+    pub background: Option<[u8; 3]>,
     pub color: [u8; 3],
     /// 西文字体家族名（来自 `w:rFonts/@w:ascii`）。
     pub font_latin: Option<String>,
@@ -105,6 +108,13 @@ pub struct RunStyle {
     pub font_east_asia: Option<String>,
     /// 每个字后面额外加的间距（点），负数是紧缩。
     pub char_spacing: f32,
+}
+
+/// 下划线，颜色已经落实（没写时就是文字颜色）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Underline {
+    pub style: UnderlineStyle,
+    pub color: [u8; 3],
 }
 
 /// 段落文字里的一段同格式区间。span 首尾相接、不重叠、都不为空。
@@ -316,6 +326,8 @@ fn push_paragraph(out: &mut Vec<Block>, p: &model::Para, resolver: &Resolver, ca
 }
 
 fn run_style(rpr: &RPr, calib: &Calib) -> RunStyle {
+    let full = calib.run_format == RunFormat::Full;
+    let color = rpr.color.unwrap_or([0, 0, 0]);
     RunStyle {
         size_pt: rpr
             .size_half_pt
@@ -323,9 +335,28 @@ fn run_style(rpr: &RPr, calib: &Calib) -> RunStyle {
             .unwrap_or(calib.default_size_pt),
         bold: rpr.bold.unwrap_or(false),
         italic: rpr.italic.unwrap_or(false),
-        underline: rpr.underline.unwrap_or(false),
+        underline: rpr
+            .underline
+            .filter(|u| u.style != UnderlineStyle::None)
+            .map(|u| match calib.run_format {
+                RunFormat::Full => Underline {
+                    style: u.style,
+                    color: u.color.unwrap_or(color),
+                },
+                // 重写前只有单线，颜色跟文字走。
+                RunFormat::Legacy => Underline {
+                    style: UnderlineStyle::Single,
+                    color,
+                },
+            }),
         strike: rpr.strike.unwrap_or(false),
-        color: rpr.color.unwrap_or([0, 0, 0]),
+        double_strike: full && rpr.double_strike.unwrap_or(false),
+        background: if full {
+            rpr.highlight.flatten().or(rpr.shading.flatten())
+        } else {
+            None
+        },
+        color,
         font_latin: rpr.font_ascii.clone(),
         font_east_asia: rpr.font_east_asia.clone(),
         char_spacing: match calib.run_format {

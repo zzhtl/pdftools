@@ -103,6 +103,14 @@ pub fn paint(
                     });
                 }
                 PaintOp::Rect { x, y, w, h, color } => canvas.fill_rect(*x, *y, *w, *h, *color),
+                PaintOp::Line {
+                    x1,
+                    x2,
+                    y,
+                    width,
+                    color,
+                    dash,
+                } => canvas.stroke_line((*x1, *y), (*x2, *y), *width, *color, Some(dash)),
             }
         }
         doc.add_page(canvas.finish());

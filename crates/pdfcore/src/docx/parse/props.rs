@@ -3,7 +3,10 @@
 use quick_xml::events::Event;
 
 use super::{attr, attr_i32, on_off, skip, xml_err, Rd};
-use crate::docx::model::{Align, DocGrid, LineRule, PPr, RPr, SectPr, TabAlign, TabDef, TabLeader};
+use crate::docx::model::{
+    Align, DocGrid, LineRule, PPr, RPr, SectPr, TabAlign, TabDef, TabLeader, Underline,
+    UnderlineStyle,
+};
 use crate::error::Result;
 
 fn parse_color(s: &str) -> Option<[u8; 3]> {
@@ -22,6 +25,61 @@ fn parse_color(s: &str) -> Option<[u8; 3]> {
     ])
 }
 
+fn parse_underline(e: &quick_xml::events::BytesStart) -> Underline {
+    use UnderlineStyle as U;
+    let style = match attr(e, "val").as_deref() {
+        None | Some("single") => U::Single,
+        Some("none") => U::None,
+        Some("words") => U::Words,
+        Some("double") => U::Double,
+        Some("thick") => U::Thick,
+        Some("dotted") => U::Dotted,
+        Some("dottedHeavy") => U::DottedHeavy,
+        Some("dash") => U::Dash,
+        Some("dashedHeavy") => U::DashedHeavy,
+        Some("dashLong") => U::DashLong,
+        Some("dashLongHeavy") => U::DashLongHeavy,
+        Some("dotDash") => U::DotDash,
+        Some("dashDotHeavy") => U::DashDotHeavy,
+        Some("dotDotDash") => U::DotDotDash,
+        Some("dashDotDotHeavy") => U::DashDotDotHeavy,
+        Some("wave") => U::Wave,
+        Some("wavyHeavy") => U::WavyHeavy,
+        Some("wavyDouble") => U::WavyDouble,
+        Some(_) => U::Single,
+    };
+    Underline {
+        style,
+        color: attr(e, "color")
+            .as_deref()
+            .filter(|c| !c.eq_ignore_ascii_case("auto"))
+            .and_then(parse_color),
+    }
+}
+
+/// `ST_HighlightColor` 的颜色名。
+fn highlight(name: &str) -> Option<[u8; 3]> {
+    Some(match name {
+        "black" => [0x00, 0x00, 0x00],
+        "blue" => [0x00, 0x00, 0xFF],
+        "cyan" => [0x00, 0xFF, 0xFF],
+        "green" => [0x00, 0xFF, 0x00],
+        "magenta" => [0xFF, 0x00, 0xFF],
+        "red" => [0xFF, 0x00, 0x00],
+        "yellow" => [0xFF, 0xFF, 0x00],
+        "white" => [0xFF, 0xFF, 0xFF],
+        "darkBlue" => [0x00, 0x00, 0x80],
+        "darkCyan" => [0x00, 0x80, 0x80],
+        "darkGreen" => [0x00, 0x80, 0x00],
+        "darkMagenta" => [0x80, 0x00, 0x80],
+        "darkRed" => [0x80, 0x00, 0x00],
+        "darkYellow" => [0x80, 0x80, 0x00],
+        "darkGray" => [0x80, 0x80, 0x80],
+        "lightGray" => [0xC0, 0xC0, 0xC0],
+        _ => return None,
+    })
+}
+
 pub(super) fn parse_rpr(r: &mut Rd) -> Result<RPr> {
     let mut rpr = RPr::default();
     loop {
@@ -32,10 +90,18 @@ pub(super) fn parse_rpr(r: &mut Rd) -> Result<RPr> {
                 "rStyle" => rpr.style_id = attr(&e, "val"),
                 "b" => rpr.bold = Some(on_off(&e)),
                 "i" => rpr.italic = Some(on_off(&e)),
-                "u" => {
-                    rpr.underline = Some(attr(&e, "val").as_deref() != Some("none"));
-                }
+                "u" => rpr.underline = Some(parse_underline(&e)),
                 "strike" => rpr.strike = Some(on_off(&e)),
+                "dstrike" => rpr.double_strike = Some(on_off(&e)),
+                "highlight" => rpr.highlight = Some(attr(&e, "val").as_deref().and_then(highlight)),
+                "shd" => {
+                    rpr.shading = Some(
+                        attr(&e, "fill")
+                            .as_deref()
+                            .filter(|f| !f.eq_ignore_ascii_case("auto"))
+                            .and_then(parse_color),
+                    )
+                }
                 "sz" => rpr.size_half_pt = attr_i32(&e, "val").map(|v| v.max(1) as u32),
                 "color" => rpr.color = attr(&e, "val").as_deref().and_then(parse_color),
                 "rFonts" => {

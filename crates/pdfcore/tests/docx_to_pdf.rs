@@ -1319,3 +1319,60 @@ fn sym_elements_become_real_symbols_without_the_font() {
     let text = text_of(&convert(&make_docx("sym.docx", body)).value.pdf);
     assert!(text.contains("☑同意◻不同意"), "抽回：{text}");
 }
+
+/// 突出显示画在文字底下；点线下划线带虚线样式；双下划线是两条、用下划线自己的颜色。
+#[test]
+fn highlight_and_underline_styles_are_drawn() {
+    if !require_cjk_font() {
+        return;
+    }
+    let run = |rpr: &str, text: &str| {
+        format!(
+            r#"<w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/>{rpr}<w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r>"#
+        )
+    };
+    let fill_of = |ops: &[lopdf::content::Operation], i: usize| -> Option<[f32; 3]> {
+        // 往回找最近的一个 rg。
+        ops[..i].iter().rev().find(|o| o.operator == "rg").map(|o| {
+            let n = |k: usize| o.operands[k].as_float().unwrap();
+            [n(0), n(1), n(2)]
+        })
+    };
+
+    let body = format!(
+        "<w:p>{}</w:p>",
+        run(r#"<w:highlight w:val="yellow"/>"#, "突出显示")
+    );
+    let ops = all_content_ops(&convert(&make_docx("highlight.docx", &body)).value.pdf);
+    let first_text = ops.iter().position(|o| o.operator == "BT").unwrap();
+    assert!(
+        ops[..first_text]
+            .iter()
+            .enumerate()
+            .any(|(i, o)| o.operator == "re" && fill_of(&ops, i) == Some([1.0, 1.0, 0.0])),
+        "黄色底色要在文字之前画"
+    );
+
+    let body = format!(
+        "<w:p>{}</w:p>",
+        run(r#"<w:u w:val="dotted"/>"#, "点线下划线")
+    );
+    let ops = all_content_ops(&convert(&make_docx("dotted.docx", &body)).value.pdf);
+    assert!(
+        ops.iter()
+            .any(|o| o.operator == "d" && o.operands[0].as_array().is_ok_and(|a| !a.is_empty())),
+        "点线下划线要设虚线样式"
+    );
+
+    let body = format!(
+        "<w:p>{}</w:p>",
+        run(r#"<w:u w:val="double" w:color="FF0000"/>"#, "双下划线")
+    );
+    let ops = all_content_ops(&convert(&make_docx("double_u.docx", &body)).value.pdf);
+    let red_rects = ops
+        .iter()
+        .enumerate()
+        .filter(|(i, o)| o.operator == "re" && fill_of(&ops, *i) == Some([1.0, 0.0, 0.0]))
+        .count();
+    assert_eq!(red_rects, 2, "红色双下划线应当是两条");
+}

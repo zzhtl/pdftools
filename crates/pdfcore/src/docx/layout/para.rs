@@ -259,6 +259,8 @@ fn line(
     // 跳制表位要知道当前 x 离正文区左缘多远；居中、右对齐的偏移整体加在后面。
     let shift = x - (content_left + indent);
     let mut ops = Vec::new();
+    // 突出显示、底纹要画在文字底下。
+    let mut backgrounds = Vec::new();
     for piece in active {
         let extra_after = extras.next().unwrap_or_default();
         if has_tabs && &sp.text[piece.range.clone()] == "\t" {
@@ -304,34 +306,91 @@ fn line(
             synthetic_italic: piece.synthetic_italic,
         });
 
-        let thickness = (piece.size_pt * 0.05).max(0.5);
-        if piece.underline {
-            ops.push(PaintOp::Rect {
+        if let Some(bg) = piece.background {
+            let m = book.face(piece.font).metrics();
+            let scale = piece.size_pt / m.upem as f32;
+            backgrounds.push(PaintOp::Rect {
                 x,
-                y: -(piece.size_pt * 0.12),
+                y: m.descender as f32 * scale,
                 w: w + extra,
-                h: thickness,
-                color: piece.color,
+                h: (m.ascender - m.descender) as f32 * scale,
+                color: bg,
             });
         }
-        if piece.strike {
-            ops.push(PaintOp::Rect {
-                x,
-                y: piece.size_pt * 0.26,
-                w: w + extra,
-                h: thickness,
-                color: piece.color,
-            });
+        let thickness = (piece.size_pt * 0.05).max(0.5);
+        if let Some(u) = piece.underline {
+            decorate(&mut ops, u, x, w + extra, piece.size_pt, thickness);
+        }
+        if piece.strike || piece.double_strike {
+            let ys: &[f32] = if piece.double_strike {
+                &[0.2, 0.32]
+            } else {
+                &[0.26]
+            };
+            for &k in ys {
+                ops.push(PaintOp::Rect {
+                    x,
+                    y: piece.size_pt * k,
+                    w: w + extra,
+                    h: thickness,
+                    color: piece.color,
+                });
+            }
         }
         x += w + extra;
     }
 
+    backgrounds.append(&mut ops);
     Line {
         height: metrics.height,
         baseline: metrics.baseline,
         fit_height: metrics.fit_height,
         page_break_after: false,
-        ops,
+        ops: backgrounds,
+    }
+}
+
+/// 画一段下划线。`x`、`w` 是这段文字的起点与宽度，y 相对基线。
+fn decorate(ops: &mut Vec<PaintOp>, u: ir::Underline, x: f32, w: f32, size: f32, t: f32) {
+    use ir::UnderlineStyle as U;
+    let y = -(size * 0.12);
+    let rect = |y: f32, h: f32| PaintOp::Rect {
+        x,
+        y,
+        w,
+        h,
+        color: u.color,
+    };
+    let dashed = |width: f32, dash: Vec<f32>| PaintOp::Line {
+        x1: x,
+        x2: x + w,
+        y: y + width / 2.0,
+        width,
+        color: u.color,
+        dash,
+    };
+    match u.style {
+        U::None => {}
+        // 只划字不划空格、波浪线：都近似成单线。
+        U::Single | U::Words | U::Wave => ops.push(rect(y, t)),
+        U::WavyHeavy | U::Thick => ops.push(rect(y - t / 2.0, t * 2.0)),
+        U::Double | U::WavyDouble => {
+            ops.push(rect(y, t));
+            ops.push(rect(y - t * 2.0, t));
+        }
+        U::Dotted => ops.push(dashed(t, vec![t, t * 2.0])),
+        U::DottedHeavy => ops.push(dashed(t * 2.0, vec![t * 2.0, t * 2.0])),
+        U::Dash => ops.push(dashed(t, vec![t * 4.0, t * 2.0])),
+        U::DashedHeavy => ops.push(dashed(t * 2.0, vec![t * 4.0, t * 2.0])),
+        U::DashLong => ops.push(dashed(t, vec![t * 8.0, t * 3.0])),
+        U::DashLongHeavy => ops.push(dashed(t * 2.0, vec![t * 8.0, t * 3.0])),
+        U::DotDash => ops.push(dashed(t, vec![t * 4.0, t * 2.0, t, t * 2.0])),
+        U::DashDotHeavy => ops.push(dashed(t * 2.0, vec![t * 4.0, t * 2.0, t, t * 2.0])),
+        U::DotDotDash => ops.push(dashed(t, vec![t * 4.0, t * 2.0, t, t * 2.0, t, t * 2.0])),
+        U::DashDotDotHeavy => ops.push(dashed(
+            t * 2.0,
+            vec![t * 4.0, t * 2.0, t, t * 2.0, t, t * 2.0],
+        )),
     }
 }
 

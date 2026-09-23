@@ -36,8 +36,14 @@ pub struct RPr {
     pub style_id: Option<String>,
     pub bold: Option<bool>,
     pub italic: Option<bool>,
-    pub underline: Option<bool>,
+    pub underline: Option<Underline>,
     pub strike: Option<bool>,
+    /// `w:dstrike`：双删除线。
+    pub double_strike: Option<bool>,
+    /// `w:highlight`：突出显示。`Some(None)` 是明确写了 none。
+    pub highlight: Option<Option<[u8; 3]>>,
+    /// `w:shd/@w:fill`：底纹。`Some(None)` 是明确写了 auto / 没有填充。
+    pub shading: Option<Option<[u8; 3]>>,
     /// `w:sz`，单位是**半磅**。
     pub size_half_pt: Option<u32>,
     pub color: Option<[u8; 3]>,
@@ -64,6 +70,9 @@ impl RPr {
             italic,
             underline,
             strike,
+            double_strike,
+            highlight,
+            shading,
             size_half_pt,
             color,
             font_ascii,
@@ -168,6 +177,37 @@ impl PPr {
         self.numbering |= other.numbering;
         self.mark_rpr.merge(&other.mark_rpr);
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnderlineStyle {
+    None,
+    Single,
+    /// 只划字、不划空格。这里按单线画。
+    Words,
+    Double,
+    Thick,
+    Dotted,
+    DottedHeavy,
+    Dash,
+    DashedHeavy,
+    DashLong,
+    DashLongHeavy,
+    DotDash,
+    DashDotHeavy,
+    DotDotDash,
+    DashDotDotHeavy,
+    /// 波浪线。这里按单线画。
+    Wave,
+    WavyHeavy,
+    WavyDouble,
+}
+
+/// `w:u`。颜色没写（或写 auto）时跟文字一个颜色。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Underline {
+    pub style: UnderlineStyle,
+    pub color: Option<[u8; 3]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
