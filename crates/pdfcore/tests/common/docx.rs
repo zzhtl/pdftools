@@ -25,6 +25,10 @@ const W_NS: &str = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compati
 
 const REL_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
+/// 默认的 `settings.xml`：Word 2013 以后的兼容模式。真实文档都有这个部件，
+/// 而 LibreOffice 在缺了它时按另一套规则排段落间距 —— 参照就不像真实文档了。
+const DEFAULT_SETTINGS: &str = r#"<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat>"#;
+
 /// 现有用例一直用的页面：A4，上下 1 英寸，左右 2.8cm。
 const DEFAULT_SECT: &str = r#"<w:pgSz w:w="11906" w:h="16838"/>
 <w:pgMar w:top="1440" w:right="1588" w:bottom="1440" w:left="1588"/>"#;
@@ -79,7 +83,7 @@ impl DocxBuilder {
             sect_extra: String::new(),
             styles: None,
             numbering: None,
-            settings: None,
+            settings: Some(DEFAULT_SETTINGS.to_string()),
             theme: None,
             created: None,
             hdrftr: Vec::new(),
@@ -119,7 +123,7 @@ impl DocxBuilder {
         self
     }
 
-    /// `word/settings.xml`，传 `<w:settings>` 里面的内容。
+    /// `word/settings.xml`，传 `<w:settings>` 里面的内容（整个替换默认的那份）。
     pub fn settings(mut self, inner: &str) -> Self {
         self.settings = Some(inner.to_string());
         self
