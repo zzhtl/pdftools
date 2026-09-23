@@ -1376,3 +1376,67 @@ fn highlight_and_underline_styles_are_drawn() {
         .count();
     assert_eq!(red_rects, 2, "红色双下划线应当是两条");
 }
+
+/// 上下标画小一号并抬高或压低；`w:position` 按半磅精确升降；全部大写、小型大写。
+#[test]
+fn superscript_position_and_caps() {
+    if !require_cjk_font() {
+        return;
+    }
+    let para = |rpr: &str, text: &str| {
+        format!(
+            r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>甲甲</w:t></w:r><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="宋体"/>{rpr}<w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    };
+    let body = para(r#"<w:vertAlign w:val="superscript"/>"#, "2")
+        + &para(r#"<w:position w:val="6"/>"#, "4")
+        + &para("<w:caps/>", "Caps")
+        + &para("<w:smallCaps/>", "Small");
+    let pages = common::pdftext::extract(&convert(&make_docx("sup_caps.docx", &body)).value.pdf);
+    let frags: Vec<&common::pdftext::Frag> = pages[0].lines.iter().flat_map(|l| &l.frags).collect();
+    let find = |t: &str| {
+        *frags
+            .iter()
+            .find(|f| f.text == t)
+            .unwrap_or_else(|| panic!("找不到「{t}」：{frags:?}"))
+    };
+    let base = |t: &str| {
+        // 同一段的「甲甲」：y 离它最近的那个（被抬高的字会被抽成单独一行，不能按顺序找）。
+        let y = find(t).y;
+        frags
+            .iter()
+            .filter(|f| f.text == "甲甲")
+            .map(|f| f.y)
+            .min_by(|a, b| (a - y).abs().total_cmp(&(b - y).abs()))
+            .unwrap()
+    };
+
+    let sup = find("2");
+    assert!(
+        (sup.size - 12.0 * 0.58).abs() < 0.01,
+        "上标字号 {}",
+        sup.size
+    );
+    assert!(
+        sup.y - base("2") > 2.0,
+        "上标没有抬高：{}",
+        sup.y - base("2")
+    );
+
+    let raised = find("4");
+    assert!(
+        (raised.y - base("4") - 3.0).abs() < 0.01,
+        "w:position 应当抬高 3pt"
+    );
+
+    assert!(frags.iter().any(|f| f.text == "CAPS"), "全部大写");
+    let small = frags
+        .iter()
+        .find(|f| f.text == "MALL")
+        .expect("小型大写的小写字母");
+    assert!(
+        (small.size - 9.6).abs() < 0.01,
+        "小型大写字号 {}",
+        small.size
+    );
+}

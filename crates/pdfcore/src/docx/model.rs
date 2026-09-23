@@ -56,6 +56,20 @@ pub struct RPr {
     pub spacing: Option<i32>,
     /// `w:vanish`：隐藏文字。
     pub vanish: Option<bool>,
+    /// `w:vertAlign`：上标、下标。
+    pub vert_align: Option<VertAlign>,
+    /// `w:position`：升降，半磅，正数往上。
+    pub position: Option<i32>,
+    pub caps: Option<bool>,
+    pub small_caps: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VertAlign {
+    #[default]
+    Baseline,
+    Superscript,
+    Subscript,
 }
 
 impl RPr {
@@ -78,7 +92,11 @@ impl RPr {
             font_ascii,
             font_east_asia,
             spacing,
-            vanish
+            vanish,
+            vert_align,
+            position,
+            caps,
+            small_caps
         );
     }
 }

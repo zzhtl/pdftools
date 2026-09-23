@@ -184,6 +184,8 @@ fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
         font_latin: None,
         font_east_asia: None,
         char_spacing: 0.0,
+        vert_align: ir::VertAlign::Baseline,
+        position_pt: 0.0,
     };
     let spans = vec![ir::Span {
         range: 0..text.len(),

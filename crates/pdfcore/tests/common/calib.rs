@@ -1089,6 +1089,73 @@ pub fn char_spacing() -> Vec<Measure> {
     v
 }
 
+/// 第一页上文字等于 `text` 的片段。
+fn frag<'a>(pages: &'a [PageText], text: &str) -> Option<&'a super::pdftext::Frag> {
+    pages
+        .first()?
+        .lines
+        .iter()
+        .flat_map(|l| &l.frags)
+        .find(|f| f.text == text)
+}
+
+/// P17：上下标、升降位置、全部大写、小型大写。量字号，以及基线比正文高多少。
+pub fn run_positions() -> Vec<Measure> {
+    let para = |rpr: &str, text: &str| {
+        format!(
+            r#"<w:p><w:r><w:rPr>{FONTS}<w:sz w:val="24"/></w:rPr><w:t>甲甲</w:t></w:r><w:r><w:rPr>{FONTS}{rpr}<w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    };
+    let size = |t: &'static str| -> Extract { Box::new(move |p| frag(p, t).map(|f| f.size)) };
+    let rise = |t: &'static str| -> Extract {
+        Box::new(move |p| Some(frag(p, t)?.y - frag(p, "甲甲")?.y))
+    };
+    let mut v = Vec::new();
+    for (label, rpr, text) in [
+        ("上标", r#"<w:vertAlign w:val="superscript"/>"#, "2"),
+        ("下标", r#"<w:vertAlign w:val="subscript"/>"#, "3"),
+        ("提升 3pt", r#"<w:position w:val="6"/>"#, "4"),
+        ("降低 3pt", r#"<w:position w:val="-6"/>"#, "5"),
+    ] {
+        v.push(Measure {
+            name: format!("P17 {label} 字号"),
+            doc: doc(para(rpr, text), false),
+            unit: "pt",
+            value: size(text),
+        });
+        v.push(Measure {
+            name: format!("P17 {label} 基线上移"),
+            doc: doc(para(rpr, text), false),
+            unit: "pt",
+            value: rise(text),
+        });
+    }
+    for (label, rpr) in [("全部大写", "<w:caps/>"), ("小型大写", "<w:smallCaps/>")] {
+        v.push(Measure {
+            name: format!("P17 {label} 抽出的文字是大写"),
+            doc: doc(para(rpr, "Abc"), false),
+            unit: "是",
+            value: Box::new(|p| {
+                let line = p.first()?.lines.first()?;
+                Some(if line.text.contains("ABC") { 1.0 } else { 0.0 })
+            }),
+        });
+        v.push(Measure {
+            name: format!("P17 {label} 小写字母的字号"),
+            doc: doc(para(rpr, "Abc"), false),
+            unit: "pt",
+            value: Box::new(|p| {
+                let line = p.first()?.lines.first()?;
+                line.frags
+                    .iter()
+                    .find(|f| f.text.contains('B') || f.text.contains('b'))
+                    .map(|f| f.size)
+            }),
+        });
+    }
+    v
+}
+
 pub fn all() -> Vec<Measure> {
     let mut v = empty_paragraphs();
     v.extend(default_size());
@@ -1111,5 +1178,6 @@ pub fn all() -> Vec<Measure> {
     v.extend(page_breaks());
     v.extend(tabs());
     v.extend(char_spacing());
+    v.extend(run_positions());
     v
 }

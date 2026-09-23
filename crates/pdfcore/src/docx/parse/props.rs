@@ -5,7 +5,7 @@ use quick_xml::events::Event;
 use super::{attr, attr_i32, on_off, skip, xml_err, Rd};
 use crate::docx::model::{
     Align, DocGrid, LineRule, PPr, RPr, SectPr, TabAlign, TabDef, TabLeader, Underline,
-    UnderlineStyle,
+    UnderlineStyle, VertAlign,
 };
 use crate::error::Result;
 
@@ -109,6 +109,17 @@ pub(super) fn parse_rpr(r: &mut Rd) -> Result<RPr> {
                     rpr.font_east_asia = attr(&e, "eastAsia");
                 }
                 "spacing" => rpr.spacing = attr_i32(&e, "val"),
+                "vertAlign" => {
+                    rpr.vert_align = match attr(&e, "val").as_deref() {
+                        Some("superscript") => Some(VertAlign::Superscript),
+                        Some("subscript") => Some(VertAlign::Subscript),
+                        Some("baseline") => Some(VertAlign::Baseline),
+                        _ => None,
+                    }
+                }
+                "position" => rpr.position = attr_i32(&e, "val"),
+                "caps" => rpr.caps = Some(on_off(&e)),
+                "smallCaps" => rpr.small_caps = Some(on_off(&e)),
                 "vanish" => rpr.vanish = Some(on_off(&e)),
                 _ => {}
             },

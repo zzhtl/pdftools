@@ -39,6 +39,9 @@ pub(super) struct Hang {
     pub punct: bool,
 }
 
+/// 上下标的字号比例。LibreOffice 实测 58%。
+const SUPERSCRIPT_SCALE: f32 = 0.58;
+
 /// 一个「同字体、同字号、同 script」的可整形单元。
 pub(super) struct Piece {
     pub range: Range<usize>,
@@ -51,7 +54,12 @@ pub(super) struct Piece {
     pub metrics_font: FontId,
     pub synthetic_bold: bool,
     pub synthetic_italic: bool,
+    /// 画出来的字号。上下标比 run 的字号小。
     pub size_pt: f32,
+    /// 决定行高、基线用的字号：始终是 run 的字号，上下标不让行变矮。
+    pub metrics_size_pt: f32,
+    /// 基线的升降（点），正数往上：上下标与 `w:position`。
+    pub rise: f32,
     pub color: [u8; 3],
     pub underline: Option<ir::Underline>,
     pub strike: bool,
@@ -106,12 +114,12 @@ impl Piece {
 
     pub fn ascent_pt(&self, book: &FontBook) -> f32 {
         let m = book.face(self.metrics_font).metrics();
-        m.ascender as f32 * self.size_pt / m.upem as f32
+        m.ascender as f32 * self.metrics_size_pt / m.upem as f32
     }
 
     pub fn natural_line_pt(&self, book: &FontBook) -> f32 {
         let m = book.face(self.metrics_font).metrics();
-        m.default_line_height() * self.size_pt / m.upem as f32
+        m.default_line_height() * self.metrics_size_pt / m.upem as f32
     }
 }
 
@@ -370,13 +378,31 @@ pub(super) fn shape(
             };
             for (part, font) in split_by_coverage(&text, abs.clone(), primary, east, style, book) {
                 let face = book.face(font.id);
-                let upem = face.metrics().upem as f32;
+                let m = face.metrics();
+                let upem = m.upem as f32;
+                // 上下标画小一号，抬高「上伸 + 行间距」、压低「下伸」的余下部分
+                // （LibreOffice 实测：58% 字号，12pt 时上标抬高 4.7pt、下标压低 1.1pt）。
+                let (size, rise) = match style.vert_align {
+                    ir::VertAlign::Baseline => (style.size_pt, style.position_pt),
+                    ir::VertAlign::Superscript => (
+                        style.size_pt * SUPERSCRIPT_SCALE,
+                        style.position_pt
+                            + (m.ascender + m.line_gap) as f32 / upem
+                                * style.size_pt
+                                * (1.0 - SUPERSCRIPT_SCALE),
+                    ),
+                    ir::VertAlign::Subscript => (
+                        style.size_pt * SUPERSCRIPT_SCALE,
+                        style.position_pt
+                            + m.descender as f32 / upem * style.size_pt * (1.0 - SUPERSCRIPT_SCALE),
+                    ),
+                };
                 let shaped = if is_unpainted(&text[part.clone()]) {
                     ShapedRun::empty()
                 } else {
                     let mut shaped = shape_run(face, &text[part.clone()], class.to_rustybuzz());
                     if style.char_spacing != 0.0 {
-                        let units = style.char_spacing * upem / style.size_pt;
+                        let units = style.char_spacing * upem / size;
                         shaped.add_letter_spacing(units.round() as i32);
                     }
                     shaped
@@ -415,7 +441,9 @@ pub(super) fn shape(
                     metrics_font: primary.id,
                     synthetic_bold: font.synthetic_bold,
                     synthetic_italic: font.synthetic_italic,
-                    size_pt: style.size_pt,
+                    size_pt: size,
+                    metrics_size_pt: style.size_pt,
+                    rise,
                     color: style.color,
                     underline: style.underline,
                     strike: style.strike,

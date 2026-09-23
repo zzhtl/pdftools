@@ -297,7 +297,7 @@ fn line(
             font: piece.font,
             size_pt: piece.size_pt,
             x,
-            y: 0.0,
+            y: piece.rise,
             glyphs: glyphs.to_vec(),
             unicode: piece.texts[gr].to_vec(),
             color: piece.color,
