@@ -47,11 +47,16 @@ pub struct RPr {
     /// `w:sz`，单位是**半磅**。
     pub size_half_pt: Option<u32>,
     pub color: Option<[u8; 3]>,
-    /// `w:rFonts/@w:ascii`，缺省时取 `@w:hAnsi`。西文字体。
-    pub font_ascii: Option<String>,
-    /// `w:rFonts/@w:eastAsia`，中日韩字体。一个 run 需要两个字体，
+    /// 西文字体：`w:rFonts` 的 `w:asciiTheme` / `w:ascii`，都没写时取 `w:hAnsiTheme` /
+    /// `w:hAnsi`。同一个元素里主题字体优先。
+    pub font_ascii: Option<FontRef>,
+    /// 中日韩字体：`w:eastAsiaTheme` / `w:eastAsia`。一个 run 需要两个字体，
     /// 少了哪个都会让身份证号或者汉字其中之一显示成错的样子。
-    pub font_east_asia: Option<String>,
+    pub font_east_asia: Option<FontRef>,
+    /// 重写前的读法：只认字体名（`w:ascii`，缺省 `w:hAnsi`），逐个属性覆盖。
+    /// 只给 [`Theme::Ignored`](crate::docx::layout::Theme::Ignored) 用。
+    pub legacy_font_ascii: Option<String>,
+    pub legacy_font_east_asia: Option<String>,
     /// `w:spacing`：字符间距，twips。每个字后面加（负数是紧缩）。
     pub spacing: Option<i32>,
     /// `w:vanish`：隐藏文字。
@@ -62,6 +67,66 @@ pub struct RPr {
     pub position: Option<i32>,
     pub caps: Option<bool>,
     pub small_caps: Option<bool>,
+}
+
+/// `w:rFonts` 里一个字体槽写的是什么。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FontRef {
+    Name(String),
+    /// 引用主题字体（`w:asciiTheme="minorHAnsi"` 之类），要等拿到主题部件才知道是哪个字体。
+    Theme(ThemeFont),
+}
+
+/// 主题字体引用：主题里的哪一套（标题 major / 正文 minor）、哪一种文字。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeFont {
+    pub major: bool,
+    pub script: ThemeScript,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeScript {
+    /// `majorAscii`、`majorHAnsi`、`minorAscii`、`minorHAnsi` → `a:latin`。
+    Latin,
+    /// `majorEastAsia`、`minorEastAsia` → `a:ea` 或按语言找的文种字体。
+    EastAsia,
+    /// `majorBidi`、`minorBidi` → `a:cs`。本版本不排复杂文种，读到了也不用。
+    ComplexScript,
+}
+
+impl ThemeFont {
+    /// `ST_Theme` 的取值。
+    pub fn parse(v: &str) -> Option<Self> {
+        let (major, rest) = if let Some(r) = v.strip_prefix("major") {
+            (true, r)
+        } else {
+            (false, v.strip_prefix("minor")?)
+        };
+        let script = match rest {
+            "Ascii" | "HAnsi" => ThemeScript::Latin,
+            "EastAsia" => ThemeScript::EastAsia,
+            "Bidi" => ThemeScript::ComplexScript,
+            _ => return None,
+        };
+        Some(Self { major, script })
+    }
+}
+
+/// 主题部件（`word/theme/theme1.xml`）里的字体方案。
+#[derive(Debug, Clone, Default)]
+pub struct Theme {
+    pub major: ThemeFonts,
+    pub minor: ThemeFonts,
+}
+
+/// `a:majorFont` / `a:minorFont`。空的 typeface 按没写处理。
+#[derive(Debug, Clone, Default)]
+pub struct ThemeFonts {
+    pub latin: Option<String>,
+    pub east_asia: Option<String>,
+    pub complex_script: Option<String>,
+    /// `a:font script="Hans" typeface="宋体"`：文种代码 → 字体。
+    pub by_script: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -91,6 +156,8 @@ impl RPr {
             color,
             font_ascii,
             font_east_asia,
+            legacy_font_ascii,
+            legacy_font_east_asia,
             spacing,
             vanish,
             vert_align,
@@ -431,6 +498,8 @@ pub struct Settings {
     pub no_html_paragraph_spacing: bool,
     /// `w:defaultTabStop`，twips。
     pub default_tab_stop: Option<i32>,
+    /// `w:themeFontLang/@w:eastAsia`（`zh-CN` 之类）：东亚主题字体取主题里哪个文种的字体。
+    pub theme_font_lang_east_asia: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -440,6 +509,7 @@ pub struct Document {
     pub section: SectPr,
     pub styles: Styles,
     pub settings: Settings,
+    pub theme: Theme,
     /// 外部链接：关系 id → 网址。解析 document.xml 时不知道关系表，由调用方填上。
     pub hyperlinks: HashMap<String, String>,
 }

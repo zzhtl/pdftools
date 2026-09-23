@@ -4,8 +4,8 @@ use quick_xml::events::Event;
 
 use super::{attr, attr_i32, on_off, skip, xml_err, Rd};
 use crate::docx::model::{
-    Align, DocGrid, LineRule, PPr, RPr, SectPr, TabAlign, TabDef, TabLeader, Underline,
-    UnderlineStyle, VertAlign,
+    Align, DocGrid, FontRef, LineRule, PPr, RPr, SectPr, TabAlign, TabDef, TabLeader, ThemeFont,
+    Underline, UnderlineStyle, VertAlign,
 };
 use crate::error::Result;
 
@@ -105,8 +105,19 @@ pub(super) fn parse_rpr(r: &mut Rd) -> Result<RPr> {
                 "sz" => rpr.size_half_pt = attr_i32(&e, "val").map(|v| v.max(1) as u32),
                 "color" => rpr.color = attr(&e, "val").as_deref().and_then(parse_color),
                 "rFonts" => {
-                    rpr.font_ascii = attr(&e, "ascii").or_else(|| attr(&e, "hAnsi"));
-                    rpr.font_east_asia = attr(&e, "eastAsia");
+                    let theme = |name| {
+                        attr(&e, name)
+                            .and_then(|v| ThemeFont::parse(&v))
+                            .map(FontRef::Theme)
+                    };
+                    let named = |name| attr(&e, name).map(FontRef::Name);
+                    rpr.font_ascii = theme("asciiTheme")
+                        .or_else(|| named("ascii"))
+                        .or_else(|| theme("hAnsiTheme"))
+                        .or_else(|| named("hAnsi"));
+                    rpr.font_east_asia = theme("eastAsiaTheme").or_else(|| named("eastAsia"));
+                    rpr.legacy_font_ascii = attr(&e, "ascii").or_else(|| attr(&e, "hAnsi"));
+                    rpr.legacy_font_east_asia = attr(&e, "eastAsia");
                 }
                 "spacing" => rpr.spacing = attr_i32(&e, "val"),
                 "vertAlign" => {

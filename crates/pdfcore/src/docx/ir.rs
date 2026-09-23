@@ -17,8 +17,8 @@
 
 use std::ops::Range;
 
-use super::layout::{Calib, Cascade, RunFormat};
-use super::model::{self, BreakKind, LineRule, PPr, RPr, RunItem};
+use super::layout::{Calib, Cascade, RunFormat, Theme};
+use super::model::{self, BreakKind, FontRef, LineRule, PPr, RPr, RunItem, ThemeScript};
 pub use super::model::{TabAlign, TabLeader, UnderlineStyle, VertAlign};
 use super::resolve::Resolver;
 
@@ -105,7 +105,7 @@ pub struct RunStyle {
     /// 文字背后的底色：突出显示，没有的话是底纹。
     pub background: Option<[u8; 3]>,
     pub color: [u8; 3],
-    /// 西文字体家族名（来自 `w:rFonts/@w:ascii`）。
+    /// 西文字体家族名（来自 `w:rFonts/@w:ascii`，主题字体已落实成名字）。
     pub font_latin: Option<String>,
     /// 中日韩字体家族名（来自 `w:rFonts/@w:eastAsia`）。
     pub font_east_asia: Option<String>,
@@ -222,12 +222,13 @@ pub struct Document {
 
 pub fn build(doc: &model::Document, calib: &Calib) -> Document {
     let resolver = Resolver::new(&doc.styles, calib.cascade == Cascade::Spec);
+    let fonts = FontNames::new(doc, calib);
     let s = doc.section;
 
     let mut blocks = Vec::with_capacity(doc.body.len());
     for block in &doc.body {
         match block {
-            model::Block::Para(p) => push_paragraph(&mut blocks, p, doc, &resolver, calib),
+            model::Block::Para(p) => push_paragraph(&mut blocks, p, doc, &resolver, &fonts, calib),
             model::Block::Table(t) => blocks.push(Block::Placeholder(table_placeholder(t))),
         }
     }
@@ -261,6 +262,7 @@ fn push_paragraph(
     p: &model::Para,
     doc: &model::Document,
     resolver: &Resolver,
+    fonts: &FontNames,
     calib: &Calib,
 ) {
     let ppr = resolver.paragraph(&p.ppr);
@@ -274,7 +276,7 @@ fn push_paragraph(
         if full && rpr.vanish == Some(true) {
             continue;
         }
-        let mut style = run_style(&rpr, calib);
+        let mut style = run_style(&rpr, fonts, calib);
         if full {
             // 只做外部链接；文档内的书签跳转还没做。
             style.link = match &run.link {
@@ -369,7 +371,7 @@ fn push_paragraph(
         .or_else(|| spans.first().map(|s| s.style.size_pt))
         .unwrap_or(calib.default_size_pt);
 
-    let mark = run_style(&mark, calib);
+    let mark = run_style(&mark, fonts, calib);
     let mut para = paragraph(&ppr, text, spans, mark, char_size);
     para.style_id = ppr
         .style_id
@@ -384,7 +386,83 @@ fn push_paragraph(
     }
 }
 
-fn run_style(rpr: &RPr, calib: &Calib) -> RunStyle {
+/// 把 `w:rFonts` 的字体槽落实成字体名：主题字体要查主题部件。
+struct FontNames<'a> {
+    theme: &'a model::Theme,
+    /// 东亚主题字体取主题里哪个文种的字体（`Hans` 之类），来自 `w:themeFontLang`。
+    east_asia_script: Option<&'static str>,
+    /// 不认主题字体时照旧只看字体名。
+    legacy: bool,
+}
+
+impl<'a> FontNames<'a> {
+    fn new(doc: &'a model::Document, calib: &Calib) -> Self {
+        Self {
+            theme: &doc.theme,
+            east_asia_script: doc
+                .settings
+                .theme_font_lang_east_asia
+                .as_deref()
+                .and_then(east_asia_script),
+            legacy: calib.theme == Theme::Ignored,
+        }
+    }
+
+    fn latin(&self, rpr: &RPr) -> Option<String> {
+        if self.legacy {
+            return rpr.legacy_font_ascii.clone();
+        }
+        self.name(rpr.font_ascii.as_ref()?)
+    }
+
+    fn east_asia(&self, rpr: &RPr) -> Option<String> {
+        if self.legacy {
+            return rpr.legacy_font_east_asia.clone();
+        }
+        self.name(rpr.font_east_asia.as_ref()?)
+    }
+
+    fn name(&self, font: &FontRef) -> Option<String> {
+        let t = match font {
+            FontRef::Name(n) => return Some(n.clone()),
+            FontRef::Theme(t) => t,
+        };
+        let fonts = if t.major {
+            &self.theme.major
+        } else {
+            &self.theme.minor
+        };
+        match t.script {
+            ThemeScript::Latin => fonts.latin.clone(),
+            ThemeScript::EastAsia => self
+                .east_asia_script
+                .and_then(|s| fonts.by_script.get(s))
+                .or(fonts.east_asia.as_ref())
+                .cloned(),
+            ThemeScript::ComplexScript => fonts.complex_script.clone(),
+        }
+    }
+}
+
+/// `w:themeFontLang/@w:eastAsia` 的语言标记 → 主题里 `a:font/@script` 的文种代码。
+fn east_asia_script(lang: &str) -> Option<&'static str> {
+    let lang = lang.to_ascii_lowercase();
+    let (primary, rest) = lang.split_once('-').unwrap_or((&lang, ""));
+    match primary {
+        "zh" if ["tw", "hk", "mo", "hant"]
+            .iter()
+            .any(|r| rest.starts_with(r)) =>
+        {
+            Some("Hant")
+        }
+        "zh" => Some("Hans"),
+        "ja" => Some("Jpan"),
+        "ko" => Some("Hang"),
+        _ => None,
+    }
+}
+
+fn run_style(rpr: &RPr, fonts: &FontNames, calib: &Calib) -> RunStyle {
     let full = calib.run_format == RunFormat::Full;
     let color = rpr.color.unwrap_or([0, 0, 0]);
     RunStyle {
@@ -416,8 +494,8 @@ fn run_style(rpr: &RPr, calib: &Calib) -> RunStyle {
             None
         },
         color,
-        font_latin: rpr.font_ascii.clone(),
-        font_east_asia: rpr.font_east_asia.clone(),
+        font_latin: fonts.latin(rpr),
+        font_east_asia: fonts.east_asia(rpr),
         char_spacing: match calib.run_format {
             RunFormat::Full => rpr.spacing.map(tw).unwrap_or(0.0),
             RunFormat::Legacy => 0.0,
@@ -555,5 +633,124 @@ fn collect_cell_texts(t: &model::Table, out: &mut Vec<String>) {
         for inner in nested {
             collect_cell_texts(inner, out);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::docx::parse;
+
+    const THEME: &str = r#"<a:theme xmlns:a="a"><a:fontScheme name="x">
+<a:majorFont><a:latin typeface="Major Latin"/><a:ea typeface=""/><a:font script="Hans" typeface="Major Hans"/></a:majorFont>
+<a:minorFont><a:latin typeface="Minor Latin"/><a:ea typeface=""/><a:font script="Hans" typeface="Minor Hans"/><a:font script="Jpan" typeface="Minor Jpan"/></a:minorFont>
+</a:fontScheme></a:theme>"#;
+
+    type Fonts = (Option<String>, Option<String>);
+
+    /// 各段第一个 span 的（西文, 东亚）字体。docDefaults 用正文主题字体；
+    /// 段落样式 `Named` 写的是字体名。
+    fn fonts(paras: &[&str], lang: Option<&str>, calib: &Calib) -> Vec<Fonts> {
+        let styles = parse::parse_styles(
+            r#"<w:styles xmlns:w="w"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia"/></w:rPr></w:rPrDefault></w:docDefaults>
+<w:style w:type="paragraph" w:styleId="Named"><w:rPr><w:rFonts w:ascii="Style Latin" w:eastAsia="Style Song"/></w:rPr></w:style></w:styles>"#,
+        );
+        let settings = parse::parse_settings(&format!(
+            r#"<w:settings xmlns:w="w">{}</w:settings>"#,
+            lang.map(|l| format!(r#"<w:themeFontLang w:val="en-US" w:eastAsia="{l}"/>"#))
+                .unwrap_or_default()
+        ));
+        let body: String = paras.iter().map(|p| format!("<w:p>{p}</w:p>")).collect();
+        let mut doc = parse::parse_document(
+            &format!(r#"<w:document xmlns:w="w"><w:body>{body}</w:body></w:document>"#),
+            styles,
+            settings,
+        )
+        .unwrap();
+        doc.theme = parse::parse_theme(THEME);
+        build(&doc, calib)
+            .blocks
+            .iter()
+            .map(|b| match b {
+                Block::Para(p) => (
+                    p.spans[0].style.font_latin.clone(),
+                    p.spans[0].style.font_east_asia.clone(),
+                ),
+                Block::Placeholder(_) => panic!("只有段落"),
+            })
+            .collect()
+    }
+
+    fn pair(latin: Option<&str>, east_asia: Option<&str>) -> Fonts {
+        (latin.map(Into::into), east_asia.map(Into::into))
+    }
+
+    const PLAIN: &str = "<w:r><w:t>甲</w:t></w:r>";
+    const RUN_NAME: &str =
+        r#"<w:r><w:rPr><w:rFonts w:ascii="Run Latin"/></w:rPr><w:t>甲</w:t></w:r>"#;
+    const RUN_BOTH: &str = r#"<w:r><w:rPr><w:rFonts w:ascii="Run Latin" w:asciiTheme="majorHAnsi"/></w:rPr><w:t>甲</w:t></w:r>"#;
+    const RUN_MAJOR_EA: &str =
+        r#"<w:r><w:rPr><w:rFonts w:eastAsiaTheme="majorEastAsia"/></w:rPr><w:t>甲</w:t></w:r>"#;
+    const NAMED_THEME_RUN: &str = r#"<w:pPr><w:pStyle w:val="Named"/></w:pPr><w:r><w:rPr><w:rFonts w:asciiTheme="majorHAnsi"/></w:rPr><w:t>甲</w:t></w:r>"#;
+
+    #[test]
+    fn theme_fonts_resolve_by_slot() {
+        let got = fonts(
+            &[PLAIN, RUN_NAME, RUN_BOTH, RUN_MAJOR_EA, NAMED_THEME_RUN],
+            Some("zh-CN"),
+            &Calib::current(),
+        );
+        assert_eq!(
+            got,
+            [
+                pair(Some("Minor Latin"), Some("Minor Hans")),
+                // 写了西文字体名只换掉西文那一槽，东亚仍是主题字体。
+                pair(Some("Run Latin"), Some("Minor Hans")),
+                // 同一个元素里主题字体优先。
+                pair(Some("Major Latin"), Some("Minor Hans")),
+                pair(Some("Minor Latin"), Some("Major Hans")),
+                // 上一级只写了主题字体，也整槽盖掉样式里的字体名。
+                pair(Some("Major Latin"), Some("Style Song")),
+            ]
+        );
+    }
+
+    #[test]
+    fn east_asian_theme_font_follows_the_theme_font_language() {
+        let calib = Calib::current();
+        assert_eq!(
+            fonts(&[PLAIN, RUN_MAJOR_EA], Some("ja-JP"), &calib),
+            [
+                pair(Some("Minor Latin"), Some("Minor Jpan")),
+                // 主题里没有这个文种的字体、`a:ea` 又是空的：解析不出来。
+                pair(Some("Minor Latin"), None),
+            ]
+        );
+        assert_eq!(
+            fonts(&[PLAIN], None, &calib),
+            [pair(Some("Minor Latin"), None)]
+        );
+        assert_eq!(east_asia_script("zh-TW"), Some("Hant"));
+        assert_eq!(east_asia_script("zh-Hant-HK"), Some("Hant"));
+        assert_eq!(east_asia_script("ZH-cn"), Some("Hans"));
+        assert_eq!(east_asia_script("ko-KR"), Some("Hang"));
+        assert_eq!(east_asia_script("en-US"), None);
+    }
+
+    /// 旧规则不认主题字体，字体名逐个属性覆盖。
+    #[test]
+    fn legacy_rules_ignore_theme_fonts() {
+        assert_eq!(
+            fonts(
+                &[PLAIN, RUN_BOTH, NAMED_THEME_RUN],
+                Some("zh-CN"),
+                &Calib::legacy()
+            ),
+            [
+                pair(None, None),
+                pair(Some("Run Latin"), None),
+                pair(Some("Style Latin"), Some("Style Song")),
+            ]
+        );
     }
 }

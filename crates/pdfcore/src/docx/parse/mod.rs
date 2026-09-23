@@ -9,7 +9,7 @@ mod story;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 
-use super::model::{Document, SectPr, Settings, Style, Styles};
+use super::model::{Document, SectPr, Settings, Style, Styles, Theme};
 use crate::error::{CoreError, Result};
 
 pub(crate) type Rd<'a> = Reader<&'a [u8]>;
@@ -103,6 +103,7 @@ pub fn parse_document(xml: &str, styles: Styles, settings: Settings) -> Result<D
         section,
         styles,
         settings,
+        theme: Default::default(),
         hyperlinks: Default::default(),
     })
 }
@@ -121,11 +122,62 @@ pub fn parse_settings(xml: &str) -> Settings {
             Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == "defaultTabStop" => {
                 settings.default_tab_stop = attr_i32(&e, "val").filter(|v| *v > 0);
             }
+            Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == "themeFontLang" => {
+                settings.theme_font_lang_east_asia = attr(&e, "eastAsia").filter(|v| !v.is_empty());
+            }
             Event::Eof => break,
             _ => {}
         }
     }
     settings
+}
+
+/// 解析主题部件里的字体方案（`a:fontScheme`）。颜色、效果这些与排版无关，不读。
+pub fn parse_theme(xml: &str) -> Theme {
+    let mut r = Reader::from_str(xml);
+    let mut theme = Theme::default();
+    // 当前在 majorFont（true）还是 minorFont（false）里。
+    let mut major = None;
+    while let Ok(ev) = r.read_event() {
+        let (e, empty) = match &ev {
+            Event::Start(e) => (e, false),
+            Event::Empty(e) => (e, true),
+            Event::End(e) => {
+                if matches!(e.local_name().as_ref(), "majorFont" | "minorFont") {
+                    major = None;
+                }
+                continue;
+            }
+            Event::Eof => break,
+            _ => continue,
+        };
+        let name = e.local_name();
+        match name.as_ref() {
+            // 自闭合的 `<a:majorFont/>` 里没有字体，也没有结束标签可以把状态收回来。
+            "majorFont" | "minorFont" if !empty => major = Some(name.as_ref() == "majorFont"),
+            local => {
+                let Some(major) = major else { continue };
+                let fonts = if major {
+                    &mut theme.major
+                } else {
+                    &mut theme.minor
+                };
+                let typeface = attr(e, "typeface").filter(|t| !t.is_empty());
+                match local {
+                    "latin" => fonts.latin = typeface,
+                    "ea" => fonts.east_asia = typeface,
+                    "cs" => fonts.complex_script = typeface,
+                    "font" => {
+                        if let (Some(script), Some(t)) = (attr(e, "script"), typeface) {
+                            fonts.by_script.insert(script, t);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    theme
 }
 
 /// 解析 `styles.xml`：文档默认值 + 段落/字符样式定义。

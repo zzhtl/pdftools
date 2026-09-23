@@ -17,7 +17,7 @@ mod text;
 pub use calib::{
     Breaks, Calib, Cascade, EmptyPara, FixedBaseline, Flow, GridLayout, HangingIndent,
     HangingPunct, Justify, Overflow, PageBottom, PageBreakBefore, ParaSpacing, RunFormat, Tabs,
-    TrailingSpaces,
+    Theme, TrailingSpaces,
 };
 
 use super::ir;

@@ -27,7 +27,7 @@ const REL_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/rela
 
 /// 默认的 `settings.xml`：Word 2013 以后的兼容模式。真实文档都有这个部件，
 /// 而 LibreOffice 在缺了它时按另一套规则排段落间距 —— 参照就不像真实文档了。
-const DEFAULT_SETTINGS: &str = r#"<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat>"#;
+pub const DEFAULT_SETTINGS: &str = r#"<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat>"#;
 
 /// 默认的 `styles.xml`：只有一个不带任何属性的 Normal。真实文档都有样式部件，
 /// 而 LibreOffice 在缺了它时不开孤行控制（有样式部件、只是没写 `w:widowControl`
@@ -472,5 +472,46 @@ pub fn para(text: &str) -> String {
 pub fn probe_para(ppr: &str, text: &str) -> String {
     format!(
         r#"<w:p><w:pPr>{ppr}</w:pPr><w:r><w:rPr><w:rFonts w:ascii="Liberation Serif" w:hAnsi="Liberation Serif" w:eastAsia="Noto Serif CJK SC"/><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#
+    )
+}
+
+/// 主题部件，字体方案里只有西文与简体中文（Hans）两种字体，各分标题（major）与
+/// 正文（minor）。颜色、效果方案是 LibreOffice 打开主题所需的最少内容。
+pub fn font_theme(major: (&str, &str), minor: (&str, &str)) -> String {
+    let fonts = |(latin, hans): (&str, &str)| {
+        format!(
+            r#"<a:latin typeface="{latin}"/><a:ea typeface=""/><a:cs typeface=""/><a:font script="Hans" typeface="{hans}"/>"#
+        )
+    };
+    let fill = r#"<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>"#.repeat(3);
+    let line =
+        r#"<a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>"#.repeat(3);
+    let effect = "<a:effectStyle><a:effectLst/></a:effectStyle>".repeat(3);
+    let colors: String = [
+        ("dk1", "000000"),
+        ("lt1", "FFFFFF"),
+        ("dk2", "44546A"),
+        ("lt2", "E7E6E6"),
+        ("accent1", "4472C4"),
+        ("accent2", "ED7D31"),
+        ("accent3", "A5A5A5"),
+        ("accent4", "FFC000"),
+        ("accent5", "5B9BD5"),
+        ("accent6", "70AD47"),
+        ("hlink", "0563C1"),
+        ("folHlink", "954F72"),
+    ]
+    .iter()
+    .map(|(name, rgb)| format!(r#"<a:{name}><a:srgbClr val="{rgb}"/></a:{name}>"#))
+    .collect();
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Test"><a:themeElements>
+<a:clrScheme name="Test">{colors}</a:clrScheme>
+<a:fontScheme name="Test"><a:majorFont>{}</a:majorFont><a:minorFont>{}</a:minorFont></a:fontScheme>
+<a:fmtScheme name="Test"><a:fillStyleLst>{fill}</a:fillStyleLst><a:lnStyleLst>{line}</a:lnStyleLst><a:effectStyleLst>{effect}</a:effectStyleLst><a:bgFillStyleLst>{fill}</a:bgFillStyleLst></a:fmtScheme>
+</a:themeElements></a:theme>"#,
+        fonts(major),
+        fonts(minor)
     )
 }

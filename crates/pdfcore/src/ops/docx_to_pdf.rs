@@ -53,6 +53,11 @@ pub fn run_with(
         .map(parse::parse_settings)
         .unwrap_or_default();
     let mut raw = parse::parse_document(&pkg.document, styles, settings)?;
+    raw.theme = pkg
+        .theme
+        .as_deref()
+        .map(parse::parse_theme)
+        .unwrap_or_default();
     raw.hyperlinks = pkg
         .rels
         .iter()

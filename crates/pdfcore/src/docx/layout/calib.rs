@@ -27,6 +27,23 @@ pub struct Calib {
     pub run_format: RunFormat,
     pub cascade: Cascade,
     pub flow: Flow,
+    pub theme: Theme,
+}
+
+/// `w:rFonts` 的主题字体（`w:asciiTheme`、`w:eastAsiaTheme` 等）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Theme {
+    /// 不认主题字体，只看字体名；各级样式逐个属性覆盖。
+    Ignored,
+    /// 对照 LibreOffice 实测：
+    /// - 同一个 `w:rFonts` 里主题字体优先于字体名（`w:ascii` 与 `w:asciiTheme` 都写时用后者）；
+    /// - 各级样式按「字体槽」整体覆盖：run 上写了 `w:ascii`，docDefaults 里的
+    ///   `w:asciiTheme` 就不再起作用；
+    /// - 东亚主题字体先按 `w:themeFontLang/@w:eastAsia` 找主题里对应文种的字体
+    ///   （zh-CN → Hans、ja-JP → Jpan），找不到才用 `a:ea`。两个都有时 LibreOffice
+    ///   用的也是文种字体。都没有时（没写 `w:themeFontLang`、`a:ea` 又是空的）
+    ///   按没写字体处理。
+    Resolved,
 }
 
 /// 段落之间的版流控制：`w:keepNext`、`w:keepLines`、`w:widowControl`、
@@ -251,6 +268,7 @@ impl Calib {
             run_format: RunFormat::Full,
             cascade: Cascade::Spec,
             flow: Flow::Word,
+            theme: Theme::Resolved,
         }
     }
 
@@ -273,6 +291,7 @@ impl Calib {
             run_format: RunFormat::Legacy,
             cascade: Cascade::Legacy,
             flow: Flow::Legacy,
+            theme: Theme::Ignored,
         }
     }
 }

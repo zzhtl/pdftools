@@ -1556,3 +1556,76 @@ fn keep_next_keep_lines_widows_and_contextual_spacing() {
     assert!((gap("spaced.docx", "") - 40.0).abs() < 0.01);
     assert!((gap("contextual.docx", "<w:contextualSpacing/>") - 20.0).abs() < 0.01);
 }
+
+/// 在 PDF 里找含 `needle` 的第一个文字片段，返回它的字体（BaseFont）。
+fn font_of(frags: &[common::pdftext::Frag], needle: &str) -> String {
+    frags
+        .iter()
+        .find(|f| f.text.contains(needle))
+        .map(|f| f.font.clone())
+        .unwrap_or_else(|| panic!("找不到「{needle}」：{frags:?}"))
+}
+
+fn frags_of(pdf: &[u8]) -> Vec<common::pdftext::Frag> {
+    common::pdftext::extract(pdf)
+        .into_iter()
+        .flat_map(|p| p.lines)
+        .flat_map(|l| l.frags)
+        .collect()
+}
+
+/// 主题字体：docDefaults 只写了主题字体时按主题部件落实成字体名；同一个
+/// `w:rFonts` 里主题字体优先于字体名。两个西文字体从本机现有的里挑，各平台都能跑。
+#[test]
+fn theme_fonts_come_from_the_theme_part() {
+    use pdfcore::fonts::system::{SystemFonts, LATIN_SANS_PREFERENCE, LATIN_SERIF_PREFERENCE};
+    let fonts = SystemFonts::shared();
+    let (Some(serif), Some(sans)) = (
+        fonts.find(LATIN_SERIF_PREFERENCE, false, false),
+        fonts.find(LATIN_SANS_PREFERENCE, false, false),
+    ) else {
+        eprintln!("跳过：本机找不到衬线、无衬线两种西文字体");
+        return;
+    };
+    let (serif, sans) = (serif.family, sans.family);
+    let para = |rfonts: &str, text: &str| {
+        format!(
+            r#"<w:p><w:r><w:rPr>{rfonts}<w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    };
+    let body = [
+        para("", "Minor"),
+        para(
+            r#"<w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/>"#,
+            "Major",
+        ),
+        para(
+            &format!(r#"<w:rFonts w:ascii="{sans}" w:hAnsi="{sans}" w:asciiTheme="majorHAnsi"/>"#),
+            "Both",
+        ),
+        para(
+            &format!(r#"<w:rFonts w:ascii="{sans}" w:hAnsi="{sans}"/>"#),
+            "Sans",
+        ),
+        para(
+            &format!(r#"<w:rFonts w:ascii="{serif}" w:hAnsi="{serif}"/>"#),
+            "Serif",
+        ),
+    ]
+    .concat();
+    let path = DocxBuilder::new()
+        .styles(r#"<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia"/></w:rPr></w:rPrDefault><w:pPrDefault/></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>"#)
+        .settings(&format!(
+            r#"{}<w:themeFontLang w:val="en-US" w:eastAsia="zh-CN"/>"#,
+            common::docx::DEFAULT_SETTINGS
+        ))
+        .theme(&common::docx::font_theme((&serif, "宋体"), (&sans, "宋体")))
+        .body(&body)
+        .build("theme_fonts.docx");
+    let frags = frags_of(&convert(&path).value.pdf);
+    let font = |t| font_of(&frags, t);
+    assert_ne!(font("Sans"), font("Serif"));
+    assert_eq!(font("Minor"), font("Sans"), "正文主题字体");
+    assert_eq!(font("Major"), font("Serif"), "标题主题字体");
+    assert_eq!(font("Both"), font("Serif"), "同一个元素里主题字体优先");
+}

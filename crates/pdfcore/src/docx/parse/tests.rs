@@ -170,3 +170,57 @@ fn html_paragraph_spacing_switch() {
     assert!(on.no_html_paragraph_spacing);
     assert!(!off.no_html_paragraph_spacing);
 }
+
+/// 同一个 `w:rFonts` 里主题字体优先于字体名；`w:hAnsi*` 只在 `w:ascii*` 都没写时顶上。
+#[test]
+fn theme_fonts_take_precedence_within_one_rfonts() {
+    use crate::docx::model::{FontRef, ThemeFont, ThemeScript};
+    let doc = body(
+        r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Serif A" w:asciiTheme="majorHAnsi" w:eastAsia="Song B"/></w:rPr><w:t>甲</w:t></w:r>
+<w:r><w:rPr><w:rFonts w:hAnsiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia"/></w:rPr><w:t>乙</w:t></w:r>
+<w:r><w:rPr><w:rFonts w:hAnsi="Sans C"/></w:rPr><w:t>丙</w:t></w:r></w:p>"#,
+    );
+    let runs = &paras(&doc)[0].runs;
+    let theme = |major, script| Some(FontRef::Theme(ThemeFont { major, script }));
+    assert_eq!(runs[0].rpr.font_ascii, theme(true, ThemeScript::Latin));
+    assert_eq!(
+        runs[0].rpr.font_east_asia,
+        Some(FontRef::Name("Song B".into()))
+    );
+    assert_eq!(runs[0].rpr.legacy_font_ascii.as_deref(), Some("Serif A"));
+    assert_eq!(runs[1].rpr.font_ascii, theme(false, ThemeScript::Latin));
+    assert_eq!(
+        runs[1].rpr.font_east_asia,
+        theme(false, ThemeScript::EastAsia)
+    );
+    assert_eq!(runs[1].rpr.legacy_font_ascii, None);
+    assert_eq!(runs[2].rpr.font_ascii, Some(FontRef::Name("Sans C".into())));
+}
+
+#[test]
+fn theme_font_scheme_and_language() {
+    let theme = parse_theme(
+        r#"<a:theme xmlns:a="a"><a:themeElements><a:fontScheme name="x">
+<a:majorFont><a:latin typeface="Major Latin"></a:latin><a:ea typeface=""/><a:font script="Hans" typeface="Major Hans"/></a:majorFont>
+<a:minorFont><a:latin typeface="Minor Latin"/><a:ea typeface="Minor EA"/><a:font script="Jpan" typeface="Minor Jpan"/></a:minorFont>
+</a:fontScheme></a:themeElements></a:theme>"#,
+    );
+    assert_eq!(theme.major.latin.as_deref(), Some("Major Latin"));
+    assert_eq!(theme.major.east_asia, None, "空的 typeface 等于没写");
+    assert_eq!(theme.major.by_script["Hans"], "Major Hans");
+    assert_eq!(theme.minor.latin.as_deref(), Some("Minor Latin"));
+    assert_eq!(theme.minor.east_asia.as_deref(), Some("Minor EA"));
+    assert_eq!(theme.minor.by_script["Jpan"], "Minor Jpan");
+
+    // 自闭合的 majorFont 不能让后面的字体被记到它名下。
+    let theme = parse_theme(
+        r#"<a:theme xmlns:a="a"><a:majorFont/><a:latin typeface="Stray"/><a:minorFont><a:latin typeface="Minor Latin"/></a:minorFont></a:theme>"#,
+    );
+    assert_eq!(theme.major.latin, None);
+    assert_eq!(theme.minor.latin.as_deref(), Some("Minor Latin"));
+
+    let settings = parse_settings(
+        r#"<w:settings><w:themeFontLang w:val="en-US" w:eastAsia="zh-CN"/></w:settings>"#,
+    );
+    assert_eq!(settings.theme_font_lang_east_asia.as_deref(), Some("zh-CN"));
+}

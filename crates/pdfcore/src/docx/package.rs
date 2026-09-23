@@ -27,6 +27,8 @@ pub struct Package {
     pub styles: Option<String>,
     pub numbering: Option<String>,
     pub settings: Option<String>,
+    /// `word/theme/theme1.xml`：主题字体在这里。Word、WPS 都固定用这个名字。
+    pub theme: Option<String>,
     /// `document.xml` 的关系：id → 目标。
     pub rels: HashMap<String, Relationship>,
     /// 部件路径 → 字节。只收 word/media/ 下的图片。
@@ -61,6 +63,7 @@ pub fn open(path: &Path) -> Result<Package> {
     let mut styles = None;
     let mut numbering = None;
     let mut settings = None;
+    let mut theme = None;
     let mut rels_xml = None;
     let mut core_xml = None;
     let mut media = HashMap::new();
@@ -88,6 +91,7 @@ pub fn open(path: &Path) -> Result<Package> {
                 | "word/styles.xml"
                 | "word/numbering.xml"
                 | "word/settings.xml"
+                | "word/theme/theme1.xml"
                 | "word/_rels/document.xml.rels"
                 | "docProps/core.xml"
         );
@@ -112,6 +116,7 @@ pub fn open(path: &Path) -> Result<Package> {
             "word/styles.xml" => styles = Some(text),
             "word/numbering.xml" => numbering = Some(text),
             "word/settings.xml" => settings = Some(text),
+            "word/theme/theme1.xml" => theme = Some(text),
             "docProps/core.xml" => core_xml = Some(text),
             _ => rels_xml = Some(text),
         }
@@ -127,6 +132,7 @@ pub fn open(path: &Path) -> Result<Package> {
         styles,
         numbering,
         settings,
+        theme,
         rels: rels_xml.as_deref().map(parse_rels).unwrap_or_default(),
         media,
     })
