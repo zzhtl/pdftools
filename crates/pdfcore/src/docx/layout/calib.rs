@@ -20,6 +20,11 @@ pub enum EmptyPara {
 }
 
 impl Calib {
+    /// 现行规则。每条与 [`legacy`](Self::legacy) 不同的取值都要有对照实测的依据。
+    pub fn current() -> Self {
+        Self::legacy()
+    }
+
     pub fn legacy() -> Self {
         Self {
             default_size_pt: 10.5,

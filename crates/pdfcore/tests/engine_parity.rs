@@ -6,6 +6,7 @@
 mod common;
 
 use common::probes;
+use pdfcore::docx::layout::Calib;
 use pdfcore::ops::docx_to_pdf;
 use pdfcore::NoProgress;
 
@@ -23,8 +24,7 @@ fn every_probe_lays_out_exactly_as_before() {
         }
         let path = dir.join(format!("{}.docx", probe.name));
         std::fs::write(&path, probe.doc.to_bytes()).unwrap();
-        let report = docx_to_pdf::run(&path, &NoProgress).expect("转换失败");
-        common::assert_same_as_legacy(&path, &report);
+        common::assert_same_as_legacy(&path);
     }
 }
 
@@ -45,14 +45,16 @@ fn self_closing_empty_paragraphs_are_kept() {
     )
     .unwrap();
 
-    let ours = docx_to_pdf::run(&bare, &NoProgress).expect("转换失败");
-    let reference = docx_to_pdf::run(&open_close, &NoProgress).expect("转换失败");
+    let legacy_rules = Calib::legacy();
+    let ours = docx_to_pdf::run_with(&bare, &NoProgress, &legacy_rules).expect("转换失败");
+    let reference =
+        docx_to_pdf::run_with(&open_close, &NoProgress, &legacy_rules).expect("转换失败");
     let (a, b) = (
         common::pdftext::extract(&ours.value.pdf),
         common::pdftext::extract(&reference.value.pdf),
     );
     common::metrics::same_layout(&a, &b, 1e-3).expect("两种写法排得不一样");
-    common::assert_same_as_legacy(&open_close, &reference);
+    common::assert_same_as_legacy(&open_close);
 }
 
 /// 约 300 页的合成文档，新旧引擎各转 3 遍取暖态平均；同时确认排版一致。
@@ -90,7 +92,7 @@ fn timing_300_pages() {
         "{} 页：新引擎 {t_new:?}，重写前 {t_old:?}",
         ours.value.pages
     );
-    common::assert_same_as_legacy(&path, &ours);
+    common::assert_same_as_legacy(&path);
     // 预算按实测定：本机 release 下 296 页新引擎 229ms、重写前 294ms。
     assert!(
         t_new.as_secs_f64() <= t_old.as_secs_f64() * 1.25,

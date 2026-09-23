@@ -33,11 +33,10 @@ fn text_of(pdf: &[u8]) -> String {
     raw.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-/// 转换，并确认新引擎与重写前的引擎排得一模一样（坐标、文字、字体、警告）。
+/// 转换，并顺带确认新引擎按旧规则排出来与重写前的引擎一模一样。
 fn convert(path: &std::path::Path) -> pdfcore::Report<docx_to_pdf::Outcome> {
-    let report = docx_to_pdf::run(path, &NoProgress).expect("转换失败");
-    common::assert_same_as_legacy(path, &report);
-    report
+    common::assert_same_as_legacy(path);
+    docx_to_pdf::run(path, &NoProgress).expect("转换失败")
 }
 
 #[test]

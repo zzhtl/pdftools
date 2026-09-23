@@ -29,6 +29,7 @@ const REL_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/rela
 const DEFAULT_SECT: &str = r#"<w:pgSz w:w="11906" w:h="16838"/>
 <w:pgMar w:top="1440" w:right="1588" w:bottom="1440" w:left="1588"/>"#;
 
+#[derive(Clone)]
 struct Rel {
     id: String,
     kind: &'static str,
@@ -37,12 +38,14 @@ struct Rel {
 }
 
 /// 页眉页脚部件。它们有自己的关系文件（里面的图片、超链接要靠它解析）。
+#[derive(Clone)]
 struct HdrFtr {
     is_header: bool,
     part: String,
     xml: String,
 }
 
+#[derive(Clone)]
 pub struct DocxBuilder {
     body: String,
     /// sectPr 里的 header/footer 引用。规范要求它们排在最前面，所以单独存。
