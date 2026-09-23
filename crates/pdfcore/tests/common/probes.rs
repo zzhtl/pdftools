@@ -34,6 +34,18 @@ fn paras(count: usize, ppr: &str, len: usize) -> String {
         .collect()
 }
 
+/// 空段落探针。`bare` 是没有任何属性的空段落怎么写：Word 写成 `<w:p/>`。
+pub fn empty_paragraphs(bare: &str) -> DocxBuilder {
+    let body = (0..8)
+        .map(|i| {
+            probe_para("", &filler(i, 40))
+                + &r#"<w:p><w:pPr><w:rPr><w:sz w:val="24"/></w:rPr></w:pPr></w:p>"#.repeat(6)
+                + bare
+        })
+        .collect::<String>();
+    DocxBuilder::new().body(&body).sect_extra(GRID_312)
+}
+
 pub fn all() -> Vec<Probe> {
     let mut v = Vec::new();
     let mut add = |name: &'static str, doc: DocxBuilder| v.push(Probe { name, doc });
@@ -110,17 +122,7 @@ pub fn all() -> Vec<Probe> {
         ),
     );
 
-    let empties = (0..8)
-        .map(|i| {
-            probe_para("", &filler(i, 40))
-                + &r#"<w:p><w:pPr><w:rPr><w:sz w:val="24"/></w:rPr></w:pPr></w:p>"#.repeat(6)
-                + "<w:p/>"
-        })
-        .collect::<String>();
-    add(
-        "empty_paragraphs",
-        DocxBuilder::new().body(&empties).sect_extra(GRID_312),
-    );
+    add("empty_paragraphs", empty_paragraphs("<w:p/>"));
 
     add("empty_document", DocxBuilder::new());
 

@@ -1,10 +1,29 @@
-//! 中间表示：样式已展开、单位已统一成**点**、字体已解析成请求的家族名。
+//! 中间表示：样式已展开、单位已统一成**点**、字体仍是文档里写的名字。
 //!
-//! 从这里往后不再出现 twips、半磅、1/100 字符这些 OOXML 单位，
-//! 排版代码只跟点打交道。
+//! 从这里往后不再出现 twips、半磅、1/100 字符这些 OOXML 单位，排版代码只跟点打交道；
+//! 字体要等排版时才解析成本机真实的字体，所以这一层不依赖字体也能测。
+//!
+//! 一个段落的文字是**一个字符串加若干 span**：断行（unicode-linebreak）与整形
+//! （rustybuzz）都作用在同一个字符串上，字节偏移是唯一的坐标系。
+//! 不是文字的东西也编进这个字符串：
+//!
+//! | 来源 | 字符 |
+//! | --- | --- |
+//! | `w:tab` | `\t` |
+//! | `w:br`、`w:cr` | U+2028 |
+//! | `w:br w:type="page"` | U+000C |
+//! | `w:br w:type="column"` | U+000B |
+//! | `w:noBreakHyphen` | U+2011 |
 
-use super::model::{Align, LineRule, PPr, RPr, RawBlock, RawDocument, UnsupportedKind};
-use super::style::Resolver;
+use std::ops::Range;
+
+use super::layout::Calib;
+use super::model::{self, BreakKind, LineRule, PPr, RPr, RunItem};
+use super::resolve::Resolver;
+
+pub const LINE_BREAK: char = '\u{2028}';
+pub const PAGE_BREAK: char = '\u{000C}';
+pub const COLUMN_BREAK: char = '\u{000B}';
 
 /// twips → 点。1 点 = 20 twips。
 fn tw(v: i32) -> f32 {
@@ -15,10 +34,6 @@ fn tw(v: i32) -> f32 {
 fn half_pt(v: u32) -> f32 {
     v as f32 / 2.0
 }
-
-/// 没有任何字号信息时的兜底。Word 的默认正文是五号（10.5 磅），
-/// 但 OOXML 的 docDefaults 缺省是 10 磅。
-const FALLBACK_SIZE_PT: f32 = 10.5;
 
 /// 行网格。`pitch_pt` 是网格行距（点）。
 #[derive(Debug, Clone, Copy)]
@@ -58,6 +73,14 @@ impl PageGeom {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    Left,
+    Center,
+    Right,
+    Justify,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum LineSpacing {
     /// 行距倍数。`lineRule="auto"` 时 `w:line` 是 240 分之一行，312 → 1.3 倍。
@@ -66,9 +89,9 @@ pub enum LineSpacing {
     AtLeast(f32),
 }
 
-#[derive(Debug, Clone)]
-pub struct Run {
-    pub text: String,
+/// 一段文字的格式，层叠已算完。
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunStyle {
     pub size_pt: f32,
     pub bold: bool,
     pub italic: bool,
@@ -79,6 +102,13 @@ pub struct Run {
     pub font_latin: Option<String>,
     /// 中日韩字体家族名（来自 `w:rFonts/@w:eastAsia`）。
     pub font_east_asia: Option<String>,
+}
+
+/// 段落文字里的一段同格式区间。span 首尾相接、不重叠、都不为空。
+#[derive(Debug, Clone)]
+pub struct Span {
+    pub range: Range<usize>,
+    pub style: RunStyle,
 }
 
 #[derive(Debug, Clone)]
@@ -98,20 +128,39 @@ pub struct Paragraph {
     pub auto_space: bool,
     /// 本段挂了自动编号，但编号文字没有生成。
     pub numbering_dropped: bool,
-    pub runs: Vec<Run>,
+    pub text: String,
+    pub spans: Vec<Span>,
+}
+
+/// 本版本画不出来的内容。它是 IR 的一等公民，而不是一个被丢掉的分支 ——
+/// 这样「诚实失败」就不是靠自觉，而是类型系统逼着排版层去处理。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaceholderKind {
+    Table { rows: usize, cols: usize },
+    Drawing { alt: Option<String> },
+}
+
+impl PlaceholderKind {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Table { rows, cols } => format!("表格（{rows} 行 × {cols} 列）"),
+            Self::Drawing { .. } => "图片".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
-pub struct UnsupportedBlock {
-    pub kind: UnsupportedKind,
-    /// 能抽出来的文字。表格的单元格内容会走这里，以纯文本形式保留。
+pub struct Placeholder {
+    pub kind: PlaceholderKind,
+    /// 能抽出来的文字。表格里的文字往往是文档里最重要的内容，
+    /// 就算画不出表格也要把字留下。
     pub text: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Block {
     Para(Paragraph),
-    Unsupported(UnsupportedBlock),
+    Placeholder(Placeholder),
 }
 
 #[derive(Debug, Clone)]
@@ -124,53 +173,15 @@ pub struct Document {
     pub blocks: Vec<Block>,
 }
 
-pub fn build(raw: &RawDocument) -> Document {
-    let resolver = Resolver::new(&raw.styles);
-    let s = raw.section;
+pub fn build(doc: &model::Document, calib: &Calib) -> Document {
+    let resolver = Resolver::new(&doc.styles);
+    let s = doc.section;
 
-    let page = PageGeom {
-        w_pt: tw(s.page_w),
-        h_pt: tw(s.page_h),
-        margin_top: tw(s.margin_top),
-        margin_bottom: tw(s.margin_bottom),
-        margin_left: tw(s.margin_left),
-        margin_right: tw(s.margin_right),
-    };
-
-    let mut blocks = Vec::with_capacity(raw.blocks.len());
-    for raw_block in &raw.blocks {
-        match raw_block {
-            RawBlock::Para(p) => {
-                let ppr = resolver.paragraph(&p.ppr);
-                let runs: Vec<Run> = p
-                    .runs
-                    .iter()
-                    .map(|r| build_run(&resolver.run(&ppr, &r.rpr), &r.text))
-                    .collect();
-
-                // 首行缩进按「字符」算时，用的是段落标记的东亚字号。
-                let mark = resolver.run(&ppr, &RPr::default());
-                let char_size = mark
-                    .size_half_pt
-                    .map(half_pt)
-                    .or_else(|| runs.first().map(|r| r.size_pt))
-                    .unwrap_or(FALLBACK_SIZE_PT);
-
-                blocks.push(Block::Para(build_paragraph(&ppr, runs, char_size)));
-
-                for kind in &p.unsupported {
-                    blocks.push(Block::Unsupported(UnsupportedBlock {
-                        kind: kind.clone(),
-                        text: Vec::new(),
-                    }));
-                }
-            }
-            RawBlock::Unsupported { kind, text } => {
-                blocks.push(Block::Unsupported(UnsupportedBlock {
-                    kind: kind.clone(),
-                    text: text.clone(),
-                }));
-            }
+    let mut blocks = Vec::with_capacity(doc.body.len());
+    for block in &doc.body {
+        match block {
+            model::Block::Para(p) => push_paragraph(&mut blocks, p, &resolver, calib),
+            model::Block::Table(t) => blocks.push(Block::Placeholder(table_placeholder(t))),
         }
     }
 
@@ -182,27 +193,71 @@ pub fn build(raw: &RawDocument) -> Document {
         });
 
     Document {
-        page,
+        page: PageGeom {
+            w_pt: tw(s.page_w),
+            h_pt: tw(s.page_h),
+            margin_top: tw(s.margin_top),
+            margin_bottom: tw(s.margin_bottom),
+            margin_left: tw(s.margin_left),
+            margin_right: tw(s.margin_right),
+        },
         has_header_footer: s.has_header_footer,
         grid,
         blocks,
     }
 }
 
-/// Word 的默认制表位是 0.74cm。本版本**不实现真正的制表位**，
-/// 而是把每个 `w:tab` 当作一个全角空格（1 em）的固定推进。
-/// 这是个近似，对含大量制表符对齐的文档会偏，README 里已说明。
-fn expand_tabs(text: &str) -> String {
-    if !text.contains('\t') {
-        return text.to_string();
+fn push_paragraph(out: &mut Vec<Block>, p: &model::Para, resolver: &Resolver, calib: &Calib) {
+    let ppr = resolver.paragraph(&p.ppr);
+    let mut text = String::new();
+    let mut spans = Vec::with_capacity(p.runs.len());
+    let mut drawings = Vec::new();
+    for run in &p.runs {
+        let start = text.len();
+        for item in &run.items {
+            match item {
+                RunItem::Text(t) => text.push_str(t),
+                RunItem::Tab => text.push('\t'),
+                RunItem::Break(BreakKind::Line) => text.push(LINE_BREAK),
+                RunItem::Break(BreakKind::Page) => text.push(PAGE_BREAK),
+                RunItem::Break(BreakKind::Column) => text.push(COLUMN_BREAK),
+                RunItem::NoBreakHyphen => text.push('\u{2011}'),
+                RunItem::Drawing { alt } => drawings.push(alt.clone()),
+            }
+        }
+        // 没有文字的 run（只有格式、只有一张图）不成 span：它不占位置，
+        // 也不该决定空段落的行高。
+        if text.len() > start {
+            spans.push(Span {
+                range: start..text.len(),
+                style: run_style(&resolver.run(&ppr, &run.rpr), calib),
+            });
+        }
     }
-    text.replace('\t', "\u{3000}")
+
+    // 首行缩进按「字符」算时，用的是段落标记的东亚字号。
+    let mark = resolver.run(&ppr, &RPr::default());
+    let char_size = mark
+        .size_half_pt
+        .map(half_pt)
+        .or_else(|| spans.first().map(|s| s.style.size_pt))
+        .unwrap_or(calib.default_size_pt);
+
+    out.push(Block::Para(paragraph(&ppr, text, spans, char_size)));
+    for alt in drawings {
+        out.push(Block::Placeholder(Placeholder {
+            kind: PlaceholderKind::Drawing { alt },
+            text: Vec::new(),
+        }));
+    }
 }
 
-fn build_run(rpr: &RPr, text: &str) -> Run {
-    Run {
-        text: expand_tabs(text),
-        size_pt: rpr.size_half_pt.map(half_pt).unwrap_or(FALLBACK_SIZE_PT),
+fn run_style(rpr: &RPr, calib: &Calib) -> RunStyle {
+    RunStyle {
+        size_pt: rpr
+            .size_half_pt
+            .map(half_pt)
+            .unwrap_or(calib.default_size_pt),
         bold: rpr.bold.unwrap_or(false),
         italic: rpr.italic.unwrap_or(false),
         underline: rpr.underline.unwrap_or(false),
@@ -213,7 +268,7 @@ fn build_run(rpr: &RPr, text: &str) -> Run {
     }
 }
 
-fn build_paragraph(ppr: &PPr, runs: Vec<Run>, char_size_pt: f32) -> Paragraph {
+fn paragraph(ppr: &PPr, text: String, spans: Vec<Span>, char_size_pt: f32) -> Paragraph {
     let ind = &ppr.indent;
 
     // `*Chars` 版本优先于 twips 版本 —— Word 就是这么做的，而中文文档里
@@ -249,7 +304,12 @@ fn build_paragraph(ppr: &PPr, runs: Vec<Run>, char_size_pt: f32) -> Paragraph {
     };
 
     Paragraph {
-        align: ppr.align.unwrap_or(Align::Left),
+        align: match ppr.align {
+            Some(model::Align::Center) => Align::Center,
+            Some(model::Align::Right) => Align::Right,
+            Some(model::Align::Both | model::Align::Distribute) => Align::Justify,
+            Some(model::Align::Left) | None => Align::Left,
+        },
         indent_left: left,
         indent_right: ind.right_twips.map(tw).unwrap_or(0.0),
         first_line,
@@ -262,6 +322,47 @@ fn build_paragraph(ppr: &PPr, runs: Vec<Run>, char_size_pt: f32) -> Paragraph {
         // 而我们不在字符级区分这两类，统一按「非中日韩」处理。
         auto_space: ppr.auto_space_latin.unwrap_or(true) || ppr.auto_space_digits.unwrap_or(true),
         numbering_dropped: ppr.numbering,
-        runs,
+        text,
+        spans,
+    }
+}
+
+/// 表格还画不出来：留下行列数和每个单元格的文字。
+fn table_placeholder(t: &model::Table) -> Placeholder {
+    let mut text = Vec::new();
+    collect_cell_texts(t, &mut text);
+    Placeholder {
+        kind: PlaceholderKind::Table {
+            rows: t.rows.len(),
+            cols: t.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0),
+        },
+        text,
+    }
+}
+
+/// 每个单元格一条；嵌套表格的单元格紧跟在外层单元格之后。
+fn collect_cell_texts(t: &model::Table, out: &mut Vec<String>) {
+    for cell in t.rows.iter().flat_map(|r| &r.cells) {
+        let mut s = String::new();
+        let mut nested = Vec::new();
+        for block in &cell.content {
+            match block {
+                model::Block::Para(p) => {
+                    for item in p.runs.iter().flat_map(|r| &r.items) {
+                        if let RunItem::Text(t) = item {
+                            s.push_str(t);
+                        }
+                    }
+                }
+                model::Block::Table(inner) => nested.push(inner),
+            }
+        }
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            out.push(trimmed.to_string());
+        }
+        for inner in nested {
+            collect_cell_texts(inner, out);
+        }
     }
 }

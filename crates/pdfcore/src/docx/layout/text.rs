@@ -1,0 +1,355 @@
+//! 段落文字的分片、整形与断行。
+//!
+//! 断行是这里的核心。`unicode-linebreak` 负责回答「**哪里允许断**」——
+//! 它实现了 UAX #14，汉字之间天然可断、拉丁词按空格断，而且带避头尾规则
+//! （`。、」！？` 不会跑到行首）。自己写「CJK 随处可断」就会出现以句号开头的行，
+//! 那是中文排版一眼就能看出的外行错误。
+//!
+//! `rustybuzz` 负责回答「**排到哪里必须断**」—— 它给出每个字形的精确步进。
+//!
+//! 整形结果（[`ShapedPara`]）与栏宽无关：同一段落换一个宽度重排（表格列宽试算、
+//! 页眉里的域换了值）不必重新整形。
+
+use std::ops::Range;
+
+use unicode_linebreak::{linebreaks, BreakOpportunity};
+
+use crate::docx::ir;
+use crate::fonts::{
+    attaches_to_previous, cluster_texts, pua, shape_run, split_by_script, FontBook, FontId,
+    Resolved, ScriptClass, ShapedGlyph, ShapedRun,
+};
+
+/// 中日韩文字与西文/数字相邻时插入的间距，单位 em。
+///
+/// 没有它，「第9条」会挤成一团 —— Word 与 LibreOffice 默认都会加这个间距
+/// （Word 的开关是 `w:autoSpaceDE` / `w:autoSpaceDN`，默认开启）。
+/// 0.2em 是对着 LibreOffice 实测出来的（9pt 与 12pt 两个字号交叉验证）。
+const CJK_LATIN_GAP_EM: f32 = 0.2;
+
+/// 一个「同字体、同字号、同 script」的可整形单元。
+pub(super) struct Piece {
+    pub range: Range<usize>,
+    /// 本片的文种。相邻两片文种不同才需要插入中西文间距。
+    pub class: ScriptClass,
+    /// 用来整形、绘制的字体。缺字时是回退字体。
+    pub font: FontId,
+    /// 决定行高、基线的字体：始终是 run 请求的那个。回退字体只补字形，不抬高行高 ——
+    /// 一个「☑」借了符号字体，不该让整行变高。
+    pub metrics_font: FontId,
+    pub synthetic_bold: bool,
+    pub synthetic_italic: bool,
+    pub size_pt: f32,
+    pub color: [u8; 3],
+    pub underline: bool,
+    pub strike: bool,
+    pub shaped: ShapedRun,
+    /// 与 `shaped.glyphs` 等长。
+    pub texts: Vec<String>,
+    upem: f32,
+    /// 本片开头要额外插入的间距（点）。中日韩与西文相邻时加，见 `CJK_LATIN_GAP_EM`。
+    pub gap_before: f32,
+}
+
+impl Piece {
+    /// 本片（含其前置间距）在区间内贡献的宽度。
+    fn width_with_gap(&self, from: usize, to: usize) -> f32 {
+        // 只有当本片的起点真的落在区间内部时，前置间距才算数 ——
+        // 区间从本片中途开始时，那个间距在上一行的行尾，不该重复计入。
+        let gap = if self.range.start > from && self.range.start < to {
+            self.gap_before
+        } else {
+            0.0
+        };
+        gap + self.width(from, to)
+    }
+
+    /// 区间 `[from, to)`（段落全局字节偏移）在本片内的宽度，单位点。
+    pub fn width(&self, from: usize, to: usize) -> f32 {
+        let a = from.clamp(self.range.start, self.range.end) - self.range.start;
+        let b = to.clamp(self.range.start, self.range.end) - self.range.start;
+        if b <= a {
+            return 0.0;
+        }
+        let gi = self.shaped.glyph_index_at_byte(a as u32);
+        let gj = self.shaped.glyph_index_at_byte(b as u32);
+        self.shaped.width_between(gi, gj) as f32 * self.size_pt / self.upem
+    }
+
+    /// 字节区间对应的字形下标区间。
+    pub fn glyph_range(&self, from: usize, to: usize) -> Range<usize> {
+        let a = from.clamp(self.range.start, self.range.end) - self.range.start;
+        let b = to.clamp(self.range.start, self.range.end) - self.range.start;
+        let gi = self.shaped.glyph_index_at_byte(a as u32);
+        let gj = self.shaped.glyph_index_at_byte(b as u32);
+        gi..gj.max(gi)
+    }
+
+    pub fn glyphs_between(&self, from: usize, to: usize) -> &[ShapedGlyph] {
+        let r = self.glyph_range(from, to);
+        &self.shaped.glyphs[r]
+    }
+
+    pub fn ascent_pt(&self, book: &FontBook) -> f32 {
+        let m = book.face(self.metrics_font).metrics();
+        m.ascender as f32 * self.size_pt / m.upem as f32
+    }
+
+    pub fn natural_line_pt(&self, book: &FontBook) -> f32 {
+        let m = book.face(self.metrics_font).metrics();
+        m.default_line_height() * self.size_pt / m.upem as f32
+    }
+}
+
+/// 整形好的段落：与栏宽无关，换个宽度重新断行不必重新整形。
+pub(super) struct ShapedPara {
+    /// 实际整形的文字。与 IR 的文字不完全相同：符号字体的私用区码位换成了 Unicode，
+    /// 制表符、分行符换成了排版时的替身。
+    pub text: String,
+    pub pieces: Vec<Piece>,
+    /// UAX #14 的断行机会，按偏移升序。
+    pub breaks: Vec<(usize, BreakOpportunity)>,
+}
+
+impl ShapedPara {
+    /// 与区间 `[from, to)` 相交的片。片按偏移升序、首尾相接。
+    pub fn pieces_in(&self, from: usize, to: usize) -> &[Piece] {
+        let first = self.pieces.partition_point(|p| p.range.end <= from);
+        let last = first + self.pieces[first..].partition_point(|p| p.range.start < to);
+        &self.pieces[first..last]
+    }
+
+    /// 区间 `[from, to)` 排成一行有多宽（含中西文间距）。
+    pub fn width(&self, from: usize, to: usize) -> f32 {
+        // 与区间不相交的片贡献恰好是 0，只累加相交的片，结果逐位相同。
+        self.pieces_in(from, to)
+            .iter()
+            .map(|p| p.width_with_gap(from, to))
+            .sum()
+    }
+
+    /// 从 `start` 开始，找最后一个装得下的断行点。返回 (断点偏移, 是否是强制断行)。
+    pub fn next_break(&self, start: usize, avail: f32) -> (usize, bool) {
+        let first = self.breaks.partition_point(|(i, _)| *i <= start);
+        let mut best: Option<usize> = None;
+        for &(idx, kind) in &self.breaks[first..] {
+            if kind == BreakOpportunity::Mandatory {
+                // 强制断行点之前的内容装不下也得先断在这里之前的某个可断点。
+                if self.width(start, idx) <= avail {
+                    return (idx, true);
+                }
+                break;
+            }
+            if self.width(start, idx) <= avail {
+                best = Some(idx);
+            } else {
+                break;
+            }
+        }
+        match best {
+            Some(b) => (b, false),
+            // 一个不可断的整体比行还宽（超长 URL、连续数字）：整个留在这一行里，越过右边距。
+            // 与重写前一致；在字符边界上硬断还没做。
+            None => (
+                self.breaks
+                    .get(first)
+                    .map(|(i, _)| *i)
+                    .unwrap_or(self.text.len()),
+                false,
+            ),
+        }
+    }
+}
+
+pub(super) fn shape(para: &ir::Paragraph, book: &mut FontBook) -> ShapedPara {
+    let mut text = String::with_capacity(para.text.len());
+    let mut spans: Vec<(Range<usize>, &ir::RunStyle)> = Vec::with_capacity(para.spans.len());
+    for span in &para.spans {
+        let start = text.len();
+        let symbol = symbol_font_of(&span.style, book);
+        for c in para.text[span.range.clone()].chars() {
+            text.push(match c {
+                // 与重写前一致：制表符当一个全角空格，真正的制表位还没做；
+                // 分页符、分栏符也只当换行。
+                '\t' => '\u{3000}',
+                ir::LINE_BREAK | ir::PAGE_BREAK | ir::COLUMN_BREAK => '\n',
+                c => symbol
+                    .and_then(|family| pua::symbol_to_unicode(family, c))
+                    .unwrap_or(c),
+            });
+        }
+        spans.push((start..text.len(), &span.style));
+    }
+
+    let mut pieces: Vec<Piece> = Vec::new();
+    for (span, style) in spans {
+        let segment = &text[span.clone()];
+        // 一个 run 内部还要按 script 再切：中文用 eastAsia 字体，西文用 ascii 字体。
+        for (sub, class) in split_by_script(segment) {
+            let abs = span.start + sub.start..span.start + sub.end;
+            let east = class == ScriptClass::EastAsian;
+            let family = if east {
+                style
+                    .font_east_asia
+                    .as_deref()
+                    .or(style.font_latin.as_deref())
+            } else {
+                style
+                    .font_latin
+                    .as_deref()
+                    .or(style.font_east_asia.as_deref())
+            };
+            let Some(primary) = book.resolve(family, east, style.bold, style.italic) else {
+                // 系统里一个字体都没有。无法排版，但要留痕而不是装作没事。
+                book.note_no_font();
+                continue;
+            };
+            for (part, font) in split_by_coverage(&text, abs.clone(), primary, east, style, book) {
+                let face = book.face(font.id);
+                let upem = face.metrics().upem as f32;
+                let shaped = if is_unpainted(&text[part.clone()]) {
+                    ShapedRun::empty()
+                } else {
+                    shape_run(face, &text[part.clone()], class.to_rustybuzz())
+                };
+                collect_missing(&text[part.clone()], &shaped, book);
+                let texts = cluster_texts(&text[part.clone()], &shaped.glyphs)
+                    .into_iter()
+                    .map(|(_, t)| t)
+                    .collect();
+                // 与紧邻的上一片文种不同时，插入中西文间距。
+                // 间距按两侧较大的字号算，跟 Word 的观感一致。回退字体切出来的片段
+                // 与主字体同文种，不会在它们之间加间距。
+                //
+                // 但边界上已经有空白时**不加** —— 空格本身已经把两边分开了，再叠一层
+                // 会让行变宽并提前折行。实测参照：「正文第1段。」每个边界加 2.4pt，
+                // 而「正文第 1 段。」只有空格宽度、没有额外间距。
+                let boundary_spaced = pieces.last().is_some_and(|prev| {
+                    text[prev.range.clone()].ends_with(char::is_whitespace)
+                        || text[part.clone()].starts_with(char::is_whitespace)
+                });
+                let gap_before = match pieces.last() {
+                    Some(prev)
+                        if para.auto_space
+                            && prev.class != class
+                            && prev.range.end == part.start
+                            && !boundary_spaced =>
+                    {
+                        CJK_LATIN_GAP_EM * prev.size_pt.max(style.size_pt)
+                    }
+                    _ => 0.0,
+                };
+                pieces.push(Piece {
+                    range: part,
+                    class,
+                    font: font.id,
+                    metrics_font: primary.id,
+                    synthetic_bold: font.synthetic_bold,
+                    synthetic_italic: font.synthetic_italic,
+                    size_pt: style.size_pt,
+                    color: style.color,
+                    underline: style.underline,
+                    strike: style.strike,
+                    shaped,
+                    texts,
+                    upem,
+                    gap_before,
+                });
+            }
+        }
+    }
+    let breaks = linebreaks(&text).collect();
+    ShapedPara {
+        text,
+        pieces,
+        breaks,
+    }
+}
+
+/// 收集整形后落到 `.notdef` 的字符。
+///
+/// 这类字符在 PDF 里会显示成空白或方框，而且多个缺字会共用 GID 0，
+/// 连 ToUnicode 都会串。必须能被发现，不能靠用户自己看出来。
+fn collect_missing(text: &str, shaped: &ShapedRun, book: &mut FontBook) {
+    for g in &shaped.glyphs {
+        if g.gid != 0 {
+            continue;
+        }
+        if let Some(c) = text[g.cluster as usize..].chars().next() {
+            book.note_missing(c);
+        }
+    }
+}
+
+/// 把一段同文种的文字按「主字体有没有这个字」切开：主字体缺的字交给回退字体。
+///
+/// 「②」「☑」这类字符常常不在所选字体里；不回退的话，它们都落到同一个 `.notdef` 上，
+/// 显示成方框，ToUnicode 还会把它们全抽成第一个缺字。组合符号、变体选择符
+/// 跟着前一个字走，否则同一个字会被拆到两个字体里。
+fn split_by_coverage(
+    text: &str,
+    range: Range<usize>,
+    primary: Resolved,
+    east_asian: bool,
+    style: &ir::RunStyle,
+    book: &mut FontBook,
+) -> Vec<(Range<usize>, Resolved)> {
+    let mut out: Vec<(Range<usize>, Resolved)> = Vec::new();
+    let mut sibling: Option<Option<Resolved>> = None;
+    for (i, c) in text[range.clone()].char_indices() {
+        let start = range.start + i;
+        let end = start + c.len_utf8();
+        // 换行符这类控制字符单独成片，不整形、不绘制：字体里本来就没有它，
+        // 整形只会得到 .notdef —— 一条误报的缺字，还白占一个字宽，
+        // 回退时更会平白多嵌一个字体。片本身要留着，空行的行高靠它撑起来。
+        if c.is_control() {
+            out.push((start..end, primary));
+            continue;
+        }
+        let font = if attaches_to_previous(c) {
+            out.last().map(|(_, f)| *f).unwrap_or(primary)
+        } else if book.face(primary.id).has_glyph(c) {
+            primary
+        } else {
+            sibling
+                .get_or_insert_with(|| sibling_font(style, east_asian, book))
+                .filter(|s| book.face(s.id).has_glyph(c))
+                .or_else(|| book.fallback(c, east_asian, style.bold, style.italic))
+                .unwrap_or(primary)
+        };
+        match out.last_mut() {
+            Some((r, f)) if *f == font && r.end == start && !is_unpainted(&text[r.clone()]) => {
+                r.end = end
+            }
+            _ => out.push((start..end, font)),
+        }
+    }
+    out
+}
+
+/// [`split_by_coverage`] 切出来的控制字符片。
+pub(super) fn is_unpainted(part: &str) -> bool {
+    part.starts_with(char::is_control)
+}
+
+/// 同一个 run 的另一个字体：西文字体缺 ℃、② 时试中文字体，反过来也一样。
+/// 那同样是作者给这段文字选的字体，比系统回退链里的任何字体都更贴近原文 ——
+/// 宋体文档里的 ② 不该变成无衬线体。run 只写了一个字体名时，主字体已经是它了。
+fn sibling_font(style: &ir::RunStyle, east_asian: bool, book: &mut FontBook) -> Option<Resolved> {
+    let (own, other) = if east_asian {
+        (&style.font_east_asia, &style.font_latin)
+    } else {
+        (&style.font_latin, &style.font_east_asia)
+    };
+    own.as_ref()?;
+    book.resolve(other.as_deref(), !east_asian, style.bold, style.italic)
+}
+
+/// run 用了 Symbol / Wingdings 这类符号字体、而本机又没有时，把私用区码位换成
+/// 意思相同的 Unicode 字符，交给回退字体去画。装了原字体就原样保留。
+fn symbol_font_of<'a>(style: &'a ir::RunStyle, book: &FontBook) -> Option<&'a str> {
+    [style.font_latin.as_deref(), style.font_east_asia.as_deref()]
+        .into_iter()
+        .flatten()
+        .find(|f| pua::is_symbol_font(f) && !book.has_family(f))
+}

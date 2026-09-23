@@ -1,0 +1,243 @@
+//! 块级与行内内容：段落、run、表格。正文、页眉页脚、单元格、文本框共用这一套。
+//!
+//! 不认识的容器元素一律「钻进去」而不是跳过：`w:customXml`、`w:smartTag`、
+//! 各种新版包装元素里装的仍然是正文，跳过就会悄悄丢字。只有明确不该显示的
+//! （删除的修订、域代码、`mc:Choice` 分支）才整棵跳过。
+
+use quick_xml::events::{BytesStart, Event};
+
+use super::props::{parse_ppr, parse_rpr, parse_sect_pr};
+use super::{attr, resolve_entity, skip, xml_err, Rd};
+use crate::docx::model::{Block, BreakKind, Cell, Para, Row, Run, RunItem, SectPr, Story, Table};
+use crate::error::Result;
+
+/// 读 `w:body`。返回正文，以及 body 末尾那个 `w:sectPr`（最后一节的页面设置）。
+pub(super) fn parse_body(r: &mut Rd) -> Result<(Story, Option<SectPr>)> {
+    let mut out = Vec::new();
+    let mut last = None;
+    parse_blocks(r, "body", &mut out, &mut last)?;
+    Ok((out, last))
+}
+
+/// 读块级内容直到 `end` 结束。`section` 收 body 级的 `w:sectPr`。
+fn parse_blocks(
+    r: &mut Rd,
+    end: &str,
+    out: &mut Story,
+    section: &mut Option<SectPr>,
+) -> Result<()> {
+    loop {
+        match r.read_event().map_err(xml_err)? {
+            Event::Start(e) => match e.local_name().as_ref() {
+                "p" => out.push(Block::Para(parse_paragraph(r)?)),
+                "tbl" => out.push(Block::Table(parse_table(r)?)),
+                "sectPr" => *section = Some(parse_sect_pr(r)?),
+                name if skips_subtree(name) => skip(r, name)?,
+                _ => {}
+            },
+            // Word 把没有任何属性的空段落写成 `<w:p/>`。它照样占一行。
+            Event::Empty(e) if e.local_name().as_ref() == "p" => {
+                out.push(Block::Para(Para::default()))
+            }
+            Event::End(e) if e.local_name().as_ref() == end => break,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// 整棵跳过、内容不该显示的元素。
+fn skips_subtree(name: &str) -> bool {
+    matches!(
+        name,
+        // 删除的修订、移走的原文。
+        "del" | "moveFrom"
+            // `mc:Choice` 是新版特性的表示；我们还不认识任何一种，一律取 `mc:Fallback`。
+            | "Choice"
+            // 内容控件的属性（占位格式、下拉项……），不是正文。
+            | "sdtPr" | "sdtEndPr"
+            // 表格、行、单元格的属性，本版本还不用。
+            | "tblPr" | "tblGrid" | "tblPrEx" | "trPr" | "tcPr"
+    )
+}
+
+fn parse_paragraph(r: &mut Rd) -> Result<Para> {
+    let mut para = Para::default();
+    // 段落里再套段落不合规范，但文本框之类的结构偶尔会这样；
+    // 内层的字并入本段，至少不丢。
+    let mut depth = 1usize;
+    loop {
+        match r.read_event().map_err(xml_err)? {
+            Event::Start(e) => match e.local_name().as_ref() {
+                "p" => depth += 1,
+                "pPr" => {
+                    let (ppr, section) = parse_ppr(r)?;
+                    para.ppr = ppr;
+                    para.section = section;
+                }
+                // 公式里的 `m:r` 也按普通 run 读：公式按线性文字输出，至少内容还在。
+                "r" => para.runs.push(parse_run(r)?),
+                name if skips_subtree(name) => skip(r, name)?,
+                // 超链接、`w:ins`、`w:smartTag`、`w:fldSimple`、公式、内容控件……
+                // 里面都是正常显示的 run。
+                _ => {}
+            },
+            Event::End(e) if e.local_name().as_ref() == "p" => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(para)
+}
+
+fn parse_run(r: &mut Rd) -> Result<Run> {
+    let mut run = Run::default();
+    // 注音（`w:ruby`）的底文里还套着 run。
+    let mut depth = 1usize;
+    loop {
+        match r.read_event().map_err(xml_err)? {
+            Event::Start(e) => match e.local_name().as_ref() {
+                "r" => depth += 1,
+                "rPr" => run.rpr = parse_rpr(r)?,
+                "t" => {
+                    let text = read_text(r, &e)?;
+                    if !text.is_empty() {
+                        run.items.push(RunItem::Text(text));
+                    }
+                }
+                name @ ("drawing" | "pict" | "object") => {
+                    let name = name.to_string();
+                    run.items.push(RunItem::Drawing {
+                        alt: find_alt_text(r, &name)?,
+                    });
+                }
+                // 域代码（`PAGE`、`TOC \o "1-3"`）是给 Word 看的指令，不是正文；
+                // 注音的读音标注也不进正文。
+                name @ ("instrText" | "delInstrText" | "delText" | "rt") => skip(r, name)?,
+                name if skips_subtree(name) => skip(r, name)?,
+                _ => {}
+            },
+            Event::Empty(e) => match e.local_name().as_ref() {
+                "tab" => run.items.push(RunItem::Tab),
+                "br" => run
+                    .items
+                    .push(RunItem::Break(match attr(&e, "type").as_deref() {
+                        Some("page") => BreakKind::Page,
+                        Some("column") => BreakKind::Column,
+                        _ => BreakKind::Line,
+                    })),
+                "cr" => run.items.push(RunItem::Break(BreakKind::Line)),
+                "noBreakHyphen" => run.items.push(RunItem::NoBreakHyphen),
+                _ => {}
+            },
+            Event::End(e) if e.local_name().as_ref() == "r" => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(run)
+}
+
+/// 读一个 `w:t` 的文字（刚读过它的 Start 事件）。
+///
+/// 没有 `xml:space="preserve"` 时，OOXML 规定忽略首尾空白 —— 格式化过的 XML
+/// 元素之间有缩进换行，不遵守就会凭空多出一堆空格。去空白要对整个元素做一次：
+/// 实体引用会把文字切成好几段，逐段去会把「A &amp; B」读成「A&B」。
+fn read_text(r: &mut Rd, start: &BytesStart) -> Result<String> {
+    let preserve = attr(start, "space").as_deref() == Some("preserve");
+    let mut text = String::new();
+    loop {
+        match r.read_event().map_err(xml_err)? {
+            Event::Text(t) => text.push_str(&t),
+            Event::GeneralRef(rf) => {
+                if let Some(c) = resolve_entity(&rf) {
+                    text.push(c);
+                }
+            }
+            Event::CData(c) => text.push_str(&c),
+            Event::End(e) if e.local_name().as_ref() == "t" => break,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if preserve {
+        Ok(text)
+    } else {
+        Ok(text.trim().to_string())
+    }
+}
+
+/// 跳过一棵图片子树，顺便把 `wp:docPr/@descr`（替代文字）捞出来。
+/// 有替代文字的话，占位提示就能说清楚「这里原本是什么图」。
+fn find_alt_text(r: &mut Rd, name: &str) -> Result<Option<String>> {
+    let mut depth = 1usize;
+    let mut alt = None;
+    loop {
+        match r.read_event().map_err(xml_err)? {
+            Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == "docPr" => {
+                alt = alt.or_else(|| attr(&e, "descr").filter(|s| !s.trim().is_empty()));
+            }
+            Event::Start(e) if e.local_name().as_ref() == name => depth += 1,
+            Event::End(e) if e.local_name().as_ref() == name => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(alt)
+}
+
+fn parse_table(r: &mut Rd) -> Result<Table> {
+    let mut table = Table::default();
+    loop {
+        match r.read_event().map_err(xml_err)? {
+            Event::Start(e) => match e.local_name().as_ref() {
+                "tr" => table.rows.push(parse_row(r)?),
+                name if skips_subtree(name) => skip(r, name)?,
+                // 包在内容控件、customXml 里的行。
+                _ => {}
+            },
+            Event::End(e) if e.local_name().as_ref() == "tbl" => break,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(table)
+}
+
+fn parse_row(r: &mut Rd) -> Result<Row> {
+    let mut row = Row::default();
+    loop {
+        match r.read_event().map_err(xml_err)? {
+            Event::Start(e) => match e.local_name().as_ref() {
+                "tc" => {
+                    let mut cell = Cell::default();
+                    let mut no_section = None;
+                    parse_blocks(r, "tc", &mut cell.content, &mut no_section)?;
+                    row.cells.push(cell);
+                }
+                name if skips_subtree(name) => skip(r, name)?,
+                _ => {}
+            },
+            Event::End(e) if e.local_name().as_ref() == "tr" => break,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(row)
+}

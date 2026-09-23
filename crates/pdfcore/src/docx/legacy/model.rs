@@ -3,21 +3,13 @@
 //! 这一层**不做样式层叠、不做单位换算**，所有值保持 OOXML 原始形态
 //! （twips、半磅、1/100 字符、240 分之一行）。
 //! 这样「属性有没有解析到」和「层叠有没有算对」是两个独立的测试面。
-//!
-//! 正文、页眉页脚、表格单元格、文本框里装的都是同一种东西：一串块（段落与表格）。
-//! 它们共用一个解析器（`parse::story`），所以这里也只有一种 [`Story`]。
-
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Align {
     Left,
     Center,
     Right,
-    /// `both`：两端对齐，段落最后一行不拉开。
-    Both,
-    /// `distribute`：分散对齐，最后一行也拉开。
-    Distribute,
+    Justify,
 }
 
 /// `w:spacing/@w:lineRule`。这个枚举决定了 `w:line` 的含义，搞错的话每份文档页数都不对。
@@ -41,7 +33,7 @@ pub struct RPr {
     /// `w:sz`，单位是**半磅**。
     pub size_half_pt: Option<u32>,
     pub color: Option<[u8; 3]>,
-    /// `w:rFonts/@w:ascii`，缺省时取 `@w:hAnsi`。西文字体。
+    /// `w:rFonts/@w:ascii`，西文字体。
     pub font_ascii: Option<String>,
     /// `w:rFonts/@w:eastAsia`，中日韩字体。一个 run 需要两个字体，
     /// 少了哪个都会让身份证号或者汉字其中之一显示成错的样子。
@@ -114,7 +106,8 @@ pub struct PPr {
     pub auto_space_latin: Option<bool>,
     /// `w:autoSpaceDN`：中日韩文字与数字之间自动加间距。缺省为 true。
     pub auto_space_digits: Option<bool>,
-    /// 本段挂了自动编号（`w:numPr`）。
+    /// 本段挂了自动编号（`w:numPr`）。本版本不生成编号文字，正文照常排版，
+    /// 但必须汇总报告出来 —— 静默丢掉编号，用户拿到的就是一份没有序号的诉讼请求。
     pub numbering: bool,
     /// `w:pPr/w:rPr`：段落标记自身的格式。它参与 run 的层叠，优先级低于 run 上的直接格式。
     pub mark_rpr: RPr,
@@ -156,65 +149,58 @@ impl PPr {
     }
 }
 
-/// 一串块级内容：正文、页眉页脚、单元格、文本框共用。
-pub type Story = Vec<Block>;
-
-// 块几乎都是段落，表格少见：给段落装箱省不下多少内存，反倒每段多一次分配。
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
-pub enum Block {
-    Para(Para),
-    Table(Table),
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Para {
-    pub ppr: PPr,
-    pub runs: Vec<Run>,
-    /// 段落里的 `w:pPr/w:sectPr`：本段是一节的最后一段。
-    pub section: Option<SectPr>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Run {
+pub struct RawRun {
     pub rpr: RPr,
-    pub items: Vec<RunItem>,
+    /// `w:tab` 转成 `\t`，`w:br` 转成 `\n`，`w:t` 原样拼接。
+    pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum RunItem {
-    Text(String),
-    Tab,
-    /// `w:br`，以及等同于换行的 `w:cr`。
-    Break(BreakKind),
-    /// `w:noBreakHyphen`。
-    NoBreakHyphen,
-    /// 图片、形状、嵌入对象（`w:drawing` / `w:pict` / `w:object`）。目前只取替代文字。
-    Drawing {
-        alt: Option<String>,
+#[derive(Debug, Clone, Default)]
+pub struct RawPara {
+    pub ppr: PPr,
+    pub runs: Vec<RawRun>,
+    /// 段落内遇到的不渲染元素（内嵌图片、文本框、公式……）。
+    /// 挂在段落上而不是汇总到文档级，是为了报告里能说出「第几页」。
+    pub unsupported: Vec<UnsupportedKind>,
+}
+
+/// 本版本不渲染的内容。它是 IR 的一等公民，而不是一个被丢掉的分支 ——
+/// 这样「诚实失败」就不是靠自觉，而是类型系统逼着上层去处理。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnsupportedKind {
+    Table { rows: usize, cols: usize },
+    Drawing { alt: Option<String> },
+    TextBox,
+    Field,
+    Footnote,
+    HeaderFooter,
+    Math,
+}
+
+impl UnsupportedKind {
+    pub fn label(&self) -> String {
+        match self {
+            UnsupportedKind::Table { rows, cols } => format!("表格（{rows} 行 × {cols} 列）"),
+            UnsupportedKind::Drawing { .. } => "图片".into(),
+            UnsupportedKind::TextBox => "文本框".into(),
+            UnsupportedKind::Field => "域（页码/目录等）".into(),
+            UnsupportedKind::Footnote => "脚注".into(),
+            UnsupportedKind::HeaderFooter => "页眉页脚".into(),
+            UnsupportedKind::Math => "公式".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum RawBlock {
+    Para(RawPara),
+    Unsupported {
+        kind: UnsupportedKind,
+        /// 能抽出来的纯文本。表格里的文字往往是文档里最重要的内容，
+        /// 就算画不出表格也要把字留下。
+        text: Vec<String>,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BreakKind {
-    Line,
-    Page,
-    Column,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Table {
-    pub rows: Vec<Row>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Row {
-    pub cells: Vec<Cell>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Cell {
-    pub content: Story,
 }
 
 /// `w:docGrid` —— 中文排版的**行网格**。
@@ -244,7 +230,7 @@ pub struct SectPr {
     pub margin_left: i32,
     pub margin_right: i32,
     pub doc_grid: Option<DocGrid>,
-    /// 本节引用了页眉或页脚。
+    /// 本节引用了页眉或页脚。本版本不渲染它们，但必须让用户知道。
     pub has_header_footer: bool,
 }
 
@@ -270,22 +256,21 @@ pub struct Style {
     pub based_on: Option<String>,
     pub ppr: PPr,
     pub rpr: RPr,
+    pub is_default: bool,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Styles {
     pub doc_default_ppr: PPr,
     pub doc_default_rpr: RPr,
-    pub paragraph: HashMap<String, Style>,
-    pub character: HashMap<String, Style>,
-    /// 标了 `w:default="1"` 的段落样式，通常是 Normal。
+    pub paragraph: std::collections::HashMap<String, Style>,
+    pub character: std::collections::HashMap<String, Style>,
     pub default_paragraph_style: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-pub struct Document {
-    pub body: Story,
-    /// `w:body` 末尾的 `w:sectPr`：最后一节（只有一节时就是全文）的页面设置。
+pub struct RawDocument {
+    pub blocks: Vec<RawBlock>,
     pub section: SectPr,
     pub styles: Styles,
 }

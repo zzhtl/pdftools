@@ -41,9 +41,10 @@ pub fn run(path: &Path, sink: &dyn ProgressSink) -> Result<Report<Outcome>> {
     sink.emit(step(2, "解析内容"));
     bail_if_cancelled!(sink);
 
-    let doc = ir::build(&raw);
+    let calib = layout::Calib::legacy();
+    let doc = ir::build(&raw, &calib);
     let mut book = crate::fonts::FontBook::new();
-    let laid = layout::layout(&doc, &mut book);
+    let laid = layout::layout(&doc, &mut book, &calib);
     sink.emit(step(3, "排版"));
     bail_if_cancelled!(sink);
 
@@ -68,6 +69,12 @@ pub fn run(path: &Path, sink: &dyn ProgressSink) -> Result<Report<Outcome>> {
         },
         laid.warnings,
     ))
+}
+
+/// 用重写前的排版引擎转换。只给测试做新旧对照用。
+#[doc(hidden)]
+pub fn run_legacy(path: &Path) -> Result<Report<Outcome>> {
+    crate::docx::legacy::run(path)
 }
 
 fn step(done: usize, label: &str) -> Progress {
