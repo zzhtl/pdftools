@@ -23,6 +23,8 @@ pub(super) struct Line {
     pub height: f32,
     /// 基线到行框顶部的距离。
     pub baseline: f32,
+    /// 页底要容得下的高度（不超过 `height`）。
+    pub fit_height: f32,
     pub ops: Vec<PaintOp>,
 }
 
@@ -97,6 +99,7 @@ fn mark_line(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> Option<Lin
     Some(Line {
         height: b.height,
         baseline: b.baseline,
+        fit_height: b.fit_height,
         ops: Vec::new(),
     })
 }
@@ -256,6 +259,7 @@ fn line(
     Line {
         height: metrics.height,
         baseline: metrics.baseline,
+        fit_height: metrics.fit_height,
         ops,
     }
 }

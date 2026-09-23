@@ -1,6 +1,6 @@
 //! 行框：一行多高、基线在行框里的哪个位置。纯函数，只依赖字体度量与段落设置。
 
-use super::calib::{Calib, GridLayout};
+use super::calib::{Calib, GridLayout, PageBottom};
 use crate::docx::ir::{Grid, LineSpacing};
 
 /// 一行的竖向度量，单位点。
@@ -10,6 +10,8 @@ pub(super) struct LineBox {
     pub height: f32,
     /// 基线到行框顶部的距离。
     pub baseline: f32,
+    /// 页底要容得下的高度。见 [`PageBottom`]。
+    pub fit_height: f32,
 }
 
 /// `unsnapped` 是行内字体的自然行高（吸附前，取最大者），`ascent` 是最大上伸。
@@ -56,9 +58,15 @@ pub(super) fn line_box(
         GridLayout::Legacy => snap_extra,
         GridLayout::Centered => snap_extra / 2.0,
     };
+    // 倍数多出来的空白都在文字下方（见上），它越不越过页底由规则决定。
+    let fit_height = match (calib.page_bottom, spacing) {
+        (PageBottom::TextOnly, LineSpacing::Multiple(_)) => height.min(natural),
+        _ => height,
+    };
     LineBox {
         height,
         baseline: ascent + above,
+        fit_height,
     }
 }
 

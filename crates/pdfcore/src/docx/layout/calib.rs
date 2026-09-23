@@ -14,6 +14,19 @@ pub struct Calib {
     pub empty_para: EmptyPara,
     pub grid: GridLayout,
     pub para_spacing: ParaSpacing,
+    pub page_bottom: PageBottom,
+}
+
+/// 页底最后一行怎样才算放得下。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageBottom {
+    /// 整个行框都要在页底以内。
+    WholeLine,
+    /// 行距倍数在文字下方多出来的空白可以越过页底，文字本身在页底以内就行。
+    ///
+    /// 对照 LibreOffice 实测：一段 12pt 长文，无网格 1.5 倍行距首页放 27 行（整个行框都算
+    /// 只能放 26 行）；有网格 1.3 倍放 17 行（16 行）；单倍行距没有这部分空白，两种算法一样。
+    TextOnly,
 }
 
 /// 上一段的段后距与下一段的段前距怎么合并。
@@ -72,6 +85,7 @@ impl Calib {
             empty_para: EmptyPara::MarkLine,
             grid: GridLayout::Centered,
             para_spacing: ParaSpacing::HtmlCollapse,
+            page_bottom: PageBottom::TextOnly,
         }
     }
 
@@ -81,6 +95,7 @@ impl Calib {
             empty_para: EmptyPara::Legacy,
             grid: GridLayout::Legacy,
             para_spacing: ParaSpacing::Sum,
+            page_bottom: PageBottom::WholeLine,
         }
     }
 }

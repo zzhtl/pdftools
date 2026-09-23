@@ -108,7 +108,7 @@ const FIT_TOLERANCE: f32 = 1e-3;
 fn fit_lines(lines: &[Line], mut used: f32, content_height: f32) -> usize {
     let mut n = 0;
     for line in lines {
-        if used + line.height > content_height + FIT_TOLERANCE && used > f32::EPSILON {
+        if used + line.fit_height > content_height + FIT_TOLERANCE && used > f32::EPSILON {
             break;
         }
         used += line.height;
@@ -127,6 +127,7 @@ mod tests {
             .map(|&height| Line {
                 height,
                 baseline: height * 0.8,
+                fit_height: height,
                 ops: Vec::new(),
             })
             .collect()
@@ -148,6 +149,20 @@ mod tests {
         let area = (697.9f32 / grid.pitch_pt).floor() * grid.pitch_pt;
         let l = lines(&[grid.snap(17.388); 23]);
         assert_eq!(fit_lines(&l, 0.0, area), 22);
+    }
+
+    /// 行距倍数在文字下方多出来的空白可以越过页底。
+    #[test]
+    fn only_the_text_part_of_the_last_line_has_to_fit() {
+        let line = |height, fit_height| Line {
+            height,
+            baseline: 20.0,
+            fit_height,
+            ops: Vec::new(),
+        };
+        let l = [line(40.56, 31.2), line(40.56, 31.2)];
+        assert_eq!(fit_lines(&l, 0.0, 72.0), 2);
+        assert_eq!(fit_lines(&l, 0.0, 71.0), 1);
     }
 
     #[test]
