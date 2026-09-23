@@ -232,7 +232,9 @@ fn text_origins(pdf: &[u8]) -> Vec<(f32, f32)> {
 /// 的整数倍**，倍数再乘在这之上。忽略它，整篇的行密度会高出近一倍 ——
 /// 实测曾经导致 8 份真实文书的页数只有 LibreOffice 参照的 60%。
 ///
-/// 12pt 正文自然行高约 17.2pt，在 15.6pt（312 twips）的网格上占满 2 格 = 31.2pt。
+/// 12pt 正文用 Noto Serif CJK 时自然行高约 17.2pt，在 15.6pt（312 twips）的网格上
+/// 占满 2 格 = 31.2pt；用 Windows 上真正的宋体时自然行高只有约 12pt，只占 1 格。
+/// 所以期望值按本机实际字体的自然行高推出来，检验的是规则而不是某个字体的度量。
 #[test]
 fn doc_grid_snaps_line_height_up_to_the_grid() {
     if !require_cjk_font() {
@@ -262,13 +264,15 @@ fn doc_grid_snaps_line_height_up_to_the_grid() {
         r#"<w:docGrid w:type="lines" w:linePitch="312"/>"#,
     );
 
+    // 无网格时就是字体的自然行高。中文字体的行高落在 1.0～1.6 em 之间。
     assert!(
-        (plain - 17.2).abs() < 1.5,
-        "无网格时应当是字体自然行高（约 17.2pt），实际 {plain:.2}"
+        (12.0..=19.5).contains(&plain),
+        "无网格时应当是字体自然行高（12pt 字号约 12～19pt），实际 {plain:.2}"
     );
+    let expected = (plain / 15.6).ceil().max(1.0) * 15.6;
     assert!(
-        (grid - 31.2).abs() < 0.6,
-        "有网格时应当吸附到 2 × 15.6 = 31.2pt，实际 {grid:.2}"
+        (grid - expected).abs() < 0.6,
+        "有网格时应当把自然行高 {plain:.2} 向上吸附到 15.6 的整数倍 {expected:.2}，实际 {grid:.2}"
     );
 }
 
@@ -414,6 +418,24 @@ fn last_line_of_paragraph_uses_unsnapped_extra_leading() {
         (ys[0] - ys[1]).abs()
     };
 
+    // 自然行高：无网格、单倍行距下相邻基线的距离。
+    let natural = {
+        let body: String = (0..6)
+            .map(|_| {
+                r#"<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>
+<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>测试文字</w:t></w:r></w:p>"#
+            })
+            .collect();
+        let pdf = convert(&make_docx_with_sect("tail_natural.docx", &body, ""))
+            .value
+            .pdf;
+        let mut ys: Vec<f32> = text_origins(&pdf).iter().map(|(_, y)| *y).collect();
+        ys.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        ys.dedup();
+        (ys[0] - ys[1]).abs()
+    };
+    let snapped = (natural / 15.6).ceil().max(1.0) * 15.6;
+
     // 多个单行段落：相邻基线之间跨的是「段落边界」。
     let between_paragraphs = gap_of(
         "tail_single.docx",
@@ -422,19 +444,25 @@ fn last_line_of_paragraph_uses_unsnapped_extra_leading() {
     // 一个长段落：相邻基线之间跨的是「段内换行」。
     let within_paragraph = gap_of("tail_multi.docx", para(&"测试文字".repeat(40)));
 
+    // Noto Serif CJK 下即 31.2 × 1.3 = 40.56 与 31.2 + 0.3 × 17.2 ≈ 36.4。
+    let within_expected = snapped * 1.3;
+    let between_expected = snapped + 0.3 * natural;
     assert!(
-        (within_paragraph - 40.56).abs() < 0.8,
-        "段内行距应当是 31.2 × 1.3 = 40.56，实际 {within_paragraph:.2}"
-    );
-    // 31.2 + 0.3 × 17.2 ≈ 36.4（自然行高随字体略有出入，留 1pt 余量）
-    assert!(
-        (between_paragraphs - 36.4).abs() < 1.0,
-        "段落边界应当是 31.2 + 0.3 × 自然行高 ≈ 36.4，实际 {between_paragraphs:.2}"
+        (within_paragraph - within_expected).abs() < 0.8,
+        "段内行距应当是 吸附后行高 {snapped:.2} × 1.3 = {within_expected:.2}，实际 {within_paragraph:.2}"
     );
     assert!(
-        within_paragraph > between_paragraphs + 2.0,
-        "段内行距必须明显大于段落边界的推进量，否则说明没有区分末行"
+        (between_paragraphs - between_expected).abs() < 1.0,
+        "段落边界应当是 {snapped:.2} + 0.3 × 自然行高 {natural:.2} = {between_expected:.2}，实际 {between_paragraphs:.2}"
     );
+    // 两者之差就是 0.3 × 吸附增量。字体的自然行高恰好接近网格整数倍时差很小，
+    // 这条就不构成检验，所以只在吸附增量明显时断言。
+    if snapped - natural > 2.0 {
+        assert!(
+            within_paragraph - between_paragraphs > 0.5,
+            "段内行距必须大于段落边界的推进量，否则说明没有区分末行"
+        );
+    }
 }
 
 /// 自动编号被丢弃时必须汇总报告，而且只报一条。
@@ -497,30 +525,36 @@ fn header_and_footer_are_reported() {
 ///
 /// 叠加会让行变宽并提前折行 —— 实测曾导致「正文第 1 段。」重复 6 次的段落
 /// 从 1 行变成 2 行，整篇页数多出 50%。
+///
+/// 判据与字体无关：边界上已有空格时，开着自动间距排出来的每个片段的位置，
+/// 必须和关掉自动间距时完全一样。
 #[test]
 fn no_extra_gap_when_a_real_space_already_separates() {
     if !require_cjk_font() {
         return;
     }
-    let one_line = |name: &str, txt: &str| {
+    let origins = |name: &str, ppr: &str| {
         let body = format!(
-            r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/>
-<w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">{txt}</w:t></w:r></w:p>"#
+            r#"<w:p><w:pPr>{ppr}</w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/>
+<w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">正文第 1 段。</w:t></w:r></w:p>"#
         );
         let pdf = convert(&make_docx_with_sect(name, &body, "")).value.pdf;
-        // 一行内所有片段的定位数 = 片段数；行数看不同的 y 值有几个
-        let ys: std::collections::BTreeSet<i32> = text_origins(&pdf)
-            .iter()
-            .map(|(_, y)| (y * 10.0) as i32)
-            .collect();
-        ys.len()
+        let mut xs: Vec<f32> = text_origins(&pdf).iter().map(|(x, _)| *x).collect();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        xs
     };
 
-    // 每段 5 个汉字 + 1 个数字 + 2 个空格，重复 6 次。
-    // 不叠加间距时刚好一行装得下；叠加就会折成两行。
-    let lines = one_line("spaced.docx", &"正文第 1 段。".repeat(6));
-    assert_eq!(
-        lines, 1,
-        "带空格的中西文混排被提前折行了 —— 说明在已有空格的边界上又加了一次自动间距"
+    let on = origins("spaced_on.docx", "");
+    let off = origins(
+        "spaced_off.docx",
+        r#"<w:autoSpaceDE w:val="0"/><w:autoSpaceDN w:val="0"/>"#,
     );
+    assert!(on.len() >= 3, "应当切成中文/数字/中文三段，实际 {on:?}");
+    assert_eq!(on.len(), off.len());
+    for (a, b) in on.iter().zip(&off) {
+        assert!(
+            (a - b).abs() < 0.01,
+            "边界上已有空格，却又加了自动间距：开 {on:?} / 关 {off:?}"
+        );
+    }
 }
