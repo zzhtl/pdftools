@@ -3,8 +3,7 @@
 use std::ops::Range;
 
 use super::calib::{
-    Breaks, Calib, EmptyPara, Flow, HangingIndent, HangingPunct, Justify, Overflow, Tabs,
-    TrailingSpaces,
+    Calib, EmptyPara, Flow, HangingIndent, HangingPunct, Justify, Overflow, TrailingSpaces,
 };
 use super::metrics::line_box;
 use super::text::{self, Hang, Piece, ShapedPara, TabRules};
@@ -72,12 +71,7 @@ impl ParaBox {
 }
 
 pub(super) fn measure(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> ParaBox {
-    let shaped = text::shape(
-        para,
-        book,
-        env.calib.breaks == Breaks::Typed,
-        env.calib.tabs == Tabs::Stops,
-    );
+    let shaped = text::shape(para, book, env.calib);
     let body = if !shaped.pieces.is_empty() {
         ParaBody::Lines(break_lines(para, &shaped, env, book))
     } else {

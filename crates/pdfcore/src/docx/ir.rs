@@ -109,6 +109,8 @@ pub struct RunStyle {
     pub font_latin: Option<String>,
     /// 中日韩字体家族名（来自 `w:rFonts/@w:eastAsia`）。
     pub font_east_asia: Option<String>,
+    /// `w:rFonts/@w:hint="eastAsia"`：归属不明的字符用东亚字体。
+    pub hint_east_asia: bool,
     /// 每个字后面额外加的间距（点），负数是紧缩。
     pub char_spacing: f32,
     /// 上标、下标：画小一号并抬高或压低，具体多少要看字体，排版时再算。
@@ -496,6 +498,7 @@ fn run_style(rpr: &RPr, fonts: &FontNames, calib: &Calib) -> RunStyle {
         color,
         font_latin: fonts.latin(rpr),
         font_east_asia: fonts.east_asia(rpr),
+        hint_east_asia: rpr.hint_east_asia.unwrap_or(false),
         char_spacing: match calib.run_format {
             RunFormat::Full => rpr.spacing.map(tw).unwrap_or(0.0),
             RunFormat::Legacy => 0.0,

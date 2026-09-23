@@ -57,6 +57,9 @@ pub struct RPr {
     /// 只给 [`Theme::Ignored`](crate::docx::layout::Theme::Ignored) 用。
     pub legacy_font_ascii: Option<String>,
     pub legacy_font_east_asia: Option<String>,
+    /// `w:rFonts/@w:hint` 是不是 `eastAsia`：归属不明的字符（引号、破折号、①……）
+    /// 用东亚字体。
+    pub hint_east_asia: Option<bool>,
     /// `w:spacing`：字符间距，twips。每个字后面加（负数是紧缩）。
     pub spacing: Option<i32>,
     /// `w:vanish`：隐藏文字。
@@ -158,6 +161,7 @@ impl RPr {
             font_east_asia,
             legacy_font_ascii,
             legacy_font_east_asia,
+            hint_east_asia,
             spacing,
             vanish,
             vert_align,

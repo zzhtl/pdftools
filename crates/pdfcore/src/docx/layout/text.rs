@@ -14,6 +14,8 @@ use std::ops::Range;
 
 use unicode_linebreak::{linebreaks, BreakOpportunity};
 
+use super::calib::{Breaks, Calib, CharClass, Tabs};
+use super::script;
 use crate::docx::ir;
 use crate::fonts::{
     attaches_to_previous, cluster_texts, pua, shape_run, split_by_script, FontBook, FontId,
@@ -344,12 +346,9 @@ pub(super) fn is_page_break(c: char) -> bool {
     c == ir::PAGE_BREAK || c == ir::COLUMN_BREAK
 }
 
-pub(super) fn shape(
-    para: &ir::Paragraph,
-    book: &mut FontBook,
-    typed_breaks: bool,
-    tab_stops: bool,
-) -> ShapedPara {
+pub(super) fn shape(para: &ir::Paragraph, book: &mut FontBook, calib: &Calib) -> ShapedPara {
+    let typed_breaks = calib.breaks == Breaks::Typed;
+    let tab_stops = calib.tabs == Tabs::Stops;
     let mut text = String::with_capacity(para.text.len());
     let mut spans: Vec<(Range<usize>, &ir::RunStyle)> = Vec::with_capacity(para.spans.len());
     for span in &para.spans {
@@ -372,12 +371,29 @@ pub(super) fn shape(
         spans.push((start..text.len(), &span.style));
     }
 
+    // 按字再切：中文用 eastAsia 字体，西文用 ascii 字体。
+    let classes = match calib.char_class {
+        CharClass::Blocks => {
+            let hints: Vec<_> = spans
+                .iter()
+                .map(|(r, st)| (r.clone(), st.hint_east_asia))
+                .collect();
+            script::classify(&text, &hints)
+        }
+        // 旧规则在每个 run 内部单独切。
+        CharClass::Legacy => spans
+            .iter()
+            .flat_map(|(span, _)| {
+                split_by_script(&text[span.clone()])
+                    .into_iter()
+                    .map(|(r, c)| (span.start + r.start..span.start + r.end, c))
+            })
+            .collect(),
+    };
+
     let mut pieces: Vec<Piece> = Vec::new();
     for (span, style) in spans {
-        let segment = &text[span.clone()];
-        // 一个 run 内部还要按 script 再切：中文用 eastAsia 字体，西文用 ascii 字体。
-        for (sub, class) in split_by_script(segment) {
-            let abs = span.start + sub.start..span.start + sub.end;
+        for (abs, class) in script::within(&classes, span) {
             let east = class == ScriptClass::EastAsian;
             let family = if east {
                 style

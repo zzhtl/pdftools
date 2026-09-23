@@ -28,6 +28,7 @@ pub struct Calib {
     pub cascade: Cascade,
     pub flow: Flow,
     pub theme: Theme,
+    pub char_class: CharClass,
 }
 
 /// `w:rFonts` 的主题字体（`w:asciiTheme`、`w:eastAsiaTheme` 等）。
@@ -44,6 +45,26 @@ pub enum Theme {
     ///   用的也是文种字体。都没有时（没写 `w:themeFontLang`、`a:ea` 又是空的）
     ///   按没写字体处理。
     Resolved,
+}
+
+/// 每个字用西文字体还是东亚字体。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CharClass {
+    /// 按 Unicode script 分：汉字、假名、谚文与全角标点用东亚字体，其余有 script 的
+    /// 用西文字体；Common 类（标点、符号、空格）跟随同一个 run 里的前一个字，
+    /// run 开头的跟随后一个字。
+    Legacy,
+    /// 对照 LibreOffice 实测，按 Unicode 区段分：
+    /// - 拉丁字母补充、拉丁扩展、希腊、西里尔（含 ×、· 这类符号）一律用西文字体；
+    ///   中日韩各区段（含 ㎡、㈠）与全角形式用东亚字体；
+    /// - 其余符号与标点（“”、—、…、①、℃、□、→）没有归属，跟随**整段**里前一个
+    ///   有归属的字，跨 run 也一样；段首的算西文（LibreOffice 按界面语言定，en-US
+    ///   下是西文；Word 没写 `w:hint` 时这些字符也用西文字体）。
+    ///
+    /// run 写了 `w:hint="eastAsia"` 时，这些没有归属的字，以及拉丁补充里的符号、
+    /// 希腊与西里尔字母，改用东亚字体 —— 这是 Word 的规则（ECMA-376 §17.3.2.26）。
+    /// LibreOffice 不认 `w:hint`，这一条没有参照可比。
+    Blocks,
 }
 
 /// 段落之间的版流控制：`w:keepNext`、`w:keepLines`、`w:widowControl`、
@@ -269,6 +290,7 @@ impl Calib {
             cascade: Cascade::Spec,
             flow: Flow::Word,
             theme: Theme::Resolved,
+            char_class: CharClass::Blocks,
         }
     }
 
@@ -292,6 +314,7 @@ impl Calib {
             cascade: Cascade::Legacy,
             flow: Flow::Legacy,
             theme: Theme::Ignored,
+            char_class: CharClass::Legacy,
         }
     }
 }

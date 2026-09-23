@@ -176,9 +176,9 @@ fn html_paragraph_spacing_switch() {
 fn theme_fonts_take_precedence_within_one_rfonts() {
     use crate::docx::model::{FontRef, ThemeFont, ThemeScript};
     let doc = body(
-        r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Serif A" w:asciiTheme="majorHAnsi" w:eastAsia="Song B"/></w:rPr><w:t>甲</w:t></w:r>
+        r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Serif A" w:asciiTheme="majorHAnsi" w:eastAsia="Song B" w:hint="eastAsia"/></w:rPr><w:t>甲</w:t></w:r>
 <w:r><w:rPr><w:rFonts w:hAnsiTheme="minorHAnsi" w:eastAsiaTheme="minorEastAsia"/></w:rPr><w:t>乙</w:t></w:r>
-<w:r><w:rPr><w:rFonts w:hAnsi="Sans C"/></w:rPr><w:t>丙</w:t></w:r></w:p>"#,
+<w:r><w:rPr><w:rFonts w:hAnsi="Sans C" w:hint="default"/></w:rPr><w:t>丙</w:t></w:r></w:p>"#,
     );
     let runs = &paras(&doc)[0].runs;
     let theme = |major, script| Some(FontRef::Theme(ThemeFont { major, script }));
@@ -188,6 +188,7 @@ fn theme_fonts_take_precedence_within_one_rfonts() {
         Some(FontRef::Name("Song B".into()))
     );
     assert_eq!(runs[0].rpr.legacy_font_ascii.as_deref(), Some("Serif A"));
+    assert_eq!(runs[0].rpr.hint_east_asia, Some(true));
     assert_eq!(runs[1].rpr.font_ascii, theme(false, ThemeScript::Latin));
     assert_eq!(
         runs[1].rpr.font_east_asia,
@@ -195,6 +196,7 @@ fn theme_fonts_take_precedence_within_one_rfonts() {
     );
     assert_eq!(runs[1].rpr.legacy_font_ascii, None);
     assert_eq!(runs[2].rpr.font_ascii, Some(FontRef::Name("Sans C".into())));
+    assert_eq!(runs[2].rpr.hint_east_asia, Some(false));
 }
 
 #[test]

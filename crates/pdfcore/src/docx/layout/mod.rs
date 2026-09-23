@@ -12,10 +12,11 @@ mod calib;
 mod metrics;
 mod paginate;
 mod para;
+mod script;
 mod text;
 
 pub use calib::{
-    Breaks, Calib, Cascade, EmptyPara, FixedBaseline, Flow, GridLayout, HangingIndent,
+    Breaks, Calib, Cascade, CharClass, EmptyPara, FixedBaseline, Flow, GridLayout, HangingIndent,
     HangingPunct, Justify, Overflow, PageBottom, PageBreakBefore, ParaSpacing, RunFormat, Tabs,
     Theme, TrailingSpaces,
 };
@@ -266,6 +267,7 @@ fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
         color: PLACEHOLDER_COLOR,
         font_latin: None,
         font_east_asia: None,
+        hint_east_asia: false,
         char_spacing: 0.0,
         vert_align: ir::VertAlign::Baseline,
         position_pt: 0.0,

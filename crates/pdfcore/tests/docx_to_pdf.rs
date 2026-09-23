@@ -1629,3 +1629,33 @@ fn theme_fonts_come_from_the_theme_part() {
     assert_eq!(font("Major"), font("Serif"), "标题主题字体");
     assert_eq!(font("Both"), font("Serif"), "同一个元素里主题字体优先");
 }
+
+/// 每个字用哪套字体：拉丁补充里的 × 是西文；引号跟随前一个字（跨 run 也一样），
+/// 段首的算西文；`w:hint="eastAsia"` 的 run 里引号用中文字体。
+#[test]
+fn ambiguous_characters_follow_context_and_the_east_asia_hint() {
+    if !require_cjk_font() {
+        return;
+    }
+    let run = |hint: &str, text: &str| {
+        format!(
+            r#"<w:r><w:rPr><w:rFonts w:ascii="Liberation Serif" w:hAnsi="Liberation Serif" w:eastAsia="宋体"{hint}/><w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r>"#
+        )
+    };
+    let body = format!(
+        "<w:p>{}{}</w:p><w:p>{}</w:p><w:p>{}</w:p>",
+        run("", "甲×乙"),
+        run("", "“丙”"),
+        run("", "AB“CD”"),
+        run(r#" w:hint="eastAsia""#, "EF‘GH’"),
+    );
+    let frags = frags_of(&convert(&make_docx("ambiguous_chars.docx", &body)).value.pdf);
+    let font = |t| font_of(&frags, t);
+    let (cjk, latin) = (font("甲"), font("AB"));
+    assert_ne!(cjk, latin);
+    assert_eq!(font("×"), latin, "× 是西文字符");
+    assert_eq!(font("“丙"), cjk, "引号跟随上一个 run 末尾的汉字");
+    assert_eq!(font("AB“CD”"), latin, "跟在西文后面的引号用西文字体");
+    assert_eq!(font("‘"), cjk, "w:hint=eastAsia 时引号用中文字体");
+    assert_eq!(font("EF"), latin, "字母不受 hint 影响");
+}

@@ -118,6 +118,7 @@ pub(super) fn parse_rpr(r: &mut Rd) -> Result<RPr> {
                     rpr.font_east_asia = theme("eastAsiaTheme").or_else(|| named("eastAsia"));
                     rpr.legacy_font_ascii = attr(&e, "ascii").or_else(|| attr(&e, "hAnsi"));
                     rpr.legacy_font_east_asia = attr(&e, "eastAsia");
+                    rpr.hint_east_asia = attr(&e, "hint").map(|h| h == "eastAsia");
                 }
                 "spacing" => rpr.spacing = attr_i32(&e, "val"),
                 "vertAlign" => {
