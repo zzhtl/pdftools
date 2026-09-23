@@ -17,8 +17,8 @@ mod text;
 
 pub use calib::{
     AutoSpace, Breaks, Calib, Cascade, CharClass, Decor, EmptyPara, FixedBaseline, Flow,
-    GridLayout, HangingIndent, HangingPunct, Justify, Overflow, PageBottom, PageBreakBefore,
-    ParaSpacing, RunFormat, Tabs, Theme, TrailingSpaces,
+    GridLayout, HangingIndent, HangingPunct, Justify, ListNumbers, Overflow, PageBottom,
+    PageBreakBefore, ParaSpacing, RunFormat, Tabs, Theme, TrailingSpaces,
 };
 
 use super::ir;
@@ -188,6 +188,15 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
             ),
         ));
     }
+    if !doc.num_format_fallbacks.is_empty() {
+        warnings.push(Warning::new(
+            WarningKind::UnsupportedElement,
+            format!(
+                "编号格式 {} 暂不支持，已按阿拉伯数字输出",
+                doc.num_format_fallbacks.join("、")
+            ),
+        ));
+    }
     if doc.has_header_footer {
         warnings.push(Warning::new(
             WarningKind::UnsupportedElement,
@@ -313,6 +322,7 @@ fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
         shading: None,
         style_id: None,
         numbering_dropped: false,
+        number: None,
         text,
         spans,
         mark: style,

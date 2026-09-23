@@ -17,9 +17,10 @@
 
 use std::ops::Range;
 
-use super::layout::{Calib, Cascade, RunFormat, Theme};
-use super::model::{self, BreakKind, FontRef, LineRule, PPr, RPr, RunItem, ThemeScript};
+use super::layout::{Calib, Cascade, ListNumbers, RunFormat, Theme};
+use super::model::{self, BreakKind, FontRef, LineRule, NumSuffix, PPr, RPr, RunItem, ThemeScript};
 pub use super::model::{BorderStyle, TabAlign, TabLeader, UnderlineStyle, VertAlign};
+use super::numbering::Lists;
 use super::resolve::Resolver;
 
 pub const LINE_BREAK: char = '\u{2028}';
@@ -173,10 +174,21 @@ pub struct Paragraph {
     pub style_id: Option<String>,
     /// 本段挂了自动编号，但编号文字没有生成。
     pub numbering_dropped: bool,
+    /// 段首的编号（已经写在 `text` 开头）。
+    pub number: Option<NumberLabel>,
     pub text: String,
     pub spans: Vec<Span>,
     /// 段落标记（¶）的格式。空段落的行高由它决定。
     pub mark: RunStyle,
+}
+
+/// 写在段首的编号。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NumberLabel {
+    /// 编号文字（不含后面的制表符、空格）的字节长度。
+    pub len: usize,
+    /// `w:lvlJc`：编号在首行起点处左对齐、居中还是右对齐。
+    pub align: Align,
 }
 
 /// 段落边框的一条线，单位已换成点。
@@ -278,18 +290,30 @@ pub struct Document {
     pub html_paragraph_spacing: bool,
     /// 默认制表位的间距（点）。`settings.xml` 没写时是 Word 的缺省 36pt。
     pub default_tab_stop: f32,
+    /// 不认识、按阿拉伯数字输出的编号格式。
+    pub num_format_fallbacks: Vec<String>,
     pub blocks: Vec<Block>,
 }
 
 pub fn build(doc: &model::Document, calib: &Calib) -> Document {
-    let resolver = Resolver::new(&doc.styles, calib.cascade == Cascade::Spec);
+    let numbering = (calib.list_numbers == ListNumbers::Rendered).then_some(&doc.numbering);
+    let resolver = Resolver::new(&doc.styles, calib.cascade == Cascade::Spec, numbering);
+    let mut lists = numbering.map(|n| Lists::new(n, &doc.styles));
     let fonts = FontNames::new(doc, calib);
     let s = doc.section;
 
     let mut blocks = Vec::with_capacity(doc.body.len());
     for block in &doc.body {
         match block {
-            model::Block::Para(p) => push_paragraph(&mut blocks, p, doc, &resolver, &fonts, calib),
+            model::Block::Para(p) => {
+                let ctx = Ctx {
+                    doc,
+                    resolver: &resolver,
+                    fonts: &fonts,
+                    calib,
+                };
+                push_paragraph(&mut blocks, p, &ctx, lists.as_mut())
+            }
             model::Block::Table(t) => blocks.push(Block::Placeholder(table_placeholder(t))),
         }
     }
@@ -314,18 +338,28 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
         grid,
         html_paragraph_spacing: !doc.settings.no_html_paragraph_spacing,
         default_tab_stop: doc.settings.default_tab_stop.map(tw).unwrap_or(36.0),
+        num_format_fallbacks: lists
+            .map(|l| l.fallbacks.into_iter().collect())
+            .unwrap_or_default(),
         blocks,
     }
 }
 
-fn push_paragraph(
-    out: &mut Vec<Block>,
-    p: &model::Para,
-    doc: &model::Document,
-    resolver: &Resolver,
-    fonts: &FontNames,
-    calib: &Calib,
-) {
+/// 构建各段落都要用到的东西。
+struct Ctx<'a> {
+    doc: &'a model::Document,
+    resolver: &'a Resolver<'a>,
+    fonts: &'a FontNames<'a>,
+    calib: &'a Calib,
+}
+
+fn push_paragraph(out: &mut Vec<Block>, p: &model::Para, ctx: &Ctx, lists: Option<&mut Lists>) {
+    let Ctx {
+        doc,
+        resolver,
+        fonts,
+        calib,
+    } = *ctx;
     let ppr = resolver.paragraph(&p.ppr);
     let mut text = String::new();
     let mut spans = Vec::with_capacity(p.runs.len());
@@ -425,15 +459,55 @@ fn push_paragraph(
     }
 
     // 首行缩进按「字符」算时，用的是段落标记的东亚字号。
-    let mark = resolver.mark(&ppr);
-    let char_size = mark
+    let mark_rpr = resolver.mark(&ppr);
+    let char_size = mark_rpr
         .size_half_pt
         .map(half_pt)
         .or_else(|| spans.first().map(|s| s.style.size_pt))
         .unwrap_or(calib.default_size_pt);
 
-    let mark = run_style(&mark, fonts, calib);
+    // 编号写在段首，格式是段落标记的格式叠上编号级别的格式。
+    let dropped = lists.is_none() && ppr.numbering;
+    let label = lists.and_then(|l| {
+        let ilvl = u8::try_from(ppr.num_ilvl.unwrap_or(0)).ok()?;
+        l.next(ppr.num_id?, ilvl)
+    });
+    let (text, spans, number) = match label {
+        Some(label) if !label.text.is_empty() || label.suffix != NumSuffix::Nothing => {
+            let mut rpr = mark_rpr.clone();
+            rpr.merge(&label.rpr);
+            let style = run_style(&rpr, fonts, calib);
+            let len = label.text.len();
+            let mut prefix = label.text;
+            match label.suffix {
+                NumSuffix::Tab => prefix.push('\t'),
+                NumSuffix::Space => prefix.push(' '),
+                NumSuffix::Nothing => {}
+            }
+            let shift = prefix.len();
+            let spans = std::iter::once(Span {
+                range: 0..shift,
+                style,
+            })
+            .chain(spans.into_iter().map(|s| Span {
+                range: s.range.start + shift..s.range.end + shift,
+                ..s
+            }))
+            .collect();
+            let align = match label.align {
+                model::Align::Center => Align::Center,
+                model::Align::Right => Align::Right,
+                _ => Align::Left,
+            };
+            (prefix + &text, spans, Some(NumberLabel { len, align }))
+        }
+        _ => (text, spans, None),
+    };
+
+    let mark = run_style(&mark_rpr, fonts, calib);
     let mut para = paragraph(&ppr, text, spans, mark, char_size);
+    para.numbering_dropped = dropped;
+    para.number = number;
     para.style_id = ppr
         .style_id
         .clone()
@@ -653,7 +727,8 @@ fn paragraph(
         borders: Borders::from_model(&ppr.borders),
         shading: ppr.shading.flatten(),
         style_id: None,
-        numbering_dropped: ppr.numbering,
+        numbering_dropped: false,
+        number: None,
         text,
         spans,
         mark,

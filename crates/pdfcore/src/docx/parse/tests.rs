@@ -260,3 +260,50 @@ fn paragraph_borders_and_shading() {
         "auto 底色等于没有底纹"
     );
 }
+
+#[test]
+fn numbering_definitions() {
+    use crate::docx::model::NumSuffix;
+    let n = parse_numbering(
+        r#"<w:numbering xmlns:w="w" xmlns:mc="mc"><w:abstractNum w:abstractNumId="3"><w:multiLevelType w:val="multilevel"/>
+<w:lvl w:ilvl="0"><w:start w:val="2"/><w:numFmt w:val="chineseCounting"/><w:suff w:val="space"/><w:lvlText w:val="第%1条"/><w:lvlJc w:val="right"/><w:pPr><w:ind w:left="420" w:hanging="420"/></w:pPr><w:rPr><w:b/></w:rPr></w:lvl>
+<w:lvl w:ilvl="1"><mc:AlternateContent><mc:Choice Requires="w14"><w:numFmt w:val="custom" w:format="01, 02, 03, ..."/></mc:Choice><mc:Fallback><w:numFmt w:val="decimalZero"/></mc:Fallback></mc:AlternateContent><w:lvlRestart w:val="0"/><w:isLgl/><w:lvlText w:val="%1.%2"/></w:lvl>
+<w:lvl w:ilvl="9"><w:numFmt w:val="decimal"/></w:lvl>
+</w:abstractNum>
+<w:abstractNum w:abstractNumId="4"><w:numStyleLink w:val="ListStyle"/></w:abstractNum>
+<w:num w:numId="7"><w:abstractNumId w:val="3"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride><w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:numFmt w:val="upperLetter"/><w:lvlText w:val="%2)"/></w:lvl></w:lvlOverride></w:num>
+</w:numbering>"#,
+    );
+    let a = &n.abstracts[&3];
+    assert_eq!(a.levels.len(), 2, "第 9 级超出范围，不收");
+    let l0 = &a.levels[&0];
+    assert_eq!(
+        (l0.start, l0.format.as_deref(), l0.text.as_deref()),
+        (Some(2), Some("chineseCounting"), Some("第%1条"))
+    );
+    assert_eq!(
+        (l0.suffix, l0.align),
+        (Some(NumSuffix::Space), Some(Align::Right))
+    );
+    assert_eq!(
+        (
+            l0.ppr.indent.left_twips,
+            l0.ppr.indent.hanging_twips,
+            l0.rpr.bold
+        ),
+        (Some(420), Some(420), Some(true))
+    );
+    let l1 = &a.levels[&1];
+    assert_eq!(
+        l1.format.as_deref(),
+        Some("decimalZero"),
+        "取 mc:Fallback 的通用格式"
+    );
+    assert_eq!((l1.restart, l1.legal), (Some(0), true));
+    assert_eq!(n.abstracts[&4].num_style_link.as_deref(), Some("ListStyle"));
+    let num = &n.nums[&7];
+    assert_eq!(num.abstract_id, 3);
+    assert_eq!(num.overrides[&0].start, Some(5));
+    let over = num.overrides[&1].level.as_ref().unwrap();
+    assert_eq!(over.format.as_deref(), Some("upperLetter"));
+}

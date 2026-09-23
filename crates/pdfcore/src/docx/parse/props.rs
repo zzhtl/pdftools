@@ -208,8 +208,10 @@ pub(super) fn parse_ppr(r: &mut Rd) -> Result<(PPr, Option<SectPr>)> {
             // 修订前的旧格式，理由同 rPrChange。
             Event::Start(e) if e.local_name().as_ref() == "pPrChange" => skip(r, "pPrChange")?,
             Event::Start(e) | Event::Empty(e) => match e.local_name().as_ref() {
-                // 只标记，不展开 numbering.xml。
                 "numPr" => ppr.numbering = true,
+                // `w:numPr` 的两个子元素，在 `w:pPr` 里不会出现在别处。
+                "numId" => ppr.num_id = attr_i32(&e, "val"),
+                "ilvl" => ppr.num_ilvl = attr_i32(&e, "val"),
                 "pStyle" => ppr.style_id = attr(&e, "val"),
                 "jc" => {
                     ppr.align = match attr(&e, "val").as_deref() {

@@ -3,11 +3,14 @@
 //! 元素一律按 local name 匹配，不看命名空间前缀：同一个元素在不同生成器里
 //! 前缀不同（`w:`、`w14:`、默认命名空间），按前缀匹配会漏。
 
+mod numbering;
 mod props;
 mod story;
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
+
+pub use numbering::parse_numbering;
 
 use super::model::{Document, SectPr, Settings, Style, Styles, Theme};
 use crate::error::{CoreError, Result};
@@ -104,6 +107,7 @@ pub fn parse_document(xml: &str, styles: Styles, settings: Settings) -> Result<D
         styles,
         settings,
         theme: Default::default(),
+        numbering: Default::default(),
         hyperlinks: Default::default(),
     })
 }
@@ -219,7 +223,10 @@ pub fn parse_styles(xml: &str) -> Styles {
                         "character" => {
                             styles.character.insert(id, st);
                         }
-                        // 表格样式、编号样式：还不参与层叠。
+                        "numbering" => {
+                            styles.numbering.insert(id, st);
+                        }
+                        // 表格样式：还不参与层叠。
                         _ => {}
                     }
                 }

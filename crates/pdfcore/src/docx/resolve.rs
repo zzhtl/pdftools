@@ -18,17 +18,23 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::model::{PPr, RPr, Style, Styles};
+use super::model::{Numbering, PPr, RPr, Style, Styles};
 
 pub struct Resolver<'a> {
     styles: &'a Styles,
     spec: bool,
+    /// 编号定义。给了才让编号级别的缩进、制表位参与层叠。
+    numbering: Option<&'a Numbering>,
 }
 
 impl<'a> Resolver<'a> {
     /// `spec`：按规范层叠；否则复刻重写前的做法。
-    pub fn new(styles: &'a Styles, spec: bool) -> Self {
-        Self { styles, spec }
+    pub fn new(styles: &'a Styles, spec: bool, numbering: Option<&'a Numbering>) -> Self {
+        Self {
+            styles,
+            spec,
+            numbering,
+        }
     }
 
     /// 段落用的样式链：写了 `w:pStyle` 就是它，没写才是默认段落样式。
@@ -86,10 +92,36 @@ impl<'a> Resolver<'a> {
     pub fn paragraph(&self, direct: &PPr) -> PPr {
         let mut out = self.styles.doc_default_ppr.clone();
         if self.spec {
-            for st in self.paragraph_chain(direct.style_id.as_deref()) {
-                out.merge(&st.ppr);
+            let chain = self.paragraph_chain(direct.style_id.as_deref());
+            // 编号级别的缩进、制表位插在层叠的哪一层（LibreOffice 实测）：编号直接写在
+            // 段落上时在样式之后；来自样式时在写着编号的那个样式之前、它的基样式之后
+            // —— 那个样式自己的缩进优先，基样式里的（常见的「首行缩进 2 字符」）不优先。
+            let defining = chain.iter().rposition(|st| st.ppr.num_id.is_some());
+            let at = match direct.num_id {
+                Some(_) => chain.len(),
+                None => defining.unwrap_or(chain.len()),
+            };
+            let level = self.numbering.and_then(|n| {
+                let id = direct
+                    .num_id
+                    .or_else(|| chain.iter().rev().find_map(|st| st.ppr.num_id))?;
+                let ilvl = direct
+                    .num_ilvl
+                    .or_else(|| chain.iter().rev().find_map(|st| st.ppr.num_ilvl))
+                    .unwrap_or(0);
+                let (_, level) = n.level(self.styles, id, u8::try_from(ilvl).ok()?)?;
+                Some(&level.ppr)
+            });
+            for (i, st) in chain.iter().enumerate() {
+                if let (true, Some(l)) = (i == at, level) {
+                    out.cascade(l);
+                }
+                out.cascade(&st.ppr);
             }
-            out.merge(direct);
+            if let (true, Some(l)) = (at == chain.len(), level) {
+                out.cascade(l);
+            }
+            out.cascade(direct);
             return out;
         }
 
@@ -225,7 +257,7 @@ mod tests {
     #[test]
     fn a_paragraph_style_does_not_pull_in_normal() {
         let s = styles();
-        let r = Resolver::new(&s, true);
+        let r = Resolver::new(&s, true, None);
         let ppr = r.paragraph(&PPr {
             style_id: Some("Title".into()),
             ..Default::default()
@@ -233,7 +265,7 @@ mod tests {
         assert_eq!(ppr.space_after_twips, None);
         assert_eq!(r.run(&ppr, &RPr::default()).size_half_pt, None);
         // 旧做法会把 Normal 叠进来。
-        let legacy = Resolver::new(&s, false);
+        let legacy = Resolver::new(&s, false, None);
         assert_eq!(
             legacy
                 .paragraph(&PPr {
@@ -248,7 +280,7 @@ mod tests {
     #[test]
     fn the_paragraph_mark_formats_only_the_mark() {
         let s = styles();
-        let r = Resolver::new(&s, true);
+        let r = Resolver::new(&s, true, None);
         let ppr = r.paragraph(&PPr {
             mark_rpr: RPr {
                 size_half_pt: Some(48),
@@ -263,7 +295,7 @@ mod tests {
     #[test]
     fn toggles_cancel_between_paragraph_and_character_styles() {
         let s = styles();
-        let r = Resolver::new(&s, true);
+        let r = Resolver::new(&s, true, None);
         let ppr = r.paragraph(&PPr {
             style_id: Some("Title".into()),
             ..Default::default()
@@ -283,5 +315,75 @@ mod tests {
             ..strong
         };
         assert_eq!(r.run(&ppr, &direct).bold, Some(true));
+    }
+
+    /// 编号级别的缩进插在层叠的哪一层，首行缩进与悬挂缩进互斥（LibreOffice 实测）。
+    /// 编号级别是左缩进 840、悬挂 840。
+    #[test]
+    fn numbering_level_indents_in_the_cascade() {
+        use crate::docx::model::{Block, Settings};
+        use crate::docx::parse::{parse_document, parse_numbering, parse_styles};
+        let styles = parse_styles(
+            r#"<w:styles xmlns:w="w">
+<w:style w:type="paragraph" w:default="1" w:styleId="Normal"/>
+<w:style w:type="paragraph" w:styleId="H"><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr><w:ind w:left="0" w:firstLine="0"/></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="Base"><w:pPr><w:ind w:firstLine="420" w:firstLineChars="200"/></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="Hx"><w:basedOn w:val="Base"/><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="Hz"><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr><w:ind w:left="420"/></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="S2"><w:pPr><w:ind w:left="0" w:firstLine="0"/></w:pPr></w:style>
+</w:styles>"#,
+        );
+        let numbering = parse_numbering(
+            r#"<w:numbering xmlns:w="w"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="840" w:hanging="840"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#,
+        );
+        let resolver = Resolver::new(&styles, true, Some(&numbering));
+        // (左, 首行, 首行字符, 悬挂)
+        let indent = |ppr: &str| {
+            let doc = parse_document(
+                &format!(r#"<w:document xmlns:w="w"><w:body><w:p><w:pPr>{ppr}</w:pPr></w:p></w:body></w:document>"#),
+                Styles::default(),
+                Settings::default(),
+            )
+            .unwrap();
+            let Block::Para(p) = &doc.body[0] else {
+                unreachable!()
+            };
+            let i = resolver.paragraph(&p.ppr).indent;
+            (
+                i.left_twips,
+                i.first_line_twips,
+                i.first_line_chars,
+                i.hanging_twips,
+            )
+        };
+        let num = r#"<w:numPr><w:numId w:val="1"/></w:numPr>"#;
+        // 编号来自样式：那个样式自己的缩进优先，首行缩进取代级别的悬挂。
+        assert_eq!(
+            indent(r#"<w:pStyle w:val="H"/>"#),
+            (Some(0), Some(0), None, None)
+        );
+        // 基样式里的首行缩进不优先：级别的悬挂取代它。
+        assert_eq!(
+            indent(r#"<w:pStyle w:val="Hx"/>"#),
+            (Some(840), None, None, Some(840))
+        );
+        // 样式只写了左缩进：悬挂仍来自级别。
+        assert_eq!(
+            indent(r#"<w:pStyle w:val="Hz"/>"#),
+            (Some(420), None, None, Some(840))
+        );
+        // 编号直接写在段落上：级别在样式之后，直接格式在级别之后。
+        assert_eq!(
+            indent(&format!(r#"<w:pStyle w:val="S2"/>{num}"#)),
+            (Some(840), None, None, Some(840))
+        );
+        assert_eq!(
+            indent(&format!(r#"{num}<w:ind w:left="1260"/>"#)),
+            (Some(1260), None, None, Some(840))
+        );
+        assert_eq!(
+            indent(&format!(r#"{num}<w:ind w:firstLine="200"/>"#)),
+            (Some(840), Some(200), None, None)
+        );
     }
 }

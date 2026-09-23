@@ -342,5 +342,140 @@ pub fn all() -> Vec<Probe> {
     bordered += &probe_para(&(boxed(4, 4, false) + shd), &filler(60, 240));
     add("paragraph_borders", DocxBuilder::new().body(&bordered));
 
+    // 编号的语义：多级模板、isLgl、几个 num 共用计数器与 startOverride、三种后缀、
+    // 右对齐与居中的编号、加粗的编号、编号来自样式时的缩进层叠、项目符号。
+    // pPr 里的元素按 schema 顺序写：LibreOffice 按出现顺序处理，缩进写在编号前面
+    // 会被编号盖掉，真实文档不会这样。
+    let rpr = r#"<w:rPr><w:rFonts w:ascii="Liberation Serif" w:hAnsi="Liberation Serif" w:eastAsia="Noto Serif CJK SC"/><w:sz w:val="24"/></w:rPr>"#;
+    let lvl = |i: u8, fmt: &str, text: &str, ind: (u32, u32), extra: &str, rpr: &str| {
+        format!(
+            r#"<w:lvl w:ilvl="{i}"><w:start w:val="1"/><w:numFmt w:val="{fmt}"/>{extra}<w:lvlText w:val="{text}"/><w:pPr><w:ind w:left="{}" w:hanging="{}"/></w:pPr>{rpr}</w:lvl>"#,
+            ind.0, ind.1
+        )
+    };
+    let bold = rpr.replace("<w:sz ", "<w:b/><w:sz ");
+    let symbol = rpr.replace(
+        r#"w:ascii="Liberation Serif" w:hAnsi="Liberation Serif""#,
+        r#"w:ascii="Symbol" w:hAnsi="Symbol""#,
+    );
+    let abstracts = [
+        lvl(0, "chineseCounting", "%1、", (420, 420), "", rpr)
+            + &lvl(1, "decimal", "%1.%2", (840, 420), "", rpr)
+            + &lvl(2, "lowerLetter", "(%3)", (1260, 420), "", rpr),
+        lvl(0, "chineseCounting", "第%1章", (0, 0), "", rpr)
+            + &lvl(1, "decimal", "%1.%2", (420, 420), "<w:isLgl/>", rpr),
+        lvl(0, "decimal", "%1.", (420, 420), "", rpr),
+        lvl(
+            0,
+            "upperRoman",
+            "%1.",
+            (0, 0),
+            r#"<w:suff w:val="space"/>"#,
+            rpr,
+        ),
+        lvl(
+            0,
+            "decimal",
+            "%1.",
+            (0, 0),
+            r#"<w:suff w:val="nothing"/>"#,
+            rpr,
+        ),
+        lvl(
+            0,
+            "decimal",
+            "%1.",
+            (720, 720),
+            r#"<w:lvlJc w:val="right"/>"#,
+            rpr,
+        ),
+        lvl(
+            0,
+            "decimal",
+            "%1.",
+            (720, 720),
+            r#"<w:lvlJc w:val="center"/>"#,
+            rpr,
+        ),
+        lvl(0, "decimal", "%1.", (420, 420), "", &bold),
+        lvl(0, "decimal", "%1", (840, 840), "", rpr),
+        lvl(0, "bullet", "\u{F0B7}", (420, 420), "", &symbol),
+    ];
+    let mut numbering: String = abstracts
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            format!(
+                r#"<w:abstractNum w:abstractNumId="{i}"><w:multiLevelType w:val="multilevel"/>{a}</w:abstractNum>"#
+            )
+        })
+        .collect();
+    numbering += &(0..abstracts.len())
+        .map(|i| {
+            format!(
+                r#"<w:num w:numId="{}"><w:abstractNumId w:val="{i}"/></w:num>"#,
+                i + 1
+            )
+        })
+        .collect::<String>();
+    numbering += r#"<w:num w:numId="20"><w:abstractNumId w:val="2"/></w:num><w:num w:numId="21"><w:abstractNumId w:val="2"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride></w:num>"#;
+    let styles = r#"<w:docDefaults><w:rPrDefault><w:rPr/></w:rPrDefault><w:pPrDefault/></w:docDefaults>
+<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+<w:style w:type="paragraph" w:styleId="H"><w:name w:val="H"/><w:pPr><w:numPr><w:numId w:val="9"/></w:numPr><w:ind w:left="0" w:firstLine="0"/></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="Base"><w:name w:val="Base"/><w:pPr><w:ind w:firstLine="480" w:firstLineChars="200"/></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="Hx"><w:name w:val="Hx"/><w:basedOn w:val="Base"/><w:pPr><w:numPr><w:numId w:val="9"/></w:numPr></w:pPr></w:style>"#;
+    let item = |style: &str, num: Option<(u32, u8)>, ind: &str, seed: usize| {
+        let style = if style.is_empty() {
+            String::new()
+        } else {
+            format!(r#"<w:pStyle w:val="{style}"/>"#)
+        };
+        let num = num.map_or(String::new(), |(id, l)| {
+            format!(r#"<w:numPr><w:ilvl w:val="{l}"/><w:numId w:val="{id}"/></w:numPr>"#)
+        });
+        probe_para(&format!("{style}{num}{ind}"), &filler(seed, 40))
+    };
+    let seq = [
+        ("", Some((1, 0)), ""),
+        ("", Some((1, 1)), ""),
+        ("", Some((1, 1)), ""),
+        ("", Some((1, 2)), ""),
+        ("", Some((1, 0)), ""),
+        ("", Some((1, 1)), ""),
+        ("", Some((2, 0)), ""),
+        ("", Some((2, 1)), ""),
+        ("", Some((2, 1)), ""),
+        ("", Some((3, 0)), ""),
+        ("", Some((20, 0)), ""),
+        ("", Some((21, 0)), ""),
+        ("", Some((21, 0)), ""),
+        ("", Some((3, 0)), ""),
+        ("", Some((4, 0)), ""),
+        ("", Some((5, 0)), ""),
+        ("", Some((6, 0)), ""),
+        ("", Some((7, 0)), ""),
+        ("", Some((8, 0)), ""),
+        ("H", None, ""),
+        ("H", None, r#"<w:ind w:left="1260"/>"#),
+        ("H", Some((0, 0)), ""),
+        ("Hx", None, ""),
+        ("Base", Some((9, 0)), ""),
+        ("", Some((9, 0)), r#"<w:ind w:firstLine="200"/>"#),
+        ("", Some((10, 0)), ""),
+        ("", Some((10, 0)), ""),
+    ];
+    let numbered: String = seq
+        .iter()
+        .enumerate()
+        .map(|(i, (st, num, ind))| item(st, *num, ind, i))
+        .collect();
+    add(
+        "numbering_semantics",
+        DocxBuilder::new()
+            .numbering(&numbering)
+            .styles(styles)
+            .body(&numbered),
+    );
+
     v
 }

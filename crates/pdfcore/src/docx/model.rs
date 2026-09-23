@@ -235,13 +235,34 @@ pub struct PPr {
     pub borders: ParaBorders,
     /// `w:shd`：段落底纹。`Some(None)` 是明确写了没有底纹。
     pub shading: Option<Option<[u8; 3]>>,
-    /// 本段挂了自动编号（`w:numPr`）。
+    /// 本段挂了自动编号（写了 `w:numPr`，不管指向哪里）。重写前只认这一点。
     pub numbering: bool,
+    /// `w:numPr/w:numId`：用哪个编号定义。0 是明确取消样式带来的编号。
+    pub num_id: Option<i32>,
+    /// `w:numPr/w:ilvl`：第几级（0 起）。
+    pub num_ilvl: Option<i32>,
     /// `w:pPr/w:rPr`：段落标记自身的格式。它参与 run 的层叠，优先级低于 run 上的直接格式。
     pub mark_rpr: RPr,
 }
 
 impl PPr {
+    /// 按规范层叠：与 [`merge`](Self::merge) 相同，只是首行缩进与悬挂缩进互斥 ——
+    /// 上层写了其中一个，就取代下层写的另一个。同一个元素里两个都写时照旧悬挂优先。
+    pub fn cascade(&mut self, other: &PPr) {
+        let o = &other.indent;
+        let first = o.first_line_twips.is_some() || o.first_line_chars.is_some();
+        let hanging = o.hanging_twips.is_some() || o.hanging_chars.is_some();
+        if first && !hanging {
+            self.indent.hanging_twips = None;
+            self.indent.hanging_chars = None;
+        }
+        if hanging && !first {
+            self.indent.first_line_twips = None;
+            self.indent.first_line_chars = None;
+        }
+        self.merge(other);
+    }
+
     pub fn merge(&mut self, other: &PPr) {
         if other.style_id.is_some() {
             self.style_id = other.style_id.clone();
@@ -285,6 +306,12 @@ impl PPr {
             self.shading = other.shading;
         }
         self.numbering |= other.numbering;
+        if other.num_id.is_some() {
+            self.num_id = other.num_id;
+        }
+        if other.num_ilvl.is_some() {
+            self.num_ilvl = other.num_ilvl;
+        }
         self.mark_rpr.merge(&other.mark_rpr);
     }
 }
@@ -541,8 +568,97 @@ pub struct Styles {
     pub doc_default_rpr: RPr,
     pub paragraph: HashMap<String, Style>,
     pub character: HashMap<String, Style>,
+    /// 编号样式（`w:type="numbering"`）。只用来解 `w:numStyleLink`：编号定义写在
+    /// 样式指向的那个 `w:num` 里。
+    pub numbering: HashMap<String, Style>,
     /// 标了 `w:default="1"` 的段落样式，通常是 Normal。
     pub default_paragraph_style: Option<String>,
+}
+
+/// `numbering.xml`：编号定义。
+#[derive(Debug, Clone, Default)]
+pub struct Numbering {
+    pub abstracts: HashMap<i32, AbstractNum>,
+    /// `w:num`：段落通过 numId 引用它，它再指向一个 abstractNum。
+    pub nums: HashMap<i32, Num>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AbstractNum {
+    /// 第 0–8 级。
+    pub levels: HashMap<u8, Level>,
+    /// `w:numStyleLink`：各级定义不在这里，在这个编号样式所用的编号定义里。
+    pub num_style_link: Option<String>,
+}
+
+/// `w:lvl`：一级编号的样子。
+#[derive(Debug, Clone, Default)]
+pub struct Level {
+    /// `w:start`。没写时按规范是 0。
+    pub start: Option<i32>,
+    /// `w:numFmt`：decimal、chineseCounting、bullet……
+    pub format: Option<String>,
+    /// `w:lvlText`：`%1.%2` 这样的模板；项目符号时就是符号本身。
+    pub text: Option<String>,
+    /// `w:lvlRestart`：用到第几级（1 起）或更高的级别时本级重新计数；0 是永不重新计数。
+    /// 没写时是上一级。
+    pub restart: Option<i32>,
+    /// `w:isLgl`：各级一律写成阿拉伯数字。
+    pub legal: bool,
+    /// `w:suff`：编号后面跟什么。
+    pub suffix: Option<NumSuffix>,
+    /// `w:lvlJc`：编号在首行起点处怎么对齐。
+    pub align: Option<Align>,
+    /// `w:lvlPicBulletId`：图片项目符号。
+    pub picture_bullet: bool,
+    /// 这一级的缩进、制表位。
+    pub ppr: PPr,
+    /// 编号文字的格式。
+    pub rpr: RPr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumSuffix {
+    Tab,
+    Space,
+    Nothing,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Num {
+    pub abstract_id: i32,
+    /// `w:lvlOverride`，按级别。
+    pub overrides: HashMap<u8, LevelOverride>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LevelOverride {
+    /// `w:startOverride`：第一次用到时从这个数重新起头。
+    pub start: Option<i32>,
+    /// 整级替换（`w:lvlOverride/w:lvl`）。
+    pub level: Option<Level>,
+}
+
+impl Numbering {
+    /// numId 所用的编号定义的第 `ilvl` 级：(abstractNumId, 级别)。
+    /// 顺着 `w:numStyleLink` 找到真正写着各级的定义；`w:lvlOverride` 整级替换的优先。
+    pub fn level<'a>(&'a self, styles: &Styles, num_id: i32, ilvl: u8) -> Option<(i32, &'a Level)> {
+        let num = self.nums.get(&num_id)?;
+        if let Some(level) = num.overrides.get(&ilvl).and_then(|o| o.level.as_ref()) {
+            return Some((num.abstract_id, level));
+        }
+        let mut id = num.abstract_id;
+        // numStyleLink 可能一层套一层，也可能成环：最多跟几次。
+        for _ in 0..4 {
+            let abs = self.abstracts.get(&id)?;
+            let Some(link) = &abs.num_style_link else {
+                return abs.levels.get(&ilvl).map(|l| (id, l));
+            };
+            let linked = styles.numbering.get(link)?.ppr.num_id?;
+            id = self.nums.get(&linked)?.abstract_id;
+        }
+        None
+    }
 }
 
 /// `settings.xml` 里影响排版的开关。
@@ -564,6 +680,7 @@ pub struct Document {
     pub styles: Styles,
     pub settings: Settings,
     pub theme: Theme,
+    pub numbering: Numbering,
     /// 外部链接：关系 id → 网址。解析 document.xml 时不知道关系表，由调用方填上。
     pub hyperlinks: HashMap<String, String>,
 }

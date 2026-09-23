@@ -467,41 +467,88 @@ fn last_line_of_paragraph_uses_unsnapped_extra_leading() {
     }
 }
 
-/// 自动编号被丢弃时必须汇总报告，而且只报一条。
-///
-/// 静默丢掉编号，用户拿到的就是一份没有序号的诉讼请求 —— 这正是「诚实失败」
-/// 要防的情形。但也不能逐段报：50 项的列表报 50 条警告等于没报。
+/// 自动编号：编号文字按级别格式生成，编号后的制表符跳到悬挂缩进处；右对齐的编号
+/// 末端贴着首行起点；空格后缀。指向不存在的编号定义的段落照常排正文、不带编号。
 #[test]
-fn dropped_numbering_is_reported_once() {
+fn list_numbers_are_drawn() {
     if !require_cjk_font() {
         return;
     }
-    let num = r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#;
-    let body: String = (0..5)
-        .map(|i| {
-            format!(
-                r#"<w:p><w:pPr>{num}</w:pPr><w:r><w:rPr><w:rFonts w:eastAsia="宋体"/>
-<w:sz w:val="24"/></w:rPr><w:t>第{i}项条款</w:t></w:r></w:p>"#
-            )
-        })
-        .collect();
-    let report = convert(&make_docx_with_sect("numbering.docx", &body, ""));
-
-    let hits: Vec<_> = report
-        .warnings
-        .iter()
-        .filter(|w| w.detail.contains("自动编号"))
-        .collect();
-    assert_eq!(hits.len(), 1, "编号警告应当只汇总成一条，实际 {hits:?}");
-    assert!(
-        hits[0].detail.contains('5'),
-        "警告里要说清有几段受影响：{}",
-        hits[0].detail
+    let lvl = |i: u8, fmt: &str, text: &str, left: u32, extra: &str| {
+        format!(
+            r#"<w:lvl w:ilvl="{i}"><w:start w:val="1"/><w:numFmt w:val="{fmt}"/>{extra}<w:lvlText w:val="{text}"/><w:pPr><w:ind w:left="{left}" w:hanging="420"/></w:pPr></w:lvl>"#
+        )
+    };
+    let numbering = format!(
+        r#"<w:abstractNum w:abstractNumId="0">{}{}</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+<w:abstractNum w:abstractNumId="1">{}</w:abstractNum><w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>
+<w:abstractNum w:abstractNumId="2">{}</w:abstractNum><w:num w:numId="3"><w:abstractNumId w:val="2"/></w:num>"#,
+        lvl(0, "chineseCounting", "%1、", 420, ""),
+        lvl(1, "decimal", "%2.", 840, ""),
+        lvl(0, "decimal", "%1.", 840, r#"<w:lvlJc w:val="right"/>"#),
+        lvl(0, "upperRoman", "%1.", 0, r#"<w:suff w:val="space"/>"#),
     );
-
-    // 正文本身不能丢。
-    let text = text_of(&report.value.pdf);
-    assert!(text.contains("第0项条款") && text.contains("第4项条款"));
+    let para = |num: u32, ilvl: u8, text: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="{ilvl}"/><w:numId w:val="{num}"/></w:numPr></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    };
+    let body = [
+        para(1, 0, "甲项"),
+        para(1, 1, "乙项"),
+        para(1, 1, "丙项"),
+        para(1, 0, "丁项"),
+        para(2, 0, "戊项"),
+        para(3, 0, "己项"),
+        para(9, 0, "庚项"),
+    ]
+    .concat();
+    let path = DocxBuilder::new()
+        .numbering(&numbering)
+        .body(&body)
+        .build("list_numbers.docx");
+    let report = convert(&path);
+    assert!(
+        !report.warnings.iter().any(|w| w.detail.contains("编号")),
+        "{:?}",
+        report.warnings
+    );
+    let pages = common::pdftext::extract(&report.value.pdf);
+    let lines = &pages[0].lines;
+    let texts: Vec<String> = lines
+        .iter()
+        .map(|l| common::pdftext::norm(&l.text))
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "一、甲项",
+            "1.乙项",
+            "2.丙项",
+            "二、丁项",
+            "1.戊项",
+            "I.己项",
+            "庚项"
+        ]
+    );
+    // 左边距 79.4pt。编号后的制表符跳到左缩进（悬挂缩进的位置）。
+    let x_of = |line: &common::pdftext::Line, needle: &str| {
+        line.frags
+            .iter()
+            .flat_map(|f| &f.glyphs)
+            .find(|(t, _)| t == needle)
+            .map(|(_, x)| *x)
+            .unwrap_or_else(|| panic!("找不到「{needle}」：{line:?}"))
+    };
+    assert!((x_of(&lines[0], "一") - 79.4).abs() < 0.01);
+    assert!((x_of(&lines[0], "甲") - (79.4 + 21.0)).abs() < 0.01);
+    assert!((x_of(&lines[1], "乙") - (79.4 + 42.0)).abs() < 0.01);
+    // 右对齐：编号末端（「.」之后）正好在首行起点 79.4 + 42 - 21 处。
+    let dot_end = lines[4].frags[0].x + lines[4].frags[0].width;
+    assert!((dot_end - (79.4 + 21.0)).abs() < 0.01, "{:?}", lines[4]);
+    // 空格后缀：正文紧跟在「I.」与一个空格之后，不跳制表位。
+    assert!(x_of(&lines[5], "己") < 79.4 + 36.0);
+    assert!((x_of(&lines[6], "庚") - 79.4).abs() < 0.01);
 }
 
 /// 页眉页脚不渲染，但要报出来。

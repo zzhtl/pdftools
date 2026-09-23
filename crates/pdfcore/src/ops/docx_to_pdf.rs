@@ -58,6 +58,11 @@ pub fn run_with(
         .as_deref()
         .map(parse::parse_theme)
         .unwrap_or_default();
+    raw.numbering = pkg
+        .numbering
+        .as_deref()
+        .map(parse::parse_numbering)
+        .unwrap_or_default();
     raw.hyperlinks = pkg
         .rels
         .iter()

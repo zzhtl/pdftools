@@ -31,6 +31,18 @@ pub struct Calib {
     pub char_class: CharClass,
     pub auto_space: AutoSpace,
     pub decor: Decor,
+    pub list_numbers: ListNumbers,
+}
+
+/// 自动编号（`w:numPr`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListNumbers {
+    /// 不生成编号文字，编号级别的缩进也不用；汇总成一条警告。
+    Dropped,
+    /// 生成编号文字（见 `docx::numbering`），编号级别的缩进、制表位参与层叠。
+    /// 对照 LibreOffice 实测：编号来自段落样式时，样式里的缩进优先于编号级别的；
+    /// 编号直接写在段落上时，编号级别的优先于样式的。
+    Rendered,
 }
 
 /// 段落边框（`w:pBdr`）与段落底纹（`w:shd`）。
@@ -323,6 +335,7 @@ impl Calib {
             char_class: CharClass::Blocks,
             auto_space: AutoSpace::Letters,
             decor: Decor::Boxes,
+            list_numbers: ListNumbers::Rendered,
         }
     }
 
@@ -349,6 +362,7 @@ impl Calib {
             char_class: CharClass::Legacy,
             auto_space: AutoSpace::Legacy,
             decor: Decor::Ignored,
+            list_numbers: ListNumbers::Dropped,
         }
     }
 }

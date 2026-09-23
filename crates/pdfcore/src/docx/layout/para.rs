@@ -211,17 +211,32 @@ fn tab_rules<'a>(para: &'a ir::Paragraph, env: &Env) -> TabRules<'a> {
 }
 
 /// 一行的起点相对左缩进的偏移：首行缩进，或者悬挂缩进往左伸出的量。
-fn first_line_offset(para: &ir::Paragraph, is_first: bool, calib: &Calib) -> f32 {
+fn first_line_offset(para: &ir::Paragraph, sp: &ShapedPara, is_first: bool, calib: &Calib) -> f32 {
     match (is_first, calib.hanging_indent) {
         (false, _) => 0.0,
         (true, HangingIndent::Legacy) => para.first_line.max(0.0),
-        (true, HangingIndent::Outdent) => para.first_line,
+        (true, HangingIndent::Outdent) => para.first_line + number_shift(para, sp),
+    }
+}
+
+/// 编号以首行起点为锚点对齐（`w:lvlJc`）：右对齐时整个编号在起点左边，居中时
+/// 骑在起点上 —— 首行的起点相应左移。LibreOffice 实测如此，后面的制表符照旧跳到
+/// 左缩进处。
+fn number_shift(para: &ir::Paragraph, sp: &ShapedPara) -> f32 {
+    let Some(n) = para.number else {
+        return 0.0;
+    };
+    let w = sp.width(0, n.len);
+    match n.align {
+        Align::Right => -w,
+        Align::Center => -w / 2.0,
+        _ => 0.0,
     }
 }
 
 /// 一行的起点，从正文区左缘量起。
-fn line_start(para: &ir::Paragraph, is_first: bool, calib: &Calib) -> f32 {
-    para.indent_left + first_line_offset(para, is_first, calib)
+fn line_start(para: &ir::Paragraph, sp: &ShapedPara, is_first: bool, calib: &Calib) -> f32 {
+    para.indent_left + first_line_offset(para, sp, is_first, calib)
 }
 
 fn break_lines(para: &ir::Paragraph, sp: &ShapedPara, env: &Env, book: &FontBook) -> Vec<Line> {
@@ -237,13 +252,15 @@ fn break_lines(para: &ir::Paragraph, sp: &ShapedPara, env: &Env, book: &FontBook
         let avail = match (is_first, env.calib.hanging_indent) {
             (false, _) => avail_rest,
             (true, HangingIndent::Legacy) => avail_first - first_indent,
-            (true, HangingIndent::Outdent) => avail_rest - para.first_line,
+            (true, HangingIndent::Outdent) => {
+                avail_rest - first_line_offset(para, sp, true, env.calib)
+            }
         };
         let (end, mandatory) = sp.next_break(
             start,
             avail,
             hang(para, env.calib),
-            line_start(para, is_first, env.calib),
+            line_start(para, sp, is_first, env.calib),
             &rules,
             env.calib.overflow == Overflow::CharBoundary,
         );
@@ -308,14 +325,14 @@ fn line(
     let rules = tab_rules(para, env);
     let has_tabs = sp.tabs.iter().any(|t| range.contains(t));
     let line_width = if has_tabs {
-        let x0 = line_start(para, is_first, env.calib);
+        let x0 = line_start(para, sp, is_first, env.calib);
         sp.advance(measured.start, measured.end, x0, &rules) - x0
     } else {
         sp.width(measured.start, measured.end)
     };
     let content_left = env.left + para.indent_left;
     let avail = env.width - para.indent_left - para.indent_right;
-    let indent = first_line_offset(para, is_first, env.calib);
+    let indent = first_line_offset(para, sp, is_first, env.calib);
 
     let mut x = match para.align {
         Align::Left | Align::Justify => content_left + indent,
