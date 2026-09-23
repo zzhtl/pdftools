@@ -146,7 +146,7 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
                 let mut height = |set: &ir::HeaderSet| {
                     let blocks = pick_story(set, kind).filter(|_| hf_on)?;
                     let boxes = story_boxes(blocks, s, doc, book, calib, collapse, &|_| None);
-                    Some(stack(boxes, collapse, calib).1)
+                    Some(stack(&boxes, collapse).1)
                 };
                 (height(&s.headers), height(&s.footers))
             })
@@ -302,14 +302,16 @@ fn measure_block(
                 .map(|p| para::measure(p, env, book))
                 .collect(),
         ),
-        ir::Block::Table(t) => Measured::Table(table::measure(t, env, &mut |blocks, env| {
-            let boxes = measure_blocks(blocks, env, book, collapse, value);
-            stack(boxes, collapse, env.calib)
-        })),
+        ir::Block::Table(t) => {
+            Measured::Table(table::measure(t, env, collapse, &mut |blocks, env| {
+                measure_blocks(blocks, env, book, collapse, value)
+            }))
+        }
     }
 }
 
-/// 量一串块（单元格、页眉页脚），同正文一样处理段距与合框。
+/// 量一串块（单元格、页眉页脚），同正文一样处理段距与合框。它们里面不分页，
+/// 见 [`para::ParaBox::flatten`]。
 fn measure_blocks(
     blocks: &[ir::Block],
     env: &para::Env,
@@ -325,51 +327,20 @@ fn measure_blocks(
         contextual_spacing(blocks, &mut measured);
     }
     join_boxes(&mut measured);
+    for m in &mut measured {
+        match m {
+            Measured::Para(p) => p.flatten(),
+            Measured::Placeholder(paras) => paras.iter_mut().for_each(para::ParaBox::flatten),
+            Measured::Table(_) => {}
+        }
+    }
     measured
 }
 
 /// 把量好的块从上往下叠起来，不分页：返回绘制操作（y 以顶端为 0）与总高度。
-/// 单元格、页眉页脚里的分页符不起作用。
-fn stack(mut measured: Vec<Measured>, collapse: bool, calib: &Calib) -> (Vec<PaintOp>, f32) {
-    let endless = paginate::Frame {
-        page: ir::PageGeom {
-            w_pt: 0.0,
-            h_pt: 0.0,
-            margin_top: 0.0,
-            margin_bottom: 0.0,
-            margin_left: 0.0,
-            margin_right: 0.0,
-            header_dist: 0.0,
-            footer_dist: 0.0,
-        },
-        origin: 0.0,
-        capacity: f32::MAX / 4.0,
-    };
-    let mut pages =
-        paginate::Paginator::new(paginate::Frames::uniform(endless), None, collapse, calib);
-    for m in &mut measured {
-        match m {
-            Measured::Para(p) => {
-                p.ignore_page_breaks();
-                pages.place_para(p);
-            }
-            Measured::Placeholder(paras) => {
-                for p in paras {
-                    p.ignore_page_breaks();
-                    pages.place_para(p);
-                }
-            }
-            Measured::Table(t) => pages.place_table(t),
-        }
-    }
-    let height = pages.used();
-    let ops = pages
-        .finish()
-        .into_iter()
-        .next()
-        .map(|p| p.ops)
-        .unwrap_or_default();
-    (ops, height)
+fn stack(measured: &[Measured], collapse: bool) -> (Vec<PaintOp>, f32) {
+    let page = paginate::flow(measured, &[paginate::ENDLESS], false, collapse).swap_remove(0);
+    (page.ops, page.height)
 }
 
 /// 代入域的值：同一个域的结果只留一份，写成 `value` 给的文字。
@@ -462,7 +433,7 @@ fn draw_headers_footers(
                 continue;
             };
             let boxes = story_boxes(blocks, s, doc, book, calib, collapse, &value);
-            let (ops, height) = stack(boxes, collapse, calib);
+            let (ops, height) = stack(&boxes, collapse);
             grew |= height > frozen.unwrap_or(0.0) + 1.0;
             let dy = if is_header {
                 s.page.h_pt - s.page.header_dist
@@ -499,11 +470,7 @@ fn place_block(
                         _ => None,
                     })
                     .collect();
-                let next = match measured.get(i + chain.len()) {
-                    Some(Measured::Para(p)) => Some(p),
-                    _ => None,
-                };
-                pages.keep_together(&chain, next);
+                pages.keep_together(&chain, measured.get(i + chain.len()));
             }
             pages.place_para(b);
         }

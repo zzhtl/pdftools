@@ -226,6 +226,50 @@ pub fn all() -> Vec<Probe> {
         )),
     );
 
+    // 跨页：标题行重复、长行在页底拆开、cantSplit 的行整行挪走、左列纵向合并跨页。
+    let xcell = |w: u32, pr: &str, xml: &str| {
+        format!(r#"<w:tc><w:tcPr><w:tcW w:w="{w}" w:type="dxa"/>{pr}</w:tcPr>{xml}</w:tc>"#)
+    };
+    let row = |trpr: &str, a: &str, b: &str| {
+        format!(
+            "<w:tr><w:trPr>{trpr}</w:trPr>{}{}</w:tr>",
+            xcell(1500, "", &probe_para("", a)),
+            xcell(7100, "", b)
+        )
+    };
+    let split_rows = row("<w:tblHeader/>", "序号", &probe_para("", "内容"))
+        + &row("", "甲", &probe_para("", &filler(1, 30)))
+        + &row("", "乙", &paras(40, "", 60))
+        + &row("<w:cantSplit/>", "丙", &paras(12, "", 60))
+        + &(0..30)
+            .map(|i| {
+                let (merge, text) = if i == 0 {
+                    (r#"<w:vMerge w:val="restart"/>"#, "丁")
+                } else {
+                    ("<w:vMerge/>", "")
+                };
+                format!(
+                    "<w:tr>{}{}</w:tr>",
+                    xcell(1500, merge, &probe_para("", text)),
+                    xcell(7100, "", &probe_para("", &filler(i, 20)))
+                )
+            })
+            .collect::<String>();
+    add(
+        "table_split",
+        DocxBuilder::new().body(&format!(
+            r#"{}<w:tbl><w:tblPr><w:tblW w:w="8600" w:type="dxa"/><w:tblBorders>{}{}{}{}{}{}</w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="7100"/></w:tblGrid>{split_rows}</w:tbl>{}"#,
+            paras(10, "", 60),
+            border("top"),
+            border("left"),
+            border("bottom"),
+            border("right"),
+            border("insideH"),
+            border("insideV"),
+            probe_para("", "表格之后的正文。")
+        )),
+    );
+
     let numbering = r#"<w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="hybridMultilevel"/>
 <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="chineseCounting"/><w:lvlText w:val="%1、"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="420" w:hanging="420"/></w:pPr></w:lvl>
 <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="840" w:hanging="420"/></w:pPr></w:lvl>

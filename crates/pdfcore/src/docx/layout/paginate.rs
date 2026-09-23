@@ -1,10 +1,39 @@
 //! 分页：把测量好的块按顺序放进页面。
 
+use std::collections::HashMap;
+
 use super::calib::{Calib, PageBreakBefore};
 use super::para::{Line, ParaBody, ParaBox, ParaDecor};
-use super::table::TableBox;
-use super::{Page, PageKind, PaintOp};
+use super::table::{Frag, TableBox};
+use super::{Measured, Page, PageKind, PaintOp};
 use crate::docx::ir::{self, BorderStyle, PageGeom, SectionStart};
+
+/// 排得下任何内容的高度：不分页地叠放时用。
+pub(super) const ENDLESS: f32 = f32::MAX / 4.0;
+
+/// 单元格、页眉页脚这类「故事」排到一页上的结果。
+pub(super) struct StoryPage {
+    /// y 以这一页的顶端为 0（往下为负）。
+    pub ops: Vec<PaintOp>,
+    pub height: f32,
+    /// 放了几行。
+    pub lines: usize,
+}
+
+/// 把一串块按给定的各页高度排下去（超出的页沿用最后一个高度）。`soft_top`：第一页的
+/// 顶端不算页首，一行都放不下时不硬放，整个挪到第二页。
+pub(super) fn flow(
+    blocks: &[Measured],
+    caps: &[f32],
+    soft_top: bool,
+    collapse: bool,
+) -> Vec<StoryPage> {
+    let mut pages = Paginator::story(caps, soft_top, collapse);
+    for m in blocks {
+        pages.place(m);
+    }
+    pages.finish_story()
+}
 
 /// 一页的版面：纸张，以及其中的正文区。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -72,6 +101,14 @@ pub(super) struct Paginator {
     page_break_before: PageBreakBefore,
     /// 正在画的段落框。同一组的段落共用一个框；换页时在旧页收口，新页上重新开。
     open: Option<OpenBox>,
+    /// 排「故事」时第 i 页的高度（超出的页沿用最后一个）。正文是空的，按各页的版面。
+    schedule: Vec<f32>,
+    /// 第一页的顶端不算页首，见 [`flow`]。
+    soft_top: bool,
+    /// 已经排完的各页用掉的高度。
+    heights: Vec<f32>,
+    /// 各页放了几行。
+    lines: Vec<usize>,
 }
 
 struct OpenBox {
@@ -104,6 +141,71 @@ impl Paginator {
             last_after: 0.0,
             page_break_before: calib.page_break_before,
             open: None,
+            schedule: Vec::new(),
+            soft_top: false,
+            heights: Vec::new(),
+            lines: vec![0],
+        }
+    }
+
+    /// 排「故事」用：没有纸张，第 i 页高 `caps[i]`，y 以各页顶端为 0。
+    fn story(caps: &[f32], soft_top: bool, collapse_spacing: bool) -> Self {
+        let page = PageGeom {
+            w_pt: 0.0,
+            h_pt: 0.0,
+            margin_top: 0.0,
+            margin_bottom: 0.0,
+            margin_left: 0.0,
+            margin_right: 0.0,
+            header_dist: 0.0,
+            footer_dist: 0.0,
+        };
+        let frame = Frame {
+            page,
+            origin: 0.0,
+            capacity: caps.first().copied().unwrap_or(ENDLESS),
+        };
+        Self {
+            frame,
+            frames: Frames::uniform(frame),
+            section: 0,
+            section_start: false,
+            restart: None,
+            pages: vec![Page::new(&page, 1, 0, PageKind::Default)],
+            used: 0.0,
+            collapse_spacing,
+            last_after: 0.0,
+            // 故事里的分页符在量的时候已经去掉了。
+            page_break_before: PageBreakBefore::AnyPageTop,
+            open: None,
+            schedule: caps.to_vec(),
+            soft_top,
+            heights: Vec::new(),
+            lines: vec![0],
+        }
+    }
+
+    fn finish_story(mut self) -> Vec<StoryPage> {
+        self.close_box();
+        self.heights.push(self.used);
+        self.pages
+            .into_iter()
+            .zip(self.heights)
+            .zip(self.lines)
+            .map(|((p, height), lines)| StoryPage {
+                ops: p.ops,
+                height,
+                lines,
+            })
+            .collect()
+    }
+
+    /// 放一个量好的块。
+    pub fn place(&mut self, m: &Measured) {
+        match m {
+            Measured::Para(p) => self.place_para(p),
+            Measured::Placeholder(paras) => paras.iter().for_each(|p| self.place_para(p)),
+            Measured::Table(t) => self.place_table(t),
         }
     }
 
@@ -122,18 +224,18 @@ impl Paginator {
             .restart
             .take()
             .unwrap_or_else(|| self.pages.last().map_or(1, |p| p.number + 1));
-        let (frame, kind) = self.frames.pick(self.section_start, number);
+        let (mut frame, kind) = self.frames.pick(self.section_start, number);
+        if let Some(&cap) = self.schedule.get(self.pages.len()).or(self.schedule.last()) {
+            frame.capacity = cap;
+        }
         self.section_start = false;
         self.frame = frame;
         self.pages
             .push(Page::new(&frame.page, number, self.section, kind));
+        self.heights.push(self.used);
+        self.lines.push(0);
         self.used = 0.0;
         self.last_after = 0.0;
-    }
-
-    /// 当前页已用掉的高度。
-    pub fn used(&self) -> f32 {
-        self.used
     }
 
     /// 开始新的一节。见 [`Sections::Each`](super::calib::Sections::Each)。
@@ -169,7 +271,7 @@ impl Paginator {
     }
 
     fn at_page_top(&self) -> bool {
-        self.used <= f32::EPSILON
+        self.used <= f32::EPSILON && !(self.soft_top && self.pages.len() == 1)
     }
 
     /// 段前距实际要加多少：与上一段的段后距取较大值时，只补差额。
@@ -181,9 +283,10 @@ impl Paginator {
         }
     }
 
-    /// 与下段同页：`chain` 里的各段整段、再加 `next` 的第一行，当前页放不下、
-    /// 又不在页首时，先换页。在页首就照排 —— 比一页还长的串只能被断开。
-    pub fn keep_together(&mut self, chain: &[&ParaBox], next: Option<&ParaBox>) {
+    /// 与下段同页：`chain` 里的各段整段、再加 `next` 的第一行（表格是第一行放得下的
+    /// 第一段），当前页放不下、又不在页首时，先换页。在页首就照排 —— 比一页还长的串
+    /// 只能被断开。
+    pub fn keep_together(&mut self, chain: &[&ParaBox], next: Option<&Measured>) {
         if self.at_page_top() || chain.first().is_some_and(|p| p.page_break_before) {
             return;
         }
@@ -194,11 +297,13 @@ impl Paginator {
             need += p.space_after;
             last_after = p.space_after;
         }
-        if let Some(n) = next {
-            if !n.page_break_before {
+        match next {
+            Some(Measured::Para(n)) if !n.page_break_before => {
                 let top = n.decor.as_ref().map_or(0.0, ParaDecor::top);
                 need += self.gap_before(n, last_after) + top + n.first_line_height();
             }
+            Some(Measured::Table(t)) => need += t.first_fit(),
+            _ => {}
         }
         if self.used + need > self.frame.capacity + FIT_TOLERANCE {
             self.new_page();
@@ -246,6 +351,7 @@ impl Paginator {
                     self.start_lines(d, lead);
                 }
                 self.used += height;
+                self.count_line();
             }
             ParaBody::Lines(lines) => {
                 // 框的下边框也要放得下：跨页时前一页照样收口。
@@ -290,40 +396,102 @@ impl Paginator {
         self.last_after = para.space_after;
     }
 
-    /// 放一张表格。行不拆开，纵向合并连在一起的几行放在同一页；放不下又不在页首
-    /// 就换页：旧页按最后一行的下边收口，新页上下一行按它自己的上边开头。
+    /// 放一张表格：一行一行地放，放不下的行在页底拆开（写了 `w:cantSplit`、固定行高的
+    /// 整行挪到下一页），续页先重复标题行。一页上的这一截凑齐了才画：纵向合并的格要
+    /// 知道自己在这一页上占多高。
     pub fn place_table(&mut self, t: &TableBox) {
         self.close_box();
-        let mut from = 0;
-        // 本页上已经放了这张表格的行。
-        let mut placed = false;
-        while from < t.row_count() {
-            let to = t.group_end(from);
-            let need = t.height(from, to, !placed) + t.closing(to);
-            if self.used + need > self.frame.capacity + FIT_TOLERANCE && !self.at_page_top() {
-                if placed {
-                    self.close_table(t, from - 1);
+        let mut part = TablePart::default();
+        // 纵向合并的格跨页时，前几页各给了它多高。
+        let mut merged = HashMap::new();
+        // 本页这一截从页首开始、还没放正文行：这一行无论如何都要放下（拆开或者硬放），
+        // 不然永远排不出去。
+        let mut fresh = self.at_page_top();
+        let mut ri = 0;
+        // 正在拆的行：前几段各能用多高；第一段是不是在页中间开始的。
+        let mut caps: Vec<f32> = Vec::new();
+        let mut soft = false;
+        while ri < t.row_count() {
+            let must = fresh && !part.body;
+            let at_top = !part.body;
+            let avail =
+                self.frame.capacity - self.used - part.height - t.band(ri, at_top) - t.closing(ri);
+            if caps.is_empty() {
+                let whole = t.content(ri) <= avail + FIT_TOLERANCE
+                    || (must && !t.splittable(ri) && t.fixed(ri));
+                if whole {
+                    part.push(t, Frag::whole(ri, at_top, t.content(ri)));
+                    ri += 1;
+                    continue;
                 }
-                self.new_page();
-                placed = false;
+                // 不能拆的行挪到下一页；已经在页首还放不下，只好拆开。
+                if !t.splittable(ri) && !must {
+                    self.break_table(t, &mut part, &mut merged, ri);
+                    fresh = true;
+                    continue;
+                }
+                soft = !must;
+            }
+            caps.push(avail.max(0.0));
+            let piece = t.piece(ri, &caps, soft);
+            if caps.len() == 1 && !piece.placed && !must {
+                // 一行都放不下：整行挪到下一页。
+                caps.clear();
+                self.break_table(t, &mut part, &mut merged, ri);
+                fresh = true;
                 continue;
             }
-            let y = self.y(self.used);
-            let page = self.pages.last_mut().expect("至少有一页");
-            self.used += t.draw(from, to, !placed, y, &mut page.ops);
-            placed = true;
-            from = to + 1;
+            let more = piece.more;
+            part.push(t, Frag::piece(ri, at_top, piece));
+            if more {
+                self.break_table(t, &mut part, &mut merged, ri);
+                fresh = true;
+                continue;
+            }
+            caps.clear();
+            ri += 1;
         }
-        if placed {
-            self.close_table(t, t.row_count() - 1);
-        }
+        self.flush_table(t, &mut part, &mut merged);
         self.last_after = 0.0;
     }
 
-    fn close_table(&mut self, t: &TableBox, ri: usize) {
+    /// 在第 `ri` 行之前换页：画完本页的这一截，新的一页先重复标题行。
+    fn break_table(
+        &mut self,
+        t: &TableBox,
+        part: &mut TablePart,
+        merged: &mut HashMap<(usize, usize), Vec<f32>>,
+        ri: usize,
+    ) {
+        self.flush_table(t, part, merged);
+        self.new_page();
+        let heads = t.header_rows();
+        // 标题行比一页还高时不重复，否则每页只剩标题行。
+        if ri >= heads && t.header_height() < self.frame.capacity {
+            for hi in 0..heads {
+                part.push(t, Frag::whole(hi, hi == 0, t.content(hi)));
+            }
+            part.body = false;
+        }
+    }
+
+    /// 画出本页的这一截表格，在最后一行下面收口。
+    fn flush_table(
+        &mut self,
+        t: &TableBox,
+        part: &mut TablePart,
+        merged: &mut HashMap<(usize, usize), Vec<f32>>,
+    ) {
+        let Some(last) = part.frags.last().map(|f| f.ri) else {
+            return;
+        };
         let y = self.y(self.used);
         let page = self.pages.last_mut().expect("至少有一页");
-        self.used += t.close(ri, y, &mut page.ops);
+        self.used += t.draw(&part.frags, y, merged, &mut page.ops);
+        let y = self.y(self.used);
+        let page = self.pages.last_mut().expect("至少有一页");
+        self.used += t.close(last, y, &mut page.ops);
+        *part = TablePart::default();
     }
 
     /// 本页接下来要放 `d` 框里的行，第一行之前还要占多高：框还没开就是上边框，
@@ -401,6 +569,31 @@ impl Paginator {
         let page = self.pages.last_mut().expect("至少有一页");
         page.ops.extend(line.ops.iter().map(|op| op.shifted(base)));
         self.used += line.height;
+        self.count_line();
+    }
+
+    fn count_line(&mut self) {
+        if let Some(n) = self.lines.last_mut() {
+            *n += 1;
+        }
+    }
+}
+
+/// 一页上已经凑好、还没画的一截表格。
+#[derive(Default)]
+struct TablePart {
+    frags: Vec<Frag>,
+    /// 各行连同上框线的高度之和。
+    height: f32,
+    /// 放了正文行（不只是重复的标题行）。
+    body: bool,
+}
+
+impl TablePart {
+    fn push(&mut self, t: &TableBox, f: Frag) {
+        self.height += t.band(f.ri, f.at_top) + f.height;
+        self.body = true;
+        self.frags.push(f);
     }
 }
 

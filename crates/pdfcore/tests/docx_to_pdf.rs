@@ -262,6 +262,121 @@ fn table_geometry_follows_word() {
     }
 }
 
+/// 表格跨页，都对照 LibreOffice 实测：放不下的行在页底拆开，续页先重复标题行；写了
+/// cantSplit 的行整行挪到下一页；与下段同页的段落带着表格的第一行走；单元格里不做
+/// 孤行控制；纵向合并的几行照样在行与行之间分页。
+#[test]
+fn table_rows_split_across_pages() {
+    if !require_cjk_font() {
+        return;
+    }
+    // 固定行距 20pt：一页 697.9pt 放 34 行，与字体无关。
+    let p = |ppr: &str, runs: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="400" w:lineRule="exact"/>{ppr}</w:pPr><w:r>{runs}</w:r></w:p>"#
+        )
+    };
+    let t = |text: &str| p("", &format!("<w:t>{text}</w:t>"));
+    let paras = |tag: &str, n: usize| (1..=n).map(|i| t(&format!("{tag}{i}"))).collect::<String>();
+    let borders: String = ["top", "left", "bottom", "right", "insideH", "insideV"]
+        .iter()
+        .map(|side| format!(r#"<w:{side} w:val="single" w:sz="4" w:space="0" w:color="000000"/>"#))
+        .collect();
+    let cell = |w: u32, pr: &str, content: &str| {
+        format!(r#"<w:tc><w:tcPr><w:tcW w:w="{w}" w:type="dxa"/>{pr}</w:tcPr>{content}</w:tc>"#)
+    };
+    let row = |trpr: &str, a: &str, b: &str| {
+        format!(
+            "<w:tr><w:trPr>{trpr}</w:trPr>{}{}</w:tr>",
+            cell(2000, "", a),
+            cell(6000, "", b)
+        )
+    };
+    let table = |rows: &str| {
+        format!(
+            r#"<w:tbl><w:tblPr><w:tblBorders>{borders}</w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="6000"/></w:tblGrid>{rows}</w:tbl>{}"#,
+            t("表后")
+        )
+    };
+    let pages_of = |name: &str, body: &str| -> Vec<Vec<String>> {
+        let pdf = convert(&make_docx(name, body)).value.pdf;
+        common::pdftext::extract(&pdf)
+            .iter()
+            .map(|pg| pg.lines.iter().map(|l| l.text.replace(' ', "")).collect())
+            .collect()
+    };
+    let numbered = |tag: &str, range: std::ops::RangeInclusive<usize>| -> Vec<String> {
+        range.map(|i| format!("{tag}{i}")).collect()
+    };
+
+    // 长行拆开，续页先重复标题行。标题行连框线 20.5pt，本行上下框线各 0.5pt，
+    // 每页剩 676.4pt 放 33 行。
+    let body = table(
+        &(row("<w:tblHeader/>", &t("表头甲"), &t("表头乙"))
+            + &row("", &t("长行"), &paras("第", 60))),
+    );
+    let pages = pages_of("table_split_long.docx", &body);
+    let mut want = vec!["表头甲表头乙".to_string(), "长行第1".to_string()];
+    want.extend(numbered("第", 2..=33));
+    assert_eq!(pages[0], want);
+    let mut want = vec!["表头甲表头乙".to_string()];
+    want.extend(numbered("第", 34..=60));
+    want.push("表后".into());
+    assert_eq!(pages[1], want);
+
+    // 前面 20 行正文，本页还剩 297.9pt：不写 cantSplit 的行放 14 行后拆开，写了的整行挪走。
+    let filler = paras("正文", 20);
+    let one = |trpr: &str| table(&row(trpr, &t("整行"), &paras("行", 20)));
+    let pages = pages_of("table_split_row.docx", &(filler.clone() + &one("")));
+    assert_eq!(pages[0].last().map(String::as_str), Some("行14"));
+    assert_eq!(pages[1][0], "行15");
+    let pages = pages_of(
+        "table_cant_split.docx",
+        &(filler.clone() + &one("<w:cantSplit/>")),
+    );
+    assert_eq!(pages[0], numbered("正文", 1..=20));
+    assert_eq!(pages[1][0], "整行行1");
+
+    // 33 行正文加上表前一段正好一页，表格第一行放不下：写了与下段同页，表前一段跟着走。
+    let first = table(&row("", &t("首行"), &t("甲")));
+    for (ppr, moves) in [("<w:keepNext/>", true), ("", false)] {
+        let body = paras("正文", 33) + &p(ppr, "<w:t>表前</w:t>") + &first;
+        let pages = pages_of("table_keep_next.docx", &body);
+        assert_eq!(pages[1][0] == "表前", moves, "{ppr}：{pages:?}");
+    }
+
+    // 单元格里两行的段落写了孤行控制，在页底照样一页一行。
+    let two = p(
+        r#"<w:widowControl/>"#,
+        "<w:t>上半</w:t><w:br/><w:t>下半</w:t>",
+    );
+    let body = paras("正文", 33) + &table(&row("", &t("孤行"), &two));
+    let pages = pages_of("table_widow.docx", &body);
+    assert_eq!(pages[0].last().map(String::as_str), Some("孤行上半"));
+    assert_eq!(pages[1], ["下半", "表后"]);
+
+    // 左列纵向合并 40 行：合并的格不整组挪走，第一页放得下几行就放几行。
+    let merged: String = (1..=40)
+        .map(|i| {
+            let (pr, text) = if i == 1 {
+                (r#"<w:vMerge w:val="restart"/>"#, "合并")
+            } else {
+                ("<w:vMerge/>", "")
+            };
+            format!(
+                "<w:tr>{}{}</w:tr>",
+                cell(2000, pr, &t(text)),
+                cell(6000, "", &t(&format!("行{i}")))
+            )
+        })
+        .collect();
+    let pages = pages_of("table_split_merged.docx", &(filler + &table(&merged)));
+    assert_eq!(pages[0][20], "合并行1");
+    assert_eq!(pages[0].last().map(String::as_str), Some("行14"));
+    assert_eq!(pages[1][0], "行15");
+    assert!(pages[1].iter().all(|l| !l.contains("合并")));
+}
+
 /// 行尾标点在正文里可以伸出边距，在单元格里不行（LibreOffice 实测）：同样宽的一栏，
 /// 正文第一行排下 13 个字再挂一个逗号，单元格里逗号带着前一个字换行。
 #[test]

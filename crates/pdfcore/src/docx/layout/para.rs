@@ -117,9 +117,14 @@ impl ParaBox {
         }
     }
 
-    /// 去掉段前分页与行尾的分页符：单元格、页眉页脚不分页。
-    pub fn ignore_page_breaks(&mut self) {
+    /// 单元格、页眉页脚里的段落：分页符不起作用，段落之间的版流控制（与下段同页、
+    /// 段中不分页、孤行控制）也不做 —— LibreOffice 拆开单元格时写了 `w:widowControl`
+    /// 的两行段落照样一页一行。
+    pub fn flatten(&mut self) {
         self.page_break_before = false;
+        self.keep_next = false;
+        self.keep_lines = false;
+        self.widow_control = false;
         if let ParaBody::Lines(lines) = &mut self.body {
             lines.iter_mut().for_each(|l| l.page_break_after = false);
         }
