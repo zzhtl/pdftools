@@ -5,16 +5,15 @@
 //! 肉眼检查发现不了，只能靠把文字抽回来比对。
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use pdfcore::fonts::{cluster_texts, shape_run, split_by_script, system::SystemFonts, FontFace};
-use pdfcore::pdf::writer::{
-    font::embed_font, text::show_text, text::TextItem, DocBuilder, PageSpec,
-};
+use pdfcore::pdf::writer::{font::embed_font, Canvas, DocBuilder, GlyphRun};
 
 const SAMPLE: &str = "示例文字 Times 12345";
 
-fn find_cjk_face() -> Option<FontFace> {
-    let fonts = SystemFonts::load();
+fn find_cjk_face() -> Option<Arc<FontFace>> {
+    let fonts = SystemFonts::shared();
     fonts
         .find(pdfcore::fonts::system::PDF_SANS_PREFERENCE, false, false)
         .or_else(|| fonts.find(pdfcore::fonts::system::PDF_SERIF_PREFERENCE, false, false))
@@ -59,24 +58,21 @@ fn build_pdf(face: &FontFace) -> Vec<u8> {
         embed_font(pdf, alloc, face, &used).expect("嵌入字体失败")
     };
 
-    let mut page = PageSpec::new(595.0, 842.0);
-    page.fonts.push(("F0".into(), embedded.font_ref));
-    show_text(
-        &mut page.content,
-        &TextItem {
-            glyphs: &glyphs,
-            font_res: "F0",
-            size_pt: 24.0,
-            x_pt: 72.0,
-            y_pt: 700.0,
-            color: [0, 0, 0],
-            char_spacing: 0.0,
-            word_spacing: 0.0,
-        },
+    let mut canvas = Canvas::new(595.0, 842.0);
+    canvas.glyphs(&GlyphRun {
+        font: &embedded,
         face,
-        &embedded.map,
-    );
-    doc.add_page(page);
+        glyphs: &glyphs,
+        extra_after: &[],
+        size_pt: 24.0,
+        x_pt: 72.0,
+        y_pt: 700.0,
+        rise_pt: 0.0,
+        color: [0, 0, 0],
+        synthetic_bold: false,
+        synthetic_italic: false,
+    });
+    doc.add_page(canvas.finish());
     doc.finish().expect("生成 PDF 失败")
 }
 

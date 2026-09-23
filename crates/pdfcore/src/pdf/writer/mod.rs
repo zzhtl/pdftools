@@ -4,12 +4,14 @@
 //! 这层的职责就是把那些簿记工作收敛到一处，别让「忘了写 /Parent」这类错误
 //! 散落到四个功能里 —— 那种 PDF 在 Chrome 里能开，在 Acrobat 里打不开。
 
+pub mod canvas;
 pub mod font;
 pub mod image;
-pub mod text;
 
-use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref};
+use pdf_writer::types::{ActionType, AnnotationType};
+use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref, Str};
 
+pub use canvas::{Canvas, GlyphRun};
 pub use image::{ImageData, ImageEncoding};
 
 use crate::error::Result;
@@ -46,6 +48,8 @@ pub struct PageSpec {
     pub images: Vec<(String, Ref)>,
     /// 资源名 → 字体对象号。
     pub fonts: Vec<(String, Ref)>,
+    /// 可点击区域 [x0, y0, x1, y1] → 外部链接。
+    pub links: Vec<([f32; 4], String)>,
 }
 
 impl PageSpec {
@@ -56,6 +60,7 @@ impl PageSpec {
             content: Content::new(),
             images: Vec::new(),
             fonts: Vec::new(),
+            links: Vec::new(),
         }
     }
 }
@@ -177,6 +182,7 @@ impl DocBuilder {
 
         for (page_id, spec) in std::mem::take(&mut self.pages) {
             let content_id = self.alloc.next_ref();
+            let link_ids: Vec<Ref> = spec.links.iter().map(|_| self.alloc.next_ref()).collect();
 
             {
                 let mut page = self.pdf.page(page_id);
@@ -185,6 +191,9 @@ impl DocBuilder {
                 // 所以它和 media_box 一样是必写项。
                 page.parent(self.page_tree);
                 page.contents(content_id);
+                if !link_ids.is_empty() {
+                    page.annotations(link_ids.iter().copied());
+                }
                 {
                     let mut resources = page.resources();
                     if !spec.images.is_empty() {
@@ -206,6 +215,18 @@ impl DocBuilder {
                 page.finish();
             }
 
+            for ((rect, uri), id) in spec.links.iter().zip(&link_ids) {
+                let mut a = self.pdf.annotation(*id);
+                a.subtype(AnnotationType::Link);
+                a.rect(Rect::new(rect[0], rect[1], rect[2], rect[3]));
+                // 不画边框：Word 导出的链接只有文字样式，没有方框。
+                a.border(0.0, 0.0, 0.0, None);
+                a.action()
+                    .action_type(ActionType::Uri)
+                    .uri(Str(uri_ascii(uri).as_bytes()));
+                a.finish();
+            }
+
             let data = spec.content.finish();
             file_id.feed(&data);
             let compressed = crate::pdf::writer::deflate(&data);
@@ -220,6 +241,19 @@ impl DocBuilder {
         self.pdf.set_file_id((id.clone(), id));
         Ok(self.pdf.finish())
     }
+}
+
+/// PDF 的 `/URI` 只允许 7 位 ASCII，其余字节按 URL 的规矩百分号编码。
+fn uri_ascii(uri: &str) -> String {
+    let mut out = String::with_capacity(uri.len());
+    for b in uri.bytes() {
+        if b.is_ascii_graphic() {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// trailer 的 `/ID`：由页面内容、文档信息与生成时刻派生的 16 字节。

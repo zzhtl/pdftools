@@ -1,15 +1,13 @@
 //! 把排好版的页面画成 PDF。
 
-use std::collections::BTreeMap;
-
-use pdf_writer::Name;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::ir::PageGeom;
-use super::layout::{FontBook, LaidOut, PaintOp};
+use super::layout::{LaidOut, PaintOp};
 use crate::error::Result;
+use crate::fonts::{FontBook, FontId};
 use crate::pdf::writer::font::{embed_font, EmbeddedFont};
-use crate::pdf::writer::text::{show_text, TextItem};
-use crate::pdf::writer::{DocBuilder, PageSpec};
+use crate::pdf::writer::{Canvas, DocBuilder, GlyphRun};
 
 pub fn paint(
     laid: &LaidOut,
@@ -19,7 +17,9 @@ pub fn paint(
 ) -> Result<Vec<u8>> {
     // 第一趟：把每个字体实际用到的字形收齐。子集化必须一次性知道全部用量，
     // 所以字体只能等内容全部排完才能写。
-    let mut used: BTreeMap<usize, BTreeMap<u16, String>> = BTreeMap::new();
+    let mut used: BTreeMap<FontId, BTreeMap<u16, String>> = BTreeMap::new();
+    // `.notdef`（GID 0）可能对应好几个不同的缺字。
+    let mut notdef: BTreeMap<FontId, BTreeSet<String>> = BTreeMap::new();
     for p in &laid.pages {
         for op in &p.ops {
             let PaintOp::Text {
@@ -34,6 +34,9 @@ pub fn paint(
             let entry = used.entry(*font).or_default();
             for (i, g) in glyphs.iter().enumerate() {
                 let text = unicode.get(i).cloned().unwrap_or_default();
+                if g.gid == 0 && !text.is_empty() {
+                    notdef.entry(*font).or_default().insert(text.clone());
+                }
                 entry
                     .entry(g.gid)
                     .and_modify(|existing| {
@@ -47,10 +50,19 @@ pub fn paint(
             }
         }
     }
+    // 几个不同的缺字共用 GID 0 时，ToUnicode 只能给它一个原文。映射成 U+FFFD，
+    // 宁可抽出「�」，也不要把所有缺字都抽成第一个缺字 —— 曾经把「②③」抽成了「℃」。
+    for (font, texts) in &notdef {
+        if texts.len() > 1 {
+            if let Some(entry) = used.get_mut(font) {
+                entry.insert(0, "\u{FFFD}".to_string());
+            }
+        }
+    }
 
     let mut doc = DocBuilder::new();
     doc.set_info(info);
-    let mut embedded: BTreeMap<usize, EmbeddedFont> = BTreeMap::new();
+    let mut embedded: BTreeMap<FontId, EmbeddedFont> = BTreeMap::new();
     for (font_id, glyphs) in &used {
         let face = book.face(*font_id);
         let (pdf, alloc) = doc.parts();
@@ -58,25 +70,7 @@ pub fn paint(
     }
 
     for laid_page in &laid.pages {
-        let mut spec = PageSpec::new(page.w_pt, page.h_pt);
-
-        // 本页用到哪些字体，就挂哪些资源。
-        let mut used_here: Vec<usize> = laid_page
-            .ops
-            .iter()
-            .filter_map(|op| match op {
-                PaintOp::Text { font, .. } => Some(*font),
-                _ => None,
-            })
-            .collect();
-        used_here.sort_unstable();
-        used_here.dedup();
-        for font_id in &used_here {
-            if let Some(e) = embedded.get(font_id) {
-                spec.fonts.push((font_res_name(*font_id), e.font_ref));
-            }
-        }
-
+        let mut canvas = Canvas::new(page.w_pt, page.h_pt);
         for op in &laid_page.ops {
             match op {
                 PaintOp::Text {
@@ -86,56 +80,38 @@ pub fn paint(
                     y,
                     glyphs,
                     color,
-                    char_spacing,
-                    word_spacing,
+                    extra_after,
+                    synthetic_bold,
+                    synthetic_italic,
                     ..
                 } => {
                     let Some(e) = embedded.get(font) else {
                         continue;
                     };
-                    let name = font_res_name(*font);
-                    show_text(
-                        &mut spec.content,
-                        &TextItem {
-                            glyphs,
-                            font_res: &name,
-                            size_pt: *size_pt,
-                            x_pt: *x,
-                            y_pt: *y,
-                            color: *color,
-                            char_spacing: *char_spacing,
-                            word_spacing: *word_spacing,
-                        },
-                        book.face(*font),
-                        &e.map,
-                    );
+                    canvas.glyphs(&GlyphRun {
+                        font: e,
+                        face: book.face(*font),
+                        glyphs,
+                        extra_after,
+                        size_pt: *size_pt,
+                        x_pt: *x,
+                        y_pt: *y,
+                        rise_pt: 0.0,
+                        color: *color,
+                        synthetic_bold: *synthetic_bold,
+                        synthetic_italic: *synthetic_italic,
+                    });
                 }
-                PaintOp::Rect { x, y, w, h, color } => {
-                    spec.content.save_state();
-                    spec.content.set_fill_rgb(
-                        color[0] as f32 / 255.0,
-                        color[1] as f32 / 255.0,
-                        color[2] as f32 / 255.0,
-                    );
-                    spec.content.rect(*x, *y, *w, *h);
-                    spec.content.fill_nonzero();
-                    spec.content.restore_state();
-                }
+                PaintOp::Rect { x, y, w, h, color } => canvas.fill_rect(*x, *y, *w, *h, *color),
             }
         }
-
-        doc.add_page(spec);
+        doc.add_page(canvas.finish());
     }
 
     // 一页都没有的文档（空 docx）也要出一页空白，否则 PDF 非法。
     if doc.page_count() == 0 {
-        doc.add_page(PageSpec::new(page.w_pt, page.h_pt));
+        doc.add_page(Canvas::new(page.w_pt, page.h_pt).finish());
     }
 
-    let _ = Name(b"");
     doc.finish()
-}
-
-fn font_res_name(id: usize) -> String {
-    format!("F{id}")
 }

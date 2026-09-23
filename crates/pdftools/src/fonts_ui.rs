@@ -9,7 +9,8 @@ use pdfcore::fonts::system::{SystemFonts, UI_CJK_PREFERENCE};
 /// 返回实际用上的字体名，供「关于」里显示；没找到中文字体时返回 None。
 pub fn install(ctx: &egui::Context) -> Option<String> {
     let t = std::time::Instant::now();
-    let system = SystemFonts::load();
+    // 用进程共享的字体库：这里扫描一次，之后 Word 转 PDF 直接复用，不再重扫。
+    let system = SystemFonts::shared();
     log::debug!("界面字体：扫描系统字体 {:?}", t.elapsed());
     let t = std::time::Instant::now();
     let found = system.find(UI_CJK_PREFERENCE, false, false)?;
@@ -17,7 +18,8 @@ pub fn install(ctx: &egui::Context) -> Option<String> {
 
     let mut fonts = egui::FontDefinitions::default();
     let data = egui::FontData {
-        font: found.face.data().to_vec().into(),
+        // 字体字节在进程内常驻，直接借给 egui，不再复制一份几十 MB 的 CJK 字体。
+        font: std::borrow::Cow::Borrowed(found.face.data()),
         // .ttc 是字体集合，索引选错会拿到日文或韩文那一份。
         index: found.face.index(),
         tweak: Default::default(),

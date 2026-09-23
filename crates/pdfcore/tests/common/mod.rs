@@ -27,7 +27,7 @@ pub fn tmp(sub: &str) -> PathBuf {
 /// 那种失败信息指向的是环境而不是代码，容易把人带偏，所以这里明确跳过并说明。
 /// CI 上会安装 `fonts-noto-cjk`，因此这些用例在 CI 里是实打实跑过的。
 pub fn require_cjk_font() -> bool {
-    if pdfcore::fonts::system::SystemFonts::load().has_cjk() {
+    if pdfcore::fonts::system::SystemFonts::shared().has_cjk() {
         return true;
     }
     eprintln!("跳过：本机没有中文字体（安装 fonts-noto-cjk 或思源黑体后可跑）");

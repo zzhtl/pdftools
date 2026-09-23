@@ -42,7 +42,7 @@ pub fn run(path: &Path, sink: &dyn ProgressSink) -> Result<Report<Outcome>> {
     bail_if_cancelled!(sink);
 
     let doc = ir::build(&raw);
-    let mut book = layout::FontBook::new();
+    let mut book = crate::fonts::FontBook::new();
     let laid = layout::layout(&doc, &mut book);
     sink.emit(step(3, "排版"));
     bail_if_cancelled!(sink);

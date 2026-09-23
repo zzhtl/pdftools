@@ -26,6 +26,14 @@ pub struct ShapedRun {
 }
 
 impl ShapedRun {
+    /// 没有字形的结果：不绘制的字符（换行符）也要占一个位置。
+    pub fn empty() -> Self {
+        Self {
+            glyphs: Vec::new(),
+            prefix_width: vec![0],
+        }
+    }
+
     /// 字形区间 `[from, to)` 的宽度，字体单位。
     pub fn width_between(&self, from: usize, to: usize) -> i64 {
         self.prefix_width[to.min(self.glyphs.len())]
@@ -43,23 +51,16 @@ impl ShapedRun {
 }
 
 /// 对一段**同字体、同 script** 的文本整形。
+///
+/// 解析好的字体与整形计划都缓存在 [`FontFace`] 里，这里只做真正的整形。
 pub fn shape_run(face: &FontFace, text: &str, script: rustybuzz::Script) -> ShapedRun {
-    let rb = match rustybuzz::Face::from_slice(face.data(), face.index()) {
-        Some(f) => f,
-        None => {
-            return ShapedRun {
-                glyphs: Vec::new(),
-                prefix_width: vec![0],
-            }
-        }
-    };
-
     let mut buf = rustybuzz::UnicodeBuffer::new();
     buf.push_str(text);
     buf.set_direction(rustybuzz::Direction::LeftToRight);
     buf.set_script(script);
 
-    let out = rustybuzz::shape(&rb, &[], buf);
+    let plan = face.plan(script);
+    let out = rustybuzz::shape_with_plan(face.shaper(), &plan, buf);
     let infos = out.glyph_infos();
     let positions = out.glyph_positions();
 
@@ -172,6 +173,23 @@ pub fn split_by_script(text: &str) -> Vec<(std::ops::Range<usize>, ScriptClass)>
         }
     }
     out
+}
+
+/// 组合符号、变体选择符、零宽连接符：它们修饰前一个字，必须与前一个字用同一个字体，
+/// 否则一个字会被拆进两个字体里画。
+pub fn attaches_to_previous(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x0300..=0x036F      // 组合用变音符
+            | 0x1AB0..=0x1AFF
+            | 0x1DC0..=0x1DFF
+            | 0x20D0..=0x20FF // 组合用符号（圈号等）
+            | 0xFE00..=0xFE0F // 变体选择符
+            | 0xFE20..=0xFE2F
+            | 0xE0100..=0xE01EF
+            | 0x200C
+            | 0x200D
+    )
 }
 
 /// 只区分「用东亚字体」还是「用拉丁字体」，不做完整的 script 分类。

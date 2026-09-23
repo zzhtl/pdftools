@@ -7,19 +7,18 @@
 //!
 //! `rustybuzz` 负责回答「**排到哪里必须断**」—— 它给出每个字形的精确步进。
 
-use std::collections::HashMap;
 use std::ops::Range;
 
 use unicode_linebreak::{linebreaks, BreakOpportunity};
 
 use super::ir::{self, LineSpacing};
 use super::model::Align;
-use crate::error::{Warning, WarningKind};
+use crate::error::Warning;
+use crate::error::WarningKind;
 use crate::fonts::{
-    shape_run, split_by_script, system::SystemFonts, FontFace, ScriptClass, ShapedGlyph,
+    attaches_to_previous, pua, shape_run, split_by_script, FontBook, FontId, Resolved, ScriptClass,
+    ShapedGlyph, ShapedRun,
 };
-
-pub type FontId = usize;
 
 #[derive(Debug, Clone)]
 pub enum PaintOp {
@@ -34,8 +33,10 @@ pub enum PaintOp {
         /// 必须来自整形的 cluster 回查，反查 cmap 在连字和多对一映射上是错的。
         unicode: Vec<String>,
         color: [u8; 3],
-        char_spacing: f32,
-        word_spacing: f32,
+        /// 每个字形之后额外的推进（点）：两端对齐分到这个字形的份额。
+        extra_after: Vec<f32>,
+        synthetic_bold: bool,
+        synthetic_italic: bool,
     },
     /// 下划线、删除线、占位框的边都用矩形画。
     Rect {
@@ -57,174 +58,6 @@ pub struct LaidOut {
     pub warnings: Vec<Warning>,
 }
 
-// ---------------------------------------------------------------- 字体解析
-
-/// 把 docx 里写的字体名解析成本机真实存在的字体，解析不到就按类别回退并留痕。
-pub struct FontBook {
-    system: SystemFonts,
-    faces: Vec<FontFace>,
-    cache: HashMap<(String, bool, bool), Option<FontId>>,
-    substituted: Vec<String>,
-    /// 所选字体里没有字形的字符。
-    missing: Vec<char>,
-    /// 系统里连一个可用字体都找不到。
-    no_font_at_all: bool,
-}
-
-/// 字体名看起来是不是衬线体。用于挑回退链。
-fn looks_serif(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    is_serif_cjk(name)
-        || [
-            "times", "serif", "georgia", "garamond", "book", "roman", "song", "ming", "kai",
-        ]
-        .iter()
-        .any(|k| lower.contains(k))
-}
-
-/// 常见中文字体名 → 我们的回退链类别。
-fn is_serif_cjk(name: &str) -> bool {
-    matches!(
-        name,
-        "宋体"
-            | "SimSun"
-            | "NSimSun"
-            | "新宋体"
-            | "仿宋"
-            | "FangSong"
-            | "仿宋_GB2312"
-            | "楷体"
-            | "KaiTi"
-            | "楷体_GB2312"
-            | "STSong"
-            | "Songti SC"
-            | "STFangsong"
-            | "Source Han Serif SC"
-            | "Noto Serif CJK SC"
-    )
-}
-
-impl FontBook {
-    pub fn new() -> Self {
-        Self {
-            system: SystemFonts::load(),
-            faces: Vec::new(),
-            cache: HashMap::new(),
-            substituted: Vec::new(),
-            missing: Vec::new(),
-            no_font_at_all: false,
-        }
-    }
-
-    pub fn face(&self, id: FontId) -> &FontFace {
-        &self.faces[id]
-    }
-
-    pub fn faces(&self) -> &[FontFace] {
-        &self.faces
-    }
-
-    /// 解析一个字体请求。`east_asian` 决定回退链，因为同一个 run 的汉字和
-    /// 西文要走不同的字体（`w:rFonts` 本来就给了两个名字）。
-    pub fn resolve(
-        &mut self,
-        family: Option<&str>,
-        east_asian: bool,
-        bold: bool,
-        italic: bool,
-    ) -> Option<FontId> {
-        let key = (
-            family.unwrap_or("").to_string() + if east_asian { "|ea" } else { "|latin" },
-            bold,
-            italic,
-        );
-        if let Some(hit) = self.cache.get(&key) {
-            return *hit;
-        }
-
-        // 先按原名精确找。找到就用，这是最忠实于文档的结果。
-        let mut found = family.and_then(|f| self.system.query(f, bold, italic));
-
-        if found.is_none() {
-            // 找不到就按类别回退，并记下这次替换 —— 用户有权知道字体被换了。
-            let chain = if east_asian {
-                if family.map(is_serif_cjk).unwrap_or(false) {
-                    crate::fonts::system::PDF_SERIF_PREFERENCE
-                } else {
-                    crate::fonts::system::PDF_SANS_PREFERENCE
-                }
-            } else if family.map(looks_serif).unwrap_or(false) {
-                crate::fonts::system::LATIN_SERIF_PREFERENCE
-            } else {
-                crate::fonts::system::LATIN_SANS_PREFERENCE
-            };
-            found = self.system.find(chain, bold, italic);
-            if found.is_none() {
-                // 首选链全军覆没时，把其余所有链都试一遍，最后退到系统里任意一个字体。
-                //
-                // 这一步守的是一条底线：**绝不因为找不到字体就把文字丢掉**。
-                // 哪怕最终字体缺少对应字形（显示为空白），文字也仍在 PDF 里、仍可搜索，
-                // 而且 `.notdef` 检测会把这件事报出来。悄悄少一整段字要严重得多。
-                for alt in [
-                    crate::fonts::system::PDF_SANS_PREFERENCE,
-                    crate::fonts::system::PDF_SERIF_PREFERENCE,
-                    crate::fonts::system::LATIN_SANS_PREFERENCE,
-                    crate::fonts::system::LATIN_SERIF_PREFERENCE,
-                ] {
-                    found = self.system.find(alt, bold, italic);
-                    if found.is_some() {
-                        break;
-                    }
-                }
-            }
-            if found.is_none() {
-                found = self.system.any_face(bold, italic);
-            }
-            if let (Some(want), Some(got)) = (family, found.as_ref()) {
-                let note = format!("字体「{want}」不可用，已替换为「{}」", got.family);
-                if !self.substituted.contains(&note) {
-                    self.substituted.push(note);
-                }
-            }
-        }
-
-        let id = found.map(|f| {
-            self.faces.push(f.face);
-            self.faces.len() - 1
-        });
-        self.cache.insert(key, id);
-        id
-    }
-
-    fn take_warnings(&mut self) -> Vec<Warning> {
-        let mut out: Vec<Warning> = self
-            .substituted
-            .drain(..)
-            .map(|d| Warning::new(WarningKind::FontSubstituted, d))
-            .collect();
-        if self.no_font_at_all {
-            out.push(Warning::new(
-                WarningKind::FontSubstituted,
-                "系统中找不到任何可用字体，部分内容无法排版。请安装 Noto Sans CJK 或思源黑体。",
-            ));
-        }
-        if !self.missing.is_empty() {
-            let chars: String = self.missing.drain(..).take(40).collect();
-            out.push(Warning::new(
-                WarningKind::FontSubstituted,
-                format!("以下字符在可用字体中没有字形，PDF 里会显示为空白：{chars}"),
-            ));
-        }
-        out
-    }
-}
-
-impl Default for FontBook {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ---------------------------------------------------------------- 分片
 
 /// 一个「同字体、同字号、同 script」的可整形单元。
@@ -232,12 +65,18 @@ struct Piece {
     range: Range<usize>,
     /// 本片的文种。相邻两片文种不同才需要插入中西文间距。
     class: ScriptClass,
+    /// 用来整形、绘制的字体。缺字时是回退字体。
     font: FontId,
+    /// 决定行高、基线的字体：始终是 run 请求的那个。回退字体只补字形，不抬高行高 ——
+    /// 一个「☑」借了符号字体，不该让整行变高。
+    metrics_font: FontId,
+    synthetic_bold: bool,
+    synthetic_italic: bool,
     size_pt: f32,
     color: [u8; 3],
     underline: bool,
     strike: bool,
-    shaped: crate::fonts::ShapedRun,
+    shaped: ShapedRun,
     /// 与 `shaped.glyphs` 等长。
     texts: Vec<String>,
     upem: f32,
@@ -292,13 +131,13 @@ impl Piece {
     }
 
     fn ascent_pt(&self, book: &FontBook) -> f32 {
-        let m = book.face(self.font).metrics();
-        m.ascender as f32 * self.size_pt / self.upem
+        let m = book.face(self.metrics_font).metrics();
+        m.ascender as f32 * self.size_pt / m.upem as f32
     }
 
     fn natural_line_pt(&self, book: &FontBook) -> f32 {
-        let m = book.face(self.font).metrics();
-        m.default_line_height() * self.size_pt / self.upem
+        let m = book.face(self.metrics_font).metrics();
+        m.default_line_height() * self.size_pt / m.upem as f32
     }
 }
 
@@ -306,17 +145,88 @@ impl Piece {
 ///
 /// 这类字符在 PDF 里会显示成空白或方框，而且多个缺字会共用 GID 0，
 /// 连 ToUnicode 都会串。必须能被发现，不能靠用户自己看出来。
-fn collect_missing(text: &str, shaped: &crate::fonts::ShapedRun, out: &mut Vec<char>) {
+fn collect_missing(text: &str, shaped: &ShapedRun, book: &mut FontBook) {
     for g in &shaped.glyphs {
         if g.gid != 0 {
             continue;
         }
         if let Some(c) = text[g.cluster as usize..].chars().next() {
-            if !out.contains(&c) {
-                out.push(c);
-            }
+            book.note_missing(c);
         }
     }
+}
+
+/// 把一段同文种的文字按「主字体有没有这个字」切开：主字体缺的字交给回退字体。
+///
+/// 「②」「☑」这类字符常常不在所选字体里；不回退的话，它们都落到同一个 `.notdef` 上，
+/// 显示成方框，ToUnicode 还会把它们全抽成第一个缺字。组合符号、变体选择符
+/// 跟着前一个字走，否则同一个字会被拆到两个字体里。
+fn split_by_coverage(
+    text: &str,
+    range: Range<usize>,
+    primary: Resolved,
+    east_asian: bool,
+    run: &ir::Run,
+    book: &mut FontBook,
+) -> Vec<(Range<usize>, Resolved)> {
+    let mut out: Vec<(Range<usize>, Resolved)> = Vec::new();
+    let mut sibling: Option<Option<Resolved>> = None;
+    for (i, c) in text[range.clone()].char_indices() {
+        let start = range.start + i;
+        let end = start + c.len_utf8();
+        // 换行符（`w:br` 在这里是 `\n`）这类控制字符单独成片，不整形、不绘制：
+        // 字体里本来就没有它，整形只会得到 .notdef —— 一条误报的缺字，还白占一个字宽，
+        // 回退时更会平白多嵌一个字体。片本身要留着，空行的行高靠它撑起来。
+        if c.is_control() {
+            out.push((start..end, primary));
+            continue;
+        }
+        let font = if attaches_to_previous(c) {
+            out.last().map(|(_, f)| *f).unwrap_or(primary)
+        } else if book.face(primary.id).has_glyph(c) {
+            primary
+        } else {
+            sibling
+                .get_or_insert_with(|| sibling_font(run, east_asian, book))
+                .filter(|s| book.face(s.id).has_glyph(c))
+                .or_else(|| book.fallback(c, east_asian, run.bold, run.italic))
+                .unwrap_or(primary)
+        };
+        match out.last_mut() {
+            Some((r, f)) if *f == font && r.end == start && !is_unpainted(&text[r.clone()]) => {
+                r.end = end
+            }
+            _ => out.push((start..end, font)),
+        }
+    }
+    out
+}
+
+/// [`split_by_coverage`] 切出来的控制字符片。
+fn is_unpainted(part: &str) -> bool {
+    part.starts_with(char::is_control)
+}
+
+/// 同一个 run 的另一个字体：西文字体缺 ℃、② 时试中文字体，反过来也一样。
+/// 那同样是作者给这段文字选的字体，比系统回退链里的任何字体都更贴近原文 ——
+/// 宋体文档里的 ② 不该变成无衬线体。run 只写了一个字体名时，主字体已经是它了。
+fn sibling_font(run: &ir::Run, east_asian: bool, book: &mut FontBook) -> Option<Resolved> {
+    let (own, other) = if east_asian {
+        (&run.font_east_asia, &run.font_latin)
+    } else {
+        (&run.font_latin, &run.font_east_asia)
+    };
+    own.as_ref()?;
+    book.resolve(other.as_deref(), !east_asian, run.bold, run.italic)
+}
+
+/// run 用了 Symbol / Wingdings 这类符号字体、而本机又没有时，把私用区码位换成
+/// 意思相同的 Unicode 字符，交给回退字体去画。装了原字体就原样保留。
+fn symbol_font_of<'a>(run: &'a ir::Run, book: &FontBook) -> Option<&'a str> {
+    [run.font_latin.as_deref(), run.font_east_asia.as_deref()]
+        .into_iter()
+        .flatten()
+        .find(|f| pua::is_symbol_font(f) && !book.has_family(f))
 }
 
 fn build_pieces(para: &ir::Paragraph, book: &mut FontBook) -> (String, Vec<Piece>) {
@@ -324,7 +234,15 @@ fn build_pieces(para: &ir::Paragraph, book: &mut FontBook) -> (String, Vec<Piece
     let mut spans: Vec<(Range<usize>, &ir::Run)> = Vec::new();
     for run in &para.runs {
         let start = text.len();
-        text.push_str(&run.text);
+        match symbol_font_of(run, book) {
+            // 映射目标与私用区码位同为 3 字节 UTF-8，字节偏移不受影响。
+            Some(family) => text.extend(
+                run.text
+                    .chars()
+                    .map(|c| pua::symbol_to_unicode(family, c).unwrap_or(c)),
+            ),
+            None => text.push_str(&run.text),
+        }
         if text.len() > start {
             spans.push((start..text.len(), run));
         }
@@ -342,52 +260,63 @@ fn build_pieces(para: &ir::Paragraph, book: &mut FontBook) -> (String, Vec<Piece
             } else {
                 run.font_latin.as_deref().or(run.font_east_asia.as_deref())
             };
-            let Some(font) = book.resolve(family, east, run.bold, run.italic) else {
+            let Some(primary) = book.resolve(family, east, run.bold, run.italic) else {
                 // 系统里一个字体都没有。无法排版，但要留痕而不是装作没事。
-                book.no_font_at_all = true;
+                book.note_no_font();
                 continue;
             };
-            let upem = book.face(font).metrics().upem as f32;
-            let shaped = shape_run(book.face(font), &text[abs.clone()], class.to_rustybuzz());
-            collect_missing(&text[abs.clone()], &shaped, &mut book.missing);
-            let texts = crate::fonts::cluster_texts(&text[abs.clone()], &shaped.glyphs)
-                .into_iter()
-                .map(|(_, t)| t)
-                .collect();
-            // 与紧邻的上一片文种不同时，插入中西文间距。
-            // 间距按两侧较大的字号算，跟 Word 的观感一致。
-            //
-            // 但边界上已经有空白时**不加** —— 空格本身已经把两边分开了，再叠一层
-            // 会让行变宽并提前折行。实测参照：「正文第1段。」每个边界加 2.4pt，
-            // 而「正文第 1 段。」只有空格宽度、没有额外间距。
-            let boundary_spaced = pieces.last().is_some_and(|prev| {
-                text[prev.range.clone()].ends_with(char::is_whitespace)
-                    || text[abs.clone()].starts_with(char::is_whitespace)
-            });
-            let gap_before = match pieces.last() {
-                Some(prev)
-                    if para.auto_space
-                        && prev.class != class
-                        && prev.range.end == abs.start
-                        && !boundary_spaced =>
-                {
-                    CJK_LATIN_GAP_EM * prev.size_pt.max(run.size_pt)
-                }
-                _ => 0.0,
-            };
-            pieces.push(Piece {
-                range: abs,
-                class,
-                font,
-                size_pt: run.size_pt,
-                color: run.color,
-                underline: run.underline,
-                strike: run.strike,
-                shaped,
-                texts,
-                upem,
-                gap_before,
-            });
+            for (part, font) in split_by_coverage(&text, abs.clone(), primary, east, run, book) {
+                let face = book.face(font.id);
+                let upem = face.metrics().upem as f32;
+                let shaped = if is_unpainted(&text[part.clone()]) {
+                    ShapedRun::empty()
+                } else {
+                    shape_run(face, &text[part.clone()], class.to_rustybuzz())
+                };
+                collect_missing(&text[part.clone()], &shaped, book);
+                let texts = crate::fonts::cluster_texts(&text[part.clone()], &shaped.glyphs)
+                    .into_iter()
+                    .map(|(_, t)| t)
+                    .collect();
+                // 与紧邻的上一片文种不同时，插入中西文间距。
+                // 间距按两侧较大的字号算，跟 Word 的观感一致。回退字体切出来的片段
+                // 与主字体同文种，不会在它们之间加间距。
+                //
+                // 但边界上已经有空白时**不加** —— 空格本身已经把两边分开了，再叠一层
+                // 会让行变宽并提前折行。实测参照：「正文第1段。」每个边界加 2.4pt，
+                // 而「正文第 1 段。」只有空格宽度、没有额外间距。
+                let boundary_spaced = pieces.last().is_some_and(|prev| {
+                    text[prev.range.clone()].ends_with(char::is_whitespace)
+                        || text[part.clone()].starts_with(char::is_whitespace)
+                });
+                let gap_before = match pieces.last() {
+                    Some(prev)
+                        if para.auto_space
+                            && prev.class != class
+                            && prev.range.end == part.start
+                            && !boundary_spaced =>
+                    {
+                        CJK_LATIN_GAP_EM * prev.size_pt.max(run.size_pt)
+                    }
+                    _ => 0.0,
+                };
+                pieces.push(Piece {
+                    range: part,
+                    class,
+                    font: font.id,
+                    metrics_font: primary.id,
+                    synthetic_bold: font.synthetic_bold,
+                    synthetic_italic: font.synthetic_italic,
+                    size_pt: run.size_pt,
+                    color: run.color,
+                    underline: run.underline,
+                    strike: run.strike,
+                    shaped,
+                    texts,
+                    upem,
+                    gap_before,
+                });
+            }
         }
     }
     (text, pieces)
@@ -608,23 +537,23 @@ impl Ctx<'_> {
             Align::Right => content_left + avail - line_width,
         };
 
-        // 两端对齐：把剩余空间摊进字间或词间。段落最后一行不参与。
-        let (mut char_spacing, mut word_spacing) = (0.0f32, 0.0f32);
+        // 两端对齐：把剩余空间摊进字间。段落最后一行不参与。
+        //
+        // 含半角空格的行暂不拉开：旧版把空间全交给词距（Tw），而 Tw 对双字节编码
+        // 从来不起作用，这些行实际一直是左对齐的。直接让词距生效会把整行的空间压到
+        // 一两个空格上（中西文混排里常见），比左对齐更难看。正确的分配规则（摊到每个
+        // 中文字之间，空格也分一份）要对着 LibreOffice 实测来定，放在引擎重写里做。
+        let mut char_spacing = 0.0f32;
         if para.align == Align::Justify && !suppress_justify {
             let slack = avail - indent - line_width;
-            if slack > 0.0 {
-                let slice = &text[range.clone()];
-                let spaces = slice.chars().filter(|c| *c == ' ').count();
-                if spaces > 0 {
-                    word_spacing = slack / spaces as f32;
-                } else {
-                    let glyphs: usize = active
-                        .iter()
-                        .map(|p| p.glyphs_between(range.start, range.end).len())
-                        .sum();
-                    if glyphs > 1 {
-                        char_spacing = slack / (glyphs - 1) as f32;
-                    }
+            let has_space = text[range.clone()].contains(' ');
+            if slack > 0.0 && !has_space {
+                let glyphs: usize = active
+                    .iter()
+                    .map(|p| p.glyphs_between(range.start, range.end).len())
+                    .sum();
+                if glyphs > 1 {
+                    char_spacing = slack / (glyphs - 1) as f32;
                 }
             }
         }
@@ -641,12 +570,10 @@ impl Ctx<'_> {
                 x += piece.gap_before;
             }
             let w = piece.width(range.start, range.end);
-            let extra = char_spacing * glyphs.len() as f32
-                + word_spacing
-                    * text[range.clone()].chars().filter(|c| *c == ' ').count() as f32
-                    * 0.0; // 词间距由 PDF 的 Tw 施加，这里不重复计入宽度
-
             let gr = piece.glyph_range(range.start, range.end);
+            let extra_after = vec![char_spacing; glyphs.len()];
+            let extra: f32 = extra_after.iter().sum();
+
             page.ops.push(PaintOp::Text {
                 font: piece.font,
                 size_pt: piece.size_pt,
@@ -655,14 +582,13 @@ impl Ctx<'_> {
                 glyphs: glyphs.to_vec(),
                 unicode: piece.texts[gr].to_vec(),
                 color: piece.color,
-                char_spacing,
-                word_spacing,
+                extra_after,
+                synthetic_bold: piece.synthetic_bold,
+                synthetic_italic: piece.synthetic_italic,
             });
 
-            let metrics = book.face(piece.font).metrics();
-            let scale = piece.size_pt / piece.upem;
+            let thickness = (piece.size_pt * 0.05).max(0.5);
             if piece.underline {
-                let thickness = (metrics.upem as f32 * 0.05 * scale).max(0.5);
                 page.ops.push(PaintOp::Rect {
                     x,
                     y: y - piece.size_pt * 0.12,
@@ -672,7 +598,6 @@ impl Ctx<'_> {
                 });
             }
             if piece.strike {
-                let thickness = (metrics.upem as f32 * 0.05 * scale).max(0.5);
                 page.ops.push(PaintOp::Rect {
                     x,
                     y: y + piece.size_pt * 0.26,

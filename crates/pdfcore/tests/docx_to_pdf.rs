@@ -595,7 +595,7 @@ fn embedded_fonts_are_named_by_postscript_name() {
     }
     // 本机有 Liberation Serif 时，它的 PostScript 名必须原样出现。
     if let Some(found) =
-        pdfcore::fonts::system::SystemFonts::load().query("Liberation Serif", false, false)
+        pdfcore::fonts::system::SystemFonts::shared().query("Liberation Serif", false, false)
     {
         let face = ttf_parser::Face::parse(found.face.data(), found.face.index()).unwrap();
         let ps = face
@@ -628,4 +628,211 @@ fn pdf_has_a_file_identifier() {
     for part in id {
         assert_eq!(part.as_str().unwrap().len(), 16);
     }
+}
+
+fn all_content_ops(pdf: &[u8]) -> Vec<lopdf::content::Operation> {
+    let doc = lopdf::Document::load_mem(pdf).unwrap();
+    doc.get_pages()
+        .values()
+        .flat_map(|&p| doc.get_and_decode_page_content(p).unwrap().operations)
+        .collect()
+}
+
+/// 所选字体没有的字（☑、☐ 不在中文字体里），要借回退字体画出来，而且能原样抽回。
+#[test]
+fn missing_glyphs_fall_back_to_a_font_that_has_them() {
+    if !require_cjk_font() {
+        return;
+    }
+    let report = convert(&make_docx("fallback.docx", &para("同意☑不同意☐")));
+    let text = text_of(&report.value.pdf);
+    assert!(
+        text.contains("同意☑不同意☐"),
+        "回退字体没有生效，抽回：{text}"
+    );
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|w| w.detail.contains("没有字形")),
+        "有回退字体可用时不该报缺字：{:?}",
+        report.warnings
+    );
+}
+
+/// 「②」紧跟在新 run 开头、后面是数字时，会被判给西文字体，而西文字体没有它。
+/// 曾经因此和别的缺字一起落到 .notdef，全被抽成了「℃」。
+///
+/// 画它的应当是这个 run 自己的中文字体，而不是系统回退链里随便一个有它的字体。
+#[test]
+fn circled_digits_at_a_run_start_are_not_lost() {
+    if !require_cjk_font() {
+        return;
+    }
+    let run = |t: &str| {
+        format!(
+            r#"<w:r><w:rPr><w:rFonts w:ascii="Liberation Serif" w:hAnsi="Liberation Serif" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>{t}</w:t></w:r>"#
+        )
+    };
+    let body = format!(
+        "<w:p>{}{}{}</w:p>",
+        run("第一项；"),
+        run("②3月5日提交清单；"),
+        run("③25℃")
+    );
+    let pdf = convert(&make_docx("circled.docx", &body)).value.pdf;
+    let text = text_of(&pdf);
+    assert!(
+        text.contains("第一项；②3月5日提交清单；③25℃"),
+        "抽回：{text}"
+    );
+
+    let frags: Vec<common::pdftext::Frag> = common::pdftext::extract(&pdf)
+        .into_iter()
+        .flat_map(|p| p.lines)
+        .flat_map(|l| l.frags)
+        .collect();
+    let font_of = |c: char| {
+        frags
+            .iter()
+            .find(|f| f.text.contains(c))
+            .map(|f| f.font.clone())
+            .unwrap_or_else(|| panic!("找不到「{c}」：{frags:?}"))
+    };
+    let cjk = font_of('第');
+    for c in ['②', '③', '℃'] {
+        assert_eq!(font_of(c), cjk, "「{c}」没有用 run 自己的中文字体");
+    }
+}
+
+/// 真的哪个字体都没有的字（这里用 Unicode 尚未分配的码位），不同的缺字
+/// 不能被抽成同一个字 —— 它们共用 .notdef，ToUnicode 只能给一个原文。
+#[test]
+fn distinct_missing_glyphs_are_not_merged_into_one_character() {
+    let report = convert(&make_docx("notdef.docx", &para("甲\u{0378}乙\u{0379}丙")));
+    let text = text_of(&report.value.pdf);
+    assert_eq!(
+        text, "甲\u{FFFD}乙\u{FFFD}丙",
+        "两个不同的缺字应当都抽成 U+FFFD，而不是都变成其中一个"
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.detail.contains("没有字形")),
+        "真缺字要报出来"
+    );
+}
+
+/// 没有粗体字形的字体（宋体就是），要求加粗时要合成 —— 否则标题和正文一样细。
+#[test]
+fn bold_without_a_bold_face_is_synthesized() {
+    let family = "WenQuanYi Zen Hei";
+    let Some(found) = pdfcore::fonts::system::SystemFonts::shared().query(family, true, false)
+    else {
+        eprintln!("跳过：本机没有 {family}");
+        return;
+    };
+    if found.face.metrics().weight >= 600 {
+        eprintln!("跳过：{family} 有真粗体");
+        return;
+    }
+    let body = format!(
+        r#"<w:p><w:r><w:rPr><w:rFonts w:eastAsia="{family}"/><w:b/><w:sz w:val="24"/></w:rPr><w:t>加粗的标题</w:t></w:r></w:p>"#
+    );
+    let ops = all_content_ops(&convert(&make_docx("synth_bold.docx", &body)).value.pdf);
+    assert!(
+        ops.iter()
+            .any(|o| o.operator == "Tr" && o.operands[0].as_i64().ok() == Some(2)),
+        "要用描边（Tr 2）合成粗体"
+    );
+}
+
+/// Wingdings 画的勾选框：本机没有 Wingdings 时，私用区码位要换成真正的「☑」。
+#[test]
+fn wingdings_checkbox_becomes_a_real_checkbox_without_the_font() {
+    if pdfcore::fonts::system::SystemFonts::shared()
+        .query("Wingdings", false, false)
+        .is_some()
+    {
+        eprintln!("跳过：本机装了 Wingdings，原样显示就是对的");
+        return;
+    }
+    let body = format!(
+        r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Wingdings" w:hAnsi="Wingdings"/><w:sz w:val="24"/></w:rPr><w:t>{}</w:t></w:r><w:r><w:rPr><w:rFonts w:ascii="Liberation Serif" w:hAnsi="Liberation Serif" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>已阅读</w:t></w:r></w:p>"#,
+        '\u{F0FE}'
+    );
+    let text = text_of(&convert(&make_docx("wingdings.docx", &body)).value.pdf);
+    assert!(text.contains("☑已阅读"), "抽回：{text:?}");
+}
+
+/// 内容流里不能出现 Tc / Tw：Tw 对双字节编码不起作用，Tc 不复位会串到后面的文字。
+#[test]
+fn no_char_or_word_spacing_operators_in_output() {
+    if !require_cjk_font() {
+        return;
+    }
+    let body = (0..6)
+        .map(|_| {
+            r#"<w:p><w:pPr><w:jc w:val="both"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Liberation Serif" w:hAnsi="Liberation Serif" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>两端对齐的中文段落需要把行内剩余的空间平均分给每一个字符间隔这样右边才能对齐 and some English words here too</w:t></w:r></w:p>"#
+        })
+        .collect::<String>();
+    let ops = all_content_ops(&convert(&make_docx("no_tc.docx", &body)).value.pdf);
+    assert!(!ops.iter().any(|o| o.operator == "Tc" || o.operator == "Tw"));
+}
+
+/// `w:br` 换行符不是拿来画的：不能为它去找回退字体（多嵌一个字体），也不能报缺字。
+#[test]
+fn line_breaks_neither_pull_in_fallback_fonts_nor_count_as_missing() {
+    if !require_cjk_font() {
+        return;
+    }
+    let body = r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Liberation Serif" w:hAnsi="Liberation Serif" w:eastAsia="宋体"/></w:rPr><w:t>第一行</w:t><w:br/><w:t>第二行 two</w:t><w:br/><w:t>第三行</w:t></w:r></w:p>"#;
+    let report = convert(&make_docx("br_fonts.docx", body));
+    let fonts: std::collections::BTreeSet<String> = common::pdftext::extract(&report.value.pdf)
+        .into_iter()
+        .flat_map(|p| p.lines)
+        .flat_map(|l| l.frags)
+        .map(|f| f.font)
+        .collect();
+    assert_eq!(fonts.len(), 2, "只该用到中文、西文两个字体：{fonts:?}");
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|w| w.detail.contains("没有字形")),
+        "换行符被当成了缺字：{:?}",
+        report.warnings
+    );
+}
+
+/// 连续两个 `w:br` 之间的空行照样占一行高 —— 换行符不绘制，但行高仍要由它撑起来。
+#[test]
+fn an_empty_line_between_two_breaks_keeps_its_height() {
+    if !require_cjk_font() {
+        return;
+    }
+    let baselines = |name: &str, body: &str| -> Vec<f32> {
+        let pdf = convert(&make_docx(name, body)).value.pdf;
+        common::pdftext::extract(&pdf)
+            .into_iter()
+            .flat_map(|p| p.lines)
+            .map(|l| l.y)
+            .collect()
+    };
+    let three = baselines(
+        "br_three.docx",
+        "<w:p><w:r><w:t>第一行</w:t><w:br/><w:t>第二行</w:t><w:br/><w:t>第三行</w:t></w:r></w:p>",
+    );
+    let gap = baselines(
+        "br_gap.docx",
+        "<w:p><w:r><w:t>第一行</w:t><w:br/><w:br/><w:t>第三行</w:t></w:r></w:p>",
+    );
+    assert_eq!((three.len(), gap.len()), (3, 2), "{three:?} {gap:?}");
+    let pitch = three[0] - three[1];
+    assert!(
+        ((gap[0] - gap[1]) - 2.0 * pitch).abs() < 0.01,
+        "空行应当占一整行：行距 {pitch}，隔一空行的两行相距 {}",
+        gap[0] - gap[1]
+    );
 }
