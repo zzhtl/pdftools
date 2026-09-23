@@ -17,8 +17,8 @@ mod text;
 
 pub use calib::{
     AutoSpace, Breaks, Calib, Cascade, CharClass, Decor, EmptyPara, FixedBaseline, Flow,
-    GridLayout, HangingIndent, HangingPunct, Justify, ListNumbers, Overflow, PageBottom,
-    PageBreakBefore, ParaSpacing, RunFormat, Sections, Tabs, Theme, TrailingSpaces,
+    GridLayout, HangingIndent, HangingPunct, HeaderFooter, Justify, ListNumbers, Overflow,
+    PageBottom, PageBreakBefore, ParaSpacing, RunFormat, Sections, Tabs, Theme, TrailingSpaces,
 };
 
 use super::ir;
@@ -95,14 +95,30 @@ pub struct Page {
     pub size: (f32, f32),
     /// 页码：显示出来的那个数，不一定等于第几页。
     pub number: i32,
+    /// 属于第几节。
+    pub section: usize,
+    /// 用哪一类页眉页脚。
+    pub kind: PageKind,
+}
+
+/// 一页用哪一类页眉页脚。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageKind {
+    Default,
+    /// 本节首页（`w:titlePg`）。
+    First,
+    /// 偶数页（`w:evenAndOddHeaders`）。
+    Even,
 }
 
 impl Page {
-    fn new(page: &ir::PageGeom, number: i32) -> Self {
+    fn new(page: &ir::PageGeom, number: i32, section: usize, kind: PageKind) -> Self {
         Self {
             ops: Vec::new(),
             size: (page.w_pt, page.h_pt),
             number,
+            section,
+            kind,
         }
     }
 }
@@ -116,13 +132,37 @@ const PLACEHOLDER_COLOR: [u8; 3] = [0x88, 0x88, 0x88];
 
 pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut {
     let collapse = doc.html_paragraph_spacing && calib.para_spacing == ParaSpacing::HtmlCollapse;
+    let hf_on = calib.header_footer == HeaderFooter::Drawn;
+    // 页眉页脚先用域的缓存值量出高度，定下各类页面的正文区；真实的页码要等全文
+    // 排完才知道，那时再代入重排页眉页脚，正文不再跟着动。
+    let heights: Vec<[Hf; 3]> = doc
+        .sections
+        .iter()
+        .map(|s| {
+            [PageKind::Default, PageKind::First, PageKind::Even].map(|kind| {
+                let mut height = |set: &ir::HeaderSet| {
+                    let blocks = pick_story(set, kind).filter(|_| hf_on)?;
+                    let paras = story_boxes(blocks, s, doc, book, calib, &|_| None);
+                    Some(stack_story(&paras, &s.page, collapse, calib).1)
+                };
+                (height(&s.headers), height(&s.footers))
+            })
+        })
+        .collect();
+    let frames: Vec<paginate::Frames> = doc
+        .sections
+        .iter()
+        .zip(&heights)
+        .map(|(s, [default, first, even])| paginate::Frames {
+            default: frame(s, calib, *default),
+            first: frame(s, calib, *first),
+            even: frame(s, calib, *even),
+            title_page: hf_on && s.title_page,
+            even_odd: hf_on && doc.even_and_odd_headers,
+        })
+        .collect();
     let first = &doc.sections[0];
-    let mut pages = paginate::Paginator::new(
-        frame(first, calib),
-        first.page_number_start,
-        collapse,
-        calib,
-    );
+    let mut pages = paginate::Paginator::new(frames[0], first.page_number_start, collapse, calib);
     let mut warnings = Vec::new();
 
     // 先把所有块量好，放的时候才能往后看（与下段同页要知道下一段有多高）。
@@ -160,11 +200,7 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
         .count();
     for (si, section) in doc.sections.iter().enumerate() {
         if si > 0 {
-            pages.start_section(
-                frame(section, calib),
-                section.start,
-                section.page_number_start,
-            );
+            pages.start_section(frames[si], section.start, section.page_number_start, si);
         }
         // 与下段同页不跨节：下一节总是另起一页（或者与本节无关）。
         let in_section = &measured[..section.blocks.end];
@@ -192,17 +228,216 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
             ),
         ));
     }
-    if doc.has_header_footer {
+    if doc.has_header_footer && !hf_on {
         warnings.push(Warning::new(
             WarningKind::UnsupportedElement,
             "文档设置了页眉或页脚，本版本不渲染".to_string(),
         ));
     }
 
+    let mut pages = pages.finish();
+    if hf_on {
+        draw_headers_footers(
+            doc,
+            &mut pages,
+            &heights,
+            book,
+            calib,
+            collapse,
+            &mut warnings,
+        );
+    }
+
     warnings.extend(book.take_warnings());
-    LaidOut {
-        pages: pages.finish(),
-        warnings,
+    LaidOut { pages, warnings }
+}
+
+/// 一类页面上页眉、页脚的高度，没有就是 None。
+type Hf = (Option<f32>, Option<f32>);
+
+/// 一类页面用的页眉（或页脚）。首页、偶数页没有单独定义时就是没有，不退回默认的。
+fn pick_story(set: &ir::HeaderSet, kind: PageKind) -> Option<&[ir::Block]> {
+    match kind {
+        PageKind::Default => set.default.as_deref(),
+        PageKind::First => set.first.as_deref(),
+        PageKind::Even => set.even.as_deref(),
+    }
+}
+
+/// 量页眉页脚里的段落。它们不吸附行网格（LibreOffice 实测）。`value` 给出域的值，
+/// None 时用缓存的结果。
+fn story_boxes(
+    blocks: &[ir::Block],
+    section: &ir::Section,
+    doc: &ir::Document,
+    book: &mut FontBook,
+    calib: &Calib,
+    value: &dyn Fn(&ir::Field) -> Option<String>,
+) -> Vec<para::ParaBox> {
+    let env = para::Env {
+        grid: None,
+        left: section.page.margin_left,
+        width: section.page.content_width(),
+        default_tab_stop: doc.default_tab_stop,
+        calib,
+    };
+    let mut measured: Vec<Measured> = blocks
+        .iter()
+        .map(|block| match block {
+            ir::Block::Para(p) => Measured::Para(para::measure(&with_fields(p, value), &env, book)),
+            ir::Block::Placeholder(ph) => Measured::Placeholder(
+                placeholder_paras(ph)
+                    .iter()
+                    .map(|p| para::measure(p, &env, book))
+                    .collect(),
+            ),
+        })
+        .collect();
+    join_boxes(&mut measured);
+    measured
+        .into_iter()
+        .flat_map(|m| match m {
+            Measured::Para(b) => vec![b],
+            Measured::Placeholder(paras) => paras,
+        })
+        .collect()
+}
+
+/// 把段落从纸张顶端往下叠起来：返回绘制操作与总高度。
+fn stack_story(
+    paras: &[para::ParaBox],
+    page: &ir::PageGeom,
+    collapse: bool,
+    calib: &Calib,
+) -> (Vec<PaintOp>, f32) {
+    let frame = paginate::Frame {
+        page: ir::PageGeom {
+            margin_top: 0.0,
+            ..*page
+        },
+        origin: 0.0,
+        capacity: f32::MAX / 4.0,
+    };
+    let mut stack =
+        paginate::Paginator::new(paginate::Frames::uniform(frame), None, collapse, calib);
+    for p in paras {
+        stack.place_para(p);
+    }
+    let height = stack.used();
+    let ops = stack
+        .finish()
+        .into_iter()
+        .next()
+        .map(|p| p.ops)
+        .unwrap_or_default();
+    (ops, height)
+}
+
+/// 代入域的值：同一个域的结果只留一份，写成 `value` 给的文字。
+fn with_fields<'a>(
+    p: &'a ir::Paragraph,
+    value: &dyn Fn(&ir::Field) -> Option<String>,
+) -> std::borrow::Cow<'a, ir::Paragraph> {
+    use std::borrow::Cow;
+    if !p.spans.iter().any(|s| s.style.field.is_some()) {
+        return Cow::Borrowed(p);
+    }
+    let mut text = String::new();
+    let mut spans = Vec::with_capacity(p.spans.len());
+    let mut done = std::collections::HashSet::new();
+    for span in &p.spans {
+        let piece = match span.style.field.map(|f| (f, value(&f))) {
+            Some((f, Some(v))) if done.insert(f.id) => v,
+            Some((_, Some(_))) => continue,
+            _ => p.text[span.range.clone()].to_string(),
+        };
+        if piece.is_empty() {
+            continue;
+        }
+        let start = text.len();
+        text.push_str(&piece);
+        spans.push(ir::Span {
+            range: start..text.len(),
+            style: span.style.clone(),
+        });
+    }
+    Cow::Owned(ir::Paragraph {
+        text,
+        spans,
+        ..p.clone()
+    })
+}
+
+/// 页码类域的值。PAGE 按本节的页码格式写，另外两个按阿拉伯数字写；域代码里的
+/// `\*` 开关优先。
+fn field_text(f: &ir::Field, number: i32, total: i32, section_pages: i32, format: &str) -> String {
+    let (n, default) = match f.kind {
+        ir::FieldKind::Page => (number, format),
+        ir::FieldKind::NumPages => (total, "decimal"),
+        ir::FieldKind::SectionPages => (section_pages, "decimal"),
+    };
+    match f.format.unwrap_or(default) {
+        "arabicDash" => format!("- {n} -"),
+        fmt => crate::docx::numfmt::format(n, fmt).unwrap_or_else(|| n.to_string()),
+    }
+}
+
+/// 逐页画页眉页脚：代入这一页的页码、总页数。页眉顶端在离纸张上边 `w:header` 处，
+/// 页脚底端在离纸张下边 `w:footer` 处。
+fn draw_headers_footers(
+    doc: &ir::Document,
+    pages: &mut [Page],
+    heights: &[[Hf; 3]],
+    book: &mut FontBook,
+    calib: &Calib,
+    collapse: bool,
+    warnings: &mut Vec<Warning>,
+) {
+    let total = pages.len() as i32;
+    let mut per_section = vec![0i32; doc.sections.len()];
+    for p in pages.iter() {
+        per_section[p.section] += 1;
+    }
+    let mut grew = false;
+    for page in pages.iter_mut() {
+        let (number, si, kind) = (page.number, page.section, page.kind);
+        let s = &doc.sections[si];
+        let value = |f: &ir::Field| {
+            Some(field_text(
+                f,
+                number,
+                total,
+                per_section[si],
+                &s.page_number_format,
+            ))
+        };
+        let frozen = heights[si][match kind {
+            PageKind::Default => 0,
+            PageKind::First => 1,
+            PageKind::Even => 2,
+        }];
+        for (set, is_header, frozen) in
+            [(&s.headers, true, frozen.0), (&s.footers, false, frozen.1)]
+        {
+            let Some(blocks) = pick_story(set, kind) else {
+                continue;
+            };
+            let paras = story_boxes(blocks, s, doc, book, calib, &value);
+            let (ops, height) = stack_story(&paras, &s.page, collapse, calib);
+            grew |= height > frozen.unwrap_or(0.0) + 1.0;
+            let dy = if is_header {
+                -s.page.header_dist
+            } else {
+                s.page.footer_dist + height - s.page.h_pt
+            };
+            page.ops.extend(ops.iter().map(|op| op.shifted(dy)));
+        }
+    }
+    if grew {
+        warnings.push(Warning::new(
+            WarningKind::UnsupportedElement,
+            "页眉页脚代入真实页码后变高了，正文没有跟着下移，可能与页眉页脚重叠".to_string(),
+        ));
     }
 }
 
@@ -298,20 +533,24 @@ fn join_boxes(measured: &mut [Measured]) {
     }
 }
 
-/// 一节的版面：纸张与正文区。
-fn frame(section: &ir::Section, calib: &Calib) -> paginate::Frame {
-    let (origin, capacity) = grid_area(section, calib);
+/// 一类页面的版面。`hf` 是这类页面上页眉、页脚的高度（没有就是 None）：页眉的
+/// 底边低过上边距时正文从页眉底下开始，页脚的顶边高过下边距时正文排到页脚顶为止。
+fn frame(section: &ir::Section, calib: &Calib, (header, footer): Hf) -> paginate::Frame {
+    let p = &section.page;
+    let top = header.map_or(p.margin_top, |h| p.margin_top.max(p.header_dist + h));
+    let bottom = footer.map_or(p.margin_bottom, |h| p.margin_bottom.max(p.footer_dist + h));
+    let height = (p.h_pt - top - bottom).max(1.0);
+    let (origin, capacity) = grid_area(height, section.grid, calib);
     paginate::Frame {
-        page: section.page,
-        origin,
+        page: *p,
+        origin: top - p.margin_top + origin,
         capacity,
     }
 }
 
-/// 正文能用的竖向区间：(离版心顶端的偏移, 高度)。见 [`GridLayout::Centered`]。
-fn grid_area(section: &ir::Section, calib: &Calib) -> (f32, f32) {
-    let height = section.page.content_height();
-    match (section.grid, calib.grid) {
+/// 正文能用的竖向区间：(离正文区顶端的偏移, 高度)。见 [`GridLayout::Centered`]。
+fn grid_area(height: f32, grid: Option<ir::Grid>, calib: &Calib) -> (f32, f32) {
+    match (grid, calib.grid) {
         (Some(g), GridLayout::Centered) if g.pitch_pt > 0.0 && g.pitch_pt <= height => {
             let area = (height / g.pitch_pt).floor() * g.pitch_pt;
             ((height - area) / 2.0, area)
@@ -349,6 +588,7 @@ fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
         vert_align: ir::VertAlign::Baseline,
         position_pt: 0.0,
         link: None,
+        field: None,
     };
     let spans = vec![ir::Span {
         range: 0..text.len(),

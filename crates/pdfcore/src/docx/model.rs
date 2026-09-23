@@ -483,6 +483,17 @@ pub enum RunItem {
         font: Option<String>,
         code: u32,
     },
+    /// `w:fldChar`：域的开始、代码与结果的分隔、结束。`w:fldSimple` 也展开成这样。
+    FieldChar(FieldChar),
+    /// `w:instrText`：域代码（`PAGE \* MERGEFORMAT`）。
+    FieldCode(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldChar {
+    Begin,
+    Separate,
+    End,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -729,6 +740,8 @@ pub struct Document {
     pub settings: Settings,
     pub theme: Theme,
     pub numbering: Numbering,
+    /// 页眉页脚：关系 id → 内容。
+    pub header_footer: HashMap<String, Story>,
     /// 外部链接：关系 id → 网址。解析 document.xml 时不知道关系表，由调用方填上。
     pub hyperlinks: HashMap<String, String>,
 }

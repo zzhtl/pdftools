@@ -29,6 +29,8 @@ pub struct Package {
     pub settings: Option<String>,
     /// `word/theme/theme1.xml`：主题字体在这里。Word、WPS 都固定用这个名字。
     pub theme: Option<String>,
+    /// 页眉页脚部件：部件路径（`word/header1.xml`）→ XML。由关系表对应到各节。
+    pub header_footer: HashMap<String, String>,
     /// `document.xml` 的关系：id → 目标。
     pub rels: HashMap<String, Relationship>,
     /// 部件路径 → 字节。只收 word/media/ 下的图片。
@@ -64,6 +66,7 @@ pub fn open(path: &Path) -> Result<Package> {
     let mut numbering = None;
     let mut settings = None;
     let mut theme = None;
+    let mut header_footer = HashMap::new();
     let mut rels_xml = None;
     let mut core_xml = None;
     let mut media = HashMap::new();
@@ -96,7 +99,9 @@ pub fn open(path: &Path) -> Result<Package> {
                 | "docProps/core.xml"
         );
         let want_media = name.starts_with("word/media/");
-        if !want_text && !want_media {
+        let want_hf = (name.starts_with("word/header") || name.starts_with("word/footer"))
+            && name.ends_with(".xml");
+        if !want_text && !want_media && !want_hf {
             continue;
         }
 
@@ -111,6 +116,10 @@ pub fn open(path: &Path) -> Result<Package> {
         }
         let text = String::from_utf8(buf)
             .map_err(|_| CoreError::Docx(format!("{name} 不是合法的 UTF-8")))?;
+        if want_hf {
+            header_footer.insert(name, text);
+            continue;
+        }
         match name.as_str() {
             "word/document.xml" => document = Some(text),
             "word/styles.xml" => styles = Some(text),
@@ -133,6 +142,7 @@ pub fn open(path: &Path) -> Result<Package> {
         numbering,
         settings,
         theme,
+        header_footer,
         rels: rels_xml.as_deref().map(parse_rels).unwrap_or_default(),
         media,
     })

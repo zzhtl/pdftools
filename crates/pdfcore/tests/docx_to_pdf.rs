@@ -551,22 +551,91 @@ fn list_numbers_are_drawn() {
     assert!((x_of(&lines[6], "庚") - 79.4).abs() < 0.01);
 }
 
-/// 页眉页脚不渲染，但要报出来。
+/// 页眉页脚：首页用单独的页眉；页脚里的页码域（复杂域与简单域）代入真实的数；
+/// 很高的页眉把正文往下推。行距一律 20pt 固定值，位置与字体无关。
 #[test]
-fn header_and_footer_are_reported() {
+fn headers_and_footers_are_drawn() {
     if !require_cjk_font() {
         return;
     }
+    let rpr = r#"<w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr>"#;
+    let p = |ppr: &str, runs: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:spacing w:line="400" w:lineRule="exact"/>{ppr}</w:pPr>{runs}</w:p>"#
+        )
+    };
+    let run = |t: &str| format!(r#"<w:r>{rpr}<w:t xml:space="preserve">{t}</w:t></w:r>"#);
+    let fld = |c: &str| format!(r#"<w:r>{rpr}<w:fldChar w:fldCharType="{c}"/></w:r>"#);
+    let footer = p(
+        r#"<w:jc w:val="center"/>"#,
+        &[
+            run("第"),
+            fld("begin"),
+            format!(r#"<w:r>{rpr}<w:instrText xml:space="preserve"> PAGE \* MERGEFORMAT </w:instrText></w:r>"#),
+            fld("separate"),
+            run("1"),
+            fld("end"),
+            run("页共"),
+            format!(r#"<w:fldSimple w:instr=" NUMPAGES ">{}</w:fldSimple>"#, run("9")),
+            run("页"),
+        ]
+        .concat(),
+    );
+    let body: String = (0..80).map(|i| p("", &run(&format!("正文{i}")))).collect();
     let path = DocxBuilder::new()
-        .body(r#"<w:p><w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>正文</w:t></w:r></w:p>"#)
-        .header("default", "<w:p><w:r><w:t>页眉</w:t></w:r></w:p>")
-        .build("headref.docx");
-
+        .body(&body)
+        .sect_extra("<w:titlePg/>")
+        .header("first", &p("", &run("首页页眉")))
+        .header("default", &p(r#"<w:jc w:val="right"/>"#, &run("页眉文字")))
+        .footer("default", &footer)
+        .footer("first", &footer)
+        .build("header_footer.docx");
     let report = convert(&path);
     assert!(
-        report.warnings.iter().any(|w| w.detail.contains("页眉")),
-        "引用了页眉却没有报出来：{:?}",
+        !report.warnings.iter().any(|w| w.detail.contains("页眉")),
+        "{:?}",
         report.warnings
+    );
+    let pages = common::pdftext::extract(&report.value.pdf);
+    assert_eq!(pages.len(), 3, "一页 34 行，80 段是 3 页");
+    for (i, page) in pages.iter().enumerate() {
+        let text = page.text();
+        let header = if i == 0 {
+            "首页页眉"
+        } else {
+            "页眉文字"
+        };
+        assert!(text.contains(header), "第 {} 页：{text}", i + 1);
+        assert_eq!(text.contains("首页页眉"), i == 0);
+        assert!(
+            text.contains(&format!("第{}页共3页", i + 1)),
+            "第 {} 页：{text}",
+            i + 1
+        );
+        // 页眉在上边距之内（离纸张上边 36pt 起），页脚在下边距之内。
+        let top = page.lines.first().unwrap().y;
+        let bottom = page.lines.last().unwrap().y;
+        assert!(top < 841.9 - 36.0 && top > 841.9 - 72.0, "页眉基线 {top}");
+        assert!(bottom > 36.0 && bottom < 72.0, "页脚基线 {bottom}");
+    }
+
+    // 6 行页眉高 120pt，从离纸张上边 36pt 处排到 156pt，低过 72pt 的上边距：
+    // 正文从 156pt 处开始，固定行距的基线在行顶往下 16pt。
+    let tall: String = (0..6).map(|i| p("", &run(&format!("页眉{i}")))).collect();
+    let path = DocxBuilder::new()
+        .body(&body)
+        .header("default", &tall)
+        .build("tall_header.docx");
+    let pages = common::pdftext::extract(&convert(&path).value.pdf);
+    let first_body = pages[0]
+        .lines
+        .iter()
+        .find(|l| l.text.contains("正文0"))
+        .unwrap();
+    assert!(
+        (first_body.y - (841.9 - 156.0 - 16.0)).abs() < 0.05,
+        "{}",
+        first_body.y
     );
 }
 

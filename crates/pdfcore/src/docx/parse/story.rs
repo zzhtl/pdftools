@@ -9,7 +9,7 @@ use quick_xml::events::{BytesStart, Event};
 use super::props::{parse_ppr, parse_rpr, parse_sect_pr};
 use super::{attr, resolve_entity, skip, xml_err, Rd};
 use crate::docx::model::{
-    Block, BreakKind, Cell, LinkRef, Para, Row, Run, RunItem, SectPr, Story, Table,
+    Block, BreakKind, Cell, FieldChar, LinkRef, Para, Row, Run, RunItem, SectPr, Story, Table,
 };
 use crate::error::Result;
 
@@ -19,6 +19,24 @@ pub(super) fn parse_body(r: &mut Rd) -> Result<(Story, Option<SectPr>)> {
     let mut last = None;
     parse_blocks(r, "body", &mut out, &mut last)?;
     Ok((out, last))
+}
+
+/// 读一个页眉或页脚部件（根元素 `w:hdr` / `w:ftr`）。
+pub(super) fn parse_part(r: &mut Rd) -> Result<Story> {
+    let mut out = Vec::new();
+    loop {
+        match r.read_event().map_err(xml_err)? {
+            Event::Start(e) if matches!(e.local_name().as_ref(), "hdr" | "ftr") => {
+                let root = e.local_name().as_ref().to_string();
+                let mut no_section = None;
+                parse_blocks(r, &root, &mut out, &mut no_section)?;
+                break;
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 /// 读块级内容直到 `end` 结束。`section` 收 body 级的 `w:sectPr`。
@@ -91,11 +109,32 @@ fn parse_paragraph(r: &mut Rd) -> Result<Para> {
                     run.link = link.clone();
                     para.runs.push(run);
                 }
+                // 简单域：展开成与复杂域一样的开始、代码、分隔……结束，里面的 run 是结果。
+                "fldSimple" => {
+                    let code = attr(&e, "instr").unwrap_or_default();
+                    para.runs.push(field_run(&[
+                        RunItem::FieldChar(FieldChar::Begin),
+                        RunItem::FieldCode(code),
+                        RunItem::FieldChar(FieldChar::Separate),
+                    ]));
+                }
                 name if skips_subtree(name) => skip(r, name)?,
-                // 超链接、`w:ins`、`w:smartTag`、`w:fldSimple`、公式、内容控件……
-                // 里面都是正常显示的 run。
+                // 超链接、`w:ins`、`w:smartTag`、公式、内容控件……里面都是正常显示的 run。
                 _ => {}
             },
+            Event::Empty(e) if e.local_name().as_ref() == "fldSimple" => {
+                let code = attr(&e, "instr").unwrap_or_default();
+                para.runs.push(field_run(&[
+                    RunItem::FieldChar(FieldChar::Begin),
+                    RunItem::FieldCode(code),
+                    RunItem::FieldChar(FieldChar::Separate),
+                    RunItem::FieldChar(FieldChar::End),
+                ]));
+            }
+            Event::End(e) if e.local_name().as_ref() == "fldSimple" => {
+                para.runs
+                    .push(field_run(&[RunItem::FieldChar(FieldChar::End)]));
+            }
             Event::End(e) if e.local_name().as_ref() == "hyperlink" => link = None,
             Event::End(e) if e.local_name().as_ref() == "p" => {
                 depth -= 1;
@@ -108,6 +147,23 @@ fn parse_paragraph(r: &mut Rd) -> Result<Para> {
         }
     }
     Ok(para)
+}
+
+/// 只有域标记、没有文字的 run。
+fn field_run(items: &[RunItem]) -> Run {
+    Run {
+        items: items.to_vec(),
+        ..Run::default()
+    }
+}
+
+fn field_char(e: &BytesStart) -> Option<FieldChar> {
+    match attr(e, "fldCharType").as_deref() {
+        Some("begin") => Some(FieldChar::Begin),
+        Some("separate") => Some(FieldChar::Separate),
+        Some("end") => Some(FieldChar::End),
+        _ => None,
+    }
 }
 
 fn parse_run(r: &mut Rd) -> Result<Run> {
@@ -131,9 +187,19 @@ fn parse_run(r: &mut Rd) -> Result<Run> {
                         alt: find_alt_text(r, &name)?,
                     });
                 }
-                // 域代码（`PAGE`、`TOC \o "1-3"`）是给 Word 看的指令，不是正文；
-                // 注音的读音标注也不进正文。
-                name @ ("instrText" | "delInstrText" | "delText" | "rt") => skip(r, name)?,
+                // 域代码（`PAGE`、`TOC \o "1-3"`）是给 Word 看的指令，不是正文，
+                // 记下来给排版认页码域用。
+                "instrText" => {
+                    let code = read_text(r, &e)?;
+                    run.items.push(RunItem::FieldCode(code));
+                }
+                // 窗体域的 `w:fldChar` 里还有 `w:ffData`。
+                "fldChar" => {
+                    run.items.extend(field_char(&e).map(RunItem::FieldChar));
+                    skip(r, "fldChar")?;
+                }
+                // 删除的域代码、删除的文字、注音的读音标注都不进正文。
+                name @ ("delInstrText" | "delText" | "rt") => skip(r, name)?,
                 name if skips_subtree(name) => skip(r, name)?,
                 _ => {}
             },
@@ -148,6 +214,7 @@ fn parse_run(r: &mut Rd) -> Result<Run> {
                     })),
                 "cr" => run.items.push(RunItem::Break(BreakKind::Line)),
                 "noBreakHyphen" => run.items.push(RunItem::NoBreakHyphen),
+                "fldChar" => run.items.extend(field_char(&e).map(RunItem::FieldChar)),
                 "sym" => {
                     if let Some(code) =
                         attr(&e, "char").and_then(|c| u32::from_str_radix(&c, 16).ok())
@@ -180,6 +247,7 @@ fn parse_run(r: &mut Rd) -> Result<Run> {
 /// 实体引用会把文字切成好几段，逐段去会把「A &amp; B」读成「A&B」。
 fn read_text(r: &mut Rd, start: &BytesStart) -> Result<String> {
     let preserve = attr(start, "space").as_deref() == Some("preserve");
+    let end = start.local_name().as_ref().to_string();
     let mut text = String::new();
     loop {
         match r.read_event().map_err(xml_err)? {
@@ -190,7 +258,7 @@ fn read_text(r: &mut Rd, start: &BytesStart) -> Result<String> {
                 }
             }
             Event::CData(c) => text.push_str(&c),
-            Event::End(e) if e.local_name().as_ref() == "t" => break,
+            Event::End(e) if e.local_name().as_ref() == end => break,
             Event::Eof => break,
             _ => {}
         }

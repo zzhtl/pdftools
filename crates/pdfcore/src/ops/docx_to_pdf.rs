@@ -63,6 +63,15 @@ pub fn run_with(
         .as_deref()
         .map(parse::parse_numbering)
         .unwrap_or_default();
+    // 页眉页脚按关系 id 存：各节的 w:headerReference 写的是关系 id。
+    raw.header_footer = pkg
+        .rels
+        .iter()
+        .filter_map(|(id, rel)| {
+            let xml = pkg.header_footer.get(&rel.target)?;
+            Some((id.clone(), parse::parse_header_footer(xml)))
+        })
+        .collect();
     raw.hyperlinks = pkg
         .rels
         .iter()

@@ -501,5 +501,55 @@ pub fn all() -> Vec<Probe> {
             .sect_extra(r#"<w:type w:val="continuous"/>"#),
     );
 
+    // 页眉页脚的种类：首页、偶数页各自的页眉，偶数页的页眉很高（把正文往下推），
+    // 页脚是「第 X 页 共 Y 页」。
+    let run = |t: &str| {
+        format!(
+            r#"<w:r><w:rPr><w:rFonts w:ascii="Liberation Serif" w:hAnsi="Liberation Serif" w:eastAsia="Noto Serif CJK SC"/><w:sz w:val="21"/></w:rPr><w:t xml:space="preserve">{t}</w:t></w:r>"#
+        )
+    };
+    let field = |code: &str| {
+        let r = |inner: &str| format!("<w:r>{inner}</w:r>");
+        [
+            r(r#"<w:fldChar w:fldCharType="begin"/>"#),
+            r(&format!(
+                r#"<w:instrText xml:space="preserve"> {code} </w:instrText>"#
+            )),
+            r(r#"<w:fldChar w:fldCharType="separate"/>"#),
+            run("1"),
+            r(r#"<w:fldChar w:fldCharType="end"/>"#),
+        ]
+        .concat()
+    };
+    let page_footer = format!(
+        r#"<w:p><w:pPr><w:jc w:val="center"/></w:pPr>{}{}{}{}{}</w:p>"#,
+        run("第 "),
+        field("PAGE"),
+        run(" 页 共 "),
+        field("NUMPAGES"),
+        run(" 页")
+    );
+    let tall_header: String = (0..6)
+        .map(|i| probe_para("", &format!("偶数页页眉第{}行", i + 1)))
+        .collect();
+    add(
+        "header_footer_kinds",
+        DocxBuilder::new()
+            .body(&paras(90, "", 60))
+            .settings(&format!(
+                "<w:evenAndOddHeaders/>{}",
+                super::docx::DEFAULT_SETTINGS
+            ))
+            .sect_extra("<w:titlePg/>")
+            .header("first", &probe_para("", "首页页眉"))
+            .header(
+                "default",
+                &probe_para(r#"<w:jc w:val="right"/>"#, "奇数页页眉"),
+            )
+            .header("even", &tall_header)
+            .footer("default", &page_footer)
+            .footer("even", &page_footer),
+    );
+
     v
 }

@@ -33,6 +33,25 @@ pub struct Calib {
     pub decor: Decor,
     pub list_numbers: ListNumbers,
     pub sections: Sections,
+    pub header_footer: HeaderFooter,
+}
+
+/// 页眉页脚与页码域。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderFooter {
+    /// 不画，汇总成一条警告；域照原样显示缓存的结果。
+    Warned,
+    /// 对照 LibreOffice 实测：
+    /// - 页眉顶端在离纸张上边 `w:header` 处，页脚最后一行的底边在离纸张下边
+    ///   `w:footer` 处；页眉页脚的行不吸附行网格；
+    /// - 页眉的底边低过上边距时，正文紧接在页眉底下开始；页脚的顶边高过下边距时，
+    ///   正文排到页脚顶为止；
+    /// - 首页（本节写了 `w:titlePg`）、偶数页（`w:evenAndOddHeaders`）用各自的页眉
+    ///   页脚，没有定义就是空的，不退回默认的那个；某类在本节没写时沿用上一节的；
+    /// - PAGE、NUMPAGES、SECTIONPAGES 代入真实的数。PAGE 按本节的页码格式写。
+    ///   NUMPAGES 按阿拉伯数字写 —— LibreOffice 让它也跟随页码格式（「共 IV 页」），
+    ///   这里按 Word 的做法。
+    Drawn,
 }
 
 /// 多节文档（段落里的 `w:sectPr`）。
@@ -353,6 +372,7 @@ impl Calib {
             decor: Decor::Boxes,
             list_numbers: ListNumbers::Rendered,
             sections: Sections::Each,
+            header_footer: HeaderFooter::Drawn,
         }
     }
 
@@ -381,6 +401,7 @@ impl Calib {
             decor: Decor::Ignored,
             list_numbers: ListNumbers::Dropped,
             sections: Sections::Last,
+            header_footer: HeaderFooter::Warned,
         }
     }
 }

@@ -108,6 +108,7 @@ pub fn parse_document(xml: &str, styles: Styles, settings: Settings) -> Result<D
         settings,
         theme: Default::default(),
         numbering: Default::default(),
+        header_footer: Default::default(),
         hyperlinks: Default::default(),
     })
 }
@@ -137,6 +138,12 @@ pub fn parse_settings(xml: &str) -> Settings {
         }
     }
     settings
+}
+
+/// 解析页眉或页脚部件。坏了不影响正文：读不出来就当没有。
+pub fn parse_header_footer(xml: &str) -> super::model::Story {
+    let mut r = Reader::from_str(xml);
+    story::parse_part(&mut r).unwrap_or_default()
 }
 
 /// 解析主题部件里的字体方案（`a:fontScheme`）。颜色、效果这些与排版无关，不读。

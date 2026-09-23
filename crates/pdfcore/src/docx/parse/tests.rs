@@ -307,3 +307,39 @@ fn numbering_definitions() {
     let over = num.overrides[&1].level.as_ref().unwrap();
     assert_eq!(over.format.as_deref(), Some("upperLetter"));
 }
+
+/// 域：`w:fldChar`、`w:instrText` 按原样记下；`w:fldSimple` 展开成同样的序列，
+/// 里面的 run 是结果。
+#[test]
+fn fields_are_recorded_as_items() {
+    use crate::docx::model::FieldChar::*;
+    let doc = body(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"><w:ffData/></w:fldChar></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>3</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>
+<w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>9</w:t></w:r></w:fldSimple><w:fldSimple w:instr="SECTIONPAGES"/></w:p>"#,
+    );
+    let items: Vec<RunItem> = paras(&doc)[0]
+        .runs
+        .iter()
+        .flat_map(|r| r.items.clone())
+        .collect();
+    let code = |s: &str| RunItem::FieldCode(s.into());
+    assert_eq!(
+        items,
+        [
+            RunItem::FieldChar(Begin),
+            code(" PAGE "),
+            RunItem::FieldChar(Separate),
+            RunItem::Text("3".into()),
+            RunItem::FieldChar(End),
+            RunItem::FieldChar(Begin),
+            code(" NUMPAGES "),
+            RunItem::FieldChar(Separate),
+            RunItem::Text("9".into()),
+            RunItem::FieldChar(End),
+            RunItem::FieldChar(Begin),
+            code("SECTIONPAGES"),
+            RunItem::FieldChar(Separate),
+            RunItem::FieldChar(End),
+        ]
+    );
+}

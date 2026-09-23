@@ -2,7 +2,7 @@
 
 use super::calib::{Calib, PageBreakBefore};
 use super::para::{Line, ParaBody, ParaBox, ParaDecor};
-use super::{Page, PaintOp};
+use super::{Page, PageKind, PaintOp};
 use crate::docx::ir::{self, BorderStyle, PageGeom, SectionStart};
 
 /// 一页的版面：纸张，以及其中的正文区。
@@ -15,11 +15,50 @@ pub(super) struct Frame {
     pub capacity: f32,
 }
 
+/// 一节里各类页面的版面：首页、偶数页的页眉页脚可以不同，正文区也就跟着不同。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Frames {
+    pub default: Frame,
+    pub first: Frame,
+    pub even: Frame,
+    /// 本节首页用单独的页眉页脚（`w:titlePg`）。
+    pub title_page: bool,
+    /// 偶数页用单独的页眉页脚（`w:evenAndOddHeaders`）。
+    pub even_odd: bool,
+}
+
+impl Frames {
+    pub fn uniform(frame: Frame) -> Self {
+        Self {
+            default: frame,
+            first: frame,
+            even: frame,
+            title_page: false,
+            even_odd: false,
+        }
+    }
+
+    /// 本节第 `first` 页（是否首页）、页码为 `number` 的页面用哪类。
+    fn pick(&self, first: bool, number: i32) -> (Frame, PageKind) {
+        if first && self.title_page {
+            (self.first, PageKind::First)
+        } else if self.even_odd && number.rem_euclid(2) == 0 {
+            (self.even, PageKind::Even)
+        } else {
+            (self.default, PageKind::Default)
+        }
+    }
+}
+
 pub(super) struct Paginator {
     /// 当前页的版面。
     frame: Frame,
     /// 之后新开的页用的版面。连续分节换了设置时，当前页仍用旧的。
-    next_frame: Frame,
+    frames: Frames,
+    /// 当前是第几节。
+    section: usize,
+    /// 下一个新开的页是本节的第一页。
+    section_start: bool,
     /// 下一页的页码从这里重新起头（`w:pgNumType/@w:start`）。
     restart: Option<i32>,
     pages: Vec<Page>,
@@ -45,16 +84,20 @@ struct OpenBox {
 impl Paginator {
     /// `first_number`：第一页的页码，没写是 1。
     pub fn new(
-        frame: Frame,
+        frames: Frames,
         first_number: Option<i32>,
         collapse_spacing: bool,
         calib: &Calib,
     ) -> Self {
+        let number = first_number.unwrap_or(1);
+        let (frame, kind) = frames.pick(true, number);
         Self {
             frame,
-            next_frame: frame,
+            frames,
+            section: 0,
+            section_start: false,
             restart: None,
-            pages: vec![Page::new(&frame.page, first_number.unwrap_or(1))],
+            pages: vec![Page::new(&frame.page, number, 0, kind)],
             used: 0.0,
             collapse_spacing,
             last_after: 0.0,
@@ -74,25 +117,41 @@ impl Paginator {
 
     fn new_page(&mut self) {
         self.close_box();
-        self.frame = self.next_frame;
         let number = self
             .restart
             .take()
             .unwrap_or_else(|| self.pages.last().map_or(1, |p| p.number + 1));
-        self.pages.push(Page::new(&self.frame.page, number));
+        let (frame, kind) = self.frames.pick(self.section_start, number);
+        self.section_start = false;
+        self.frame = frame;
+        self.pages
+            .push(Page::new(&frame.page, number, self.section, kind));
         self.used = 0.0;
         self.last_after = 0.0;
     }
 
+    /// 当前页已用掉的高度。
+    pub fn used(&self) -> f32 {
+        self.used
+    }
+
     /// 开始新的一节。见 [`Sections::Each`](super::calib::Sections::Each)。
-    pub fn start_section(&mut self, frame: Frame, start: SectionStart, number: Option<i32>) {
-        let same_paper = (frame.page.w_pt - self.frame.page.w_pt).abs() < 0.01
-            && (frame.page.h_pt - self.frame.page.h_pt).abs() < 0.01;
-        self.next_frame = frame;
+    pub fn start_section(
+        &mut self,
+        frames: Frames,
+        start: SectionStart,
+        number: Option<i32>,
+        index: usize,
+    ) {
+        let same_paper = (frames.default.page.w_pt - self.frame.page.w_pt).abs() < 0.01
+            && (frames.default.page.h_pt - self.frame.page.h_pt).abs() < 0.01;
+        self.frames = frames;
+        self.section = index;
         if start == SectionStart::Continuous && same_paper {
             return;
         }
         self.restart = number;
+        self.section_start = true;
         self.new_page();
         let odd = self
             .pages

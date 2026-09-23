@@ -17,8 +17,10 @@
 
 use std::ops::Range;
 
-use super::layout::{Calib, Cascade, ListNumbers, RunFormat, Sections, Theme};
-use super::model::{self, BreakKind, FontRef, LineRule, NumSuffix, PPr, RPr, RunItem, ThemeScript};
+use super::layout::{Calib, Cascade, HeaderFooter, ListNumbers, RunFormat, Sections, Theme};
+use super::model::{
+    self, BreakKind, FieldChar, FontRef, LineRule, NumSuffix, PPr, RPr, RunItem, ThemeScript,
+};
 pub use super::model::{BorderStyle, SectionStart, TabAlign, TabLeader, UnderlineStyle, VertAlign};
 use super::numbering::Lists;
 use super::resolve::Resolver;
@@ -123,6 +125,117 @@ pub struct RunStyle {
     pub position_pt: f32,
     /// 超链接的网址。
     pub link: Option<String>,
+    /// 页码类域的结果文字：排版时代入真实的数。
+    pub field: Option<Field>,
+}
+
+/// 页码类的域。同一个域的结果可能分在几个 span 里，靠 `id` 认出是同一个。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Field {
+    /// 段落里第几个域。
+    pub id: u32,
+    pub kind: FieldKind,
+    /// 域代码里的 `\*` 格式开关，换算成编号格式的名字（`upperRoman` 之类）。
+    pub format: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldKind {
+    /// 本页页码。
+    Page,
+    /// 总页数。
+    NumPages,
+    /// 本节页数。
+    SectionPages,
+}
+
+/// 认页码类的域代码：`PAGE \* ROMAN`、`NUMPAGES`、`SECTIONPAGES`。
+fn page_field(code: &str) -> Option<(FieldKind, Option<&'static str>)> {
+    let words: Vec<&str> = code.split_whitespace().collect();
+    let kind = match words.first()?.to_ascii_uppercase().as_str() {
+        "PAGE" => FieldKind::Page,
+        "NUMPAGES" => FieldKind::NumPages,
+        "SECTIONPAGES" => FieldKind::SectionPages,
+        _ => return None,
+    };
+    let format = words.windows(2).find(|w| w[0] == "\\*").and_then(|w| {
+        Some(match w[1] {
+            "Arabic" => "decimal",
+            "ArabicDash" => "arabicDash",
+            "roman" => "lowerRoman",
+            "ROMAN" => "upperRoman",
+            "alphabetic" => "lowerLetter",
+            "ALPHABETIC" => "upperLetter",
+            "CircleNum" => "decimalEnclosedCircle",
+            "CHINESENUM1" | "CHINESENUM3" => "chineseCounting",
+            "CHINESENUM2" => "chineseLegalSimplified",
+            // MERGEFORMAT、CHARFORMAT 之类与数字写法无关。
+            _ => return None,
+        })
+    });
+    Some((kind, format))
+}
+
+/// 段落里正在读的域，可以嵌套。
+#[derive(Default)]
+struct OpenFields {
+    stack: Vec<OpenField>,
+    next_id: u32,
+}
+
+struct OpenField {
+    id: u32,
+    code: String,
+    /// 已经过了分隔符，接下来是结果。
+    result: bool,
+    kind: Option<(FieldKind, Option<&'static str>)>,
+}
+
+impl OpenFields {
+    /// 接下来的文字属于哪个页码域的结果。
+    fn current(&self) -> Option<Field> {
+        let top = self.stack.last().filter(|f| f.result)?;
+        let (kind, format) = top.kind?;
+        Some(Field {
+            id: top.id,
+            kind,
+            format,
+        })
+    }
+
+    fn begin(&mut self) {
+        self.stack.push(OpenField {
+            id: self.next_id,
+            code: String::new(),
+            result: false,
+            kind: None,
+        });
+        self.next_id += 1;
+    }
+
+    fn code(&mut self, code: &str) {
+        if let Some(top) = self.stack.last_mut().filter(|f| !f.result) {
+            top.code.push_str(code);
+        }
+    }
+
+    fn separate(&mut self) {
+        if let Some(top) = self.stack.last_mut() {
+            top.result = true;
+            top.kind = page_field(&top.code);
+        }
+    }
+
+    /// 结束一个域；它是页码类的域时返回它（没有分隔符也认）。
+    fn end(&mut self) -> Option<Field> {
+        let f = self.stack.pop()?;
+        let (kind, format) = f.kind.or_else(|| page_field(&f.code))?;
+        Some(Field {
+            id: f.id,
+            kind,
+            format,
+        })
+    }
 }
 
 /// 下划线，颜色已经落实（没写时就是文字颜色）。
@@ -297,6 +410,17 @@ pub struct Section {
     pub page_number_start: Option<i32>,
     /// 页码的数字格式（与编号格式同一套取值）。
     pub page_number_format: String,
+    /// 本节的页眉、页脚（没写的已按规则从上一节沿用）。
+    pub headers: HeaderSet,
+    pub footers: HeaderSet,
+}
+
+/// 一节的首页、偶数页、其余页各用什么页眉（或页脚）。None 是没有。
+#[derive(Debug, Clone, Default)]
+pub struct HeaderSet {
+    pub default: Option<Vec<Block>>,
+    pub first: Option<Vec<Block>>,
+    pub even: Option<Vec<Block>>,
 }
 
 impl Section {
@@ -326,6 +450,8 @@ impl Section {
                 .page_number_format
                 .clone()
                 .unwrap_or_else(|| "decimal".into()),
+            headers: HeaderSet::default(),
+            footers: HeaderSet::default(),
         }
     }
 }
@@ -336,6 +462,8 @@ pub struct Document {
     pub sections: Vec<Section>,
     /// 文档引用了页眉或页脚，但本版本不渲染。
     pub has_header_footer: bool,
+    /// 偶数页用单独的页眉页脚（`w:evenAndOddHeaders`）。
+    pub even_and_odd_headers: bool,
     /// 相邻两段的段后距与段前距取较大值而不是相加（HTML 的规矩）。
     /// 文档没有设置 `w:doNotUseHTMLParagraphAutoSpacing` 时为真，见 `Calib::para_spacing`。
     pub html_paragraph_spacing: bool,
@@ -355,28 +483,43 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
     // 重写前只用最后一节排全文。
     let each = calib.sections == Sections::Each;
 
+    let ctx = Ctx {
+        doc,
+        resolver: &resolver,
+        fonts: &fonts,
+        calib,
+    };
     let mut blocks = Vec::with_capacity(doc.body.len());
-    let mut sections = Vec::new();
+    let mut ends: Vec<(&model::SectPr, Range<usize>)> = Vec::new();
     let mut start = 0;
     for block in &doc.body {
         match block {
             model::Block::Para(p) => {
-                let ctx = Ctx {
-                    doc,
-                    resolver: &resolver,
-                    fonts: &fonts,
-                    calib,
-                };
                 push_paragraph(&mut blocks, p, &ctx, lists.as_mut());
                 if let (true, Some(sp)) = (each, &p.section) {
-                    sections.push(Section::from_model(sp, start..blocks.len()));
+                    ends.push((sp, start..blocks.len()));
                     start = blocks.len();
                 }
             }
             model::Block::Table(t) => blocks.push(Block::Placeholder(table_placeholder(t))),
         }
     }
-    sections.push(Section::from_model(&doc.section, start..blocks.len()));
+    ends.push((&doc.section, start..blocks.len()));
+
+    // 页眉页脚：本节没写的那一类沿用上一节的。
+    let hf_on = calib.header_footer == HeaderFooter::Drawn;
+    let (mut headers, mut footers) = (HeaderSet::default(), HeaderSet::default());
+    let mut sections = Vec::with_capacity(ends.len());
+    for (sp, range) in ends {
+        let mut section = Section::from_model(sp, range);
+        if hf_on {
+            headers = header_set(&headers, &sp.headers, &ctx);
+            footers = header_set(&footers, &sp.footers, &ctx);
+            section.headers = headers.clone();
+            section.footers = footers.clone();
+        }
+        sections.push(section);
+    }
     let has_header_footer = doc.section.has_header_footer
         || (each
             && doc.body.iter().any(|b| {
@@ -386,6 +529,7 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
     Document {
         sections,
         has_header_footer,
+        even_and_odd_headers: doc.settings.even_and_odd_headers,
         html_paragraph_spacing: !doc.settings.no_html_paragraph_spacing,
         default_tab_stop: doc.settings.default_tab_stop.map(tw).unwrap_or(36.0),
         num_format_fallbacks: lists
@@ -393,6 +537,35 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
             .unwrap_or_default(),
         blocks,
     }
+}
+
+/// 一节的页眉（或页脚）：写了的用本节的，没写的沿用上一节的。
+fn header_set(prev: &HeaderSet, refs: &model::HeaderRefs, ctx: &Ctx) -> HeaderSet {
+    let pick = |id: &Option<String>, prev: &Option<Vec<Block>>| match id {
+        Some(id) => ctx
+            .doc
+            .header_footer
+            .get(id)
+            .map(|story| story_blocks(story, ctx)),
+        None => prev.clone(),
+    };
+    HeaderSet {
+        default: pick(&refs.default, &prev.default),
+        first: pick(&refs.first, &prev.first),
+        even: pick(&refs.even, &prev.even),
+    }
+}
+
+/// 页眉页脚里的内容。编号不接正文的计数。
+fn story_blocks(story: &model::Story, ctx: &Ctx) -> Vec<Block> {
+    let mut out = Vec::new();
+    for block in story {
+        match block {
+            model::Block::Para(p) => push_paragraph(&mut out, p, ctx, None),
+            model::Block::Table(t) => out.push(Block::Placeholder(table_placeholder(t))),
+        }
+    }
+    out
 }
 
 /// 构建各段落都要用到的东西。
@@ -412,8 +585,11 @@ fn push_paragraph(out: &mut Vec<Block>, p: &model::Para, ctx: &Ctx, lists: Optio
     } = *ctx;
     let ppr = resolver.paragraph(&p.ppr);
     let mut text = String::new();
-    let mut spans = Vec::with_capacity(p.runs.len());
+    let mut spans: Vec<Span> = Vec::with_capacity(p.runs.len());
     let mut drawings = Vec::new();
+    // 页码类域的结果文字标上记号，排版时代入真实的数。重写前不认域，结果照原样显示。
+    let fields_on = calib.header_footer == HeaderFooter::Drawn;
+    let mut fields = OpenFields::default();
     for run in &p.runs {
         let rpr = resolver.run(&ppr, &run.rpr);
         let full = calib.run_format == RunFormat::Full;
@@ -429,6 +605,10 @@ fn push_paragraph(out: &mut Vec<Block>, p: &model::Para, ctx: &Ctx, lists: Optio
                 _ => None,
             };
         }
+        if fields_on {
+            style.field = fields.current();
+        }
+        let run_has_text = run.items.iter().any(|i| matches!(i, RunItem::Text(_)));
         // 一个 run 先切成若干（文字, 格式）小块：符号、小型大写的小写字母要换格式。
         // 同格式的相邻小块合成一个 span；不同 run 之间不合并。
         let mut chunks: Vec<(String, RunStyle)> = Vec::new();
@@ -469,6 +649,27 @@ fn push_paragraph(out: &mut Vec<Block>, p: &model::Para, ctx: &Ctx, lists: Optio
                 RunItem::Break(BreakKind::Column) => push(COLUMN_BREAK.into(), &style),
                 RunItem::NoBreakHyphen => push("\u{2011}".into(), &style),
                 RunItem::Drawing { alt } => drawings.push(alt.clone()),
+                RunItem::FieldChar(FieldChar::Begin) if fields_on => fields.begin(),
+                RunItem::FieldCode(code) if fields_on => fields.code(code),
+                RunItem::FieldChar(FieldChar::Separate) if fields_on => fields.separate(),
+                RunItem::FieldChar(FieldChar::End) if fields_on => {
+                    // 没有结果文字的页码域（有的生成器不写缓存值）：补一个占位的字，
+                    // 排版时照样代入。
+                    if let Some(f) = fields.end() {
+                        let shown = run_has_text
+                            || spans
+                                .iter()
+                                .any(|s| s.style.field.is_some_and(|x| x.id == f.id));
+                        if !shown {
+                            let marked = RunStyle {
+                                field: Some(f),
+                                ..style.clone()
+                            };
+                            push("1".into(), &marked);
+                        }
+                    }
+                }
+                RunItem::FieldChar(_) | RunItem::FieldCode(_) => {}
                 // 符号用它自己的字体。符号字体（Symbol、Wingdings）里的码位
                 // 写成单字节时，实际在私用区 U+F0xx。
                 RunItem::Sym { .. } if !full => {}
@@ -697,6 +898,7 @@ fn run_style(rpr: &RPr, fonts: &FontNames, calib: &Calib) -> RunStyle {
             0.0
         },
         link: None,
+        field: None,
     }
 }
 
@@ -939,6 +1141,114 @@ mod tests {
                 pair(None, None),
                 pair(Some("Run Latin"), None),
                 pair(Some("Style Latin"), Some("Style Song")),
+            ]
+        );
+    }
+
+    /// 页码类域的结果标上记号；没有结果的补一个占位字；别的域照常显示。
+    /// 重写前的规则不认域。
+    #[test]
+    fn page_fields_are_marked() {
+        let run = |inner: &str| format!("<w:r>{inner}</w:r>");
+        let fld = |c: &str| run(&format!(r#"<w:fldChar w:fldCharType="{c}"/>"#));
+        let code = |c: &str| run(&format!("<w:instrText>{c}</w:instrText>"));
+        let p = [
+            run("<w:t>第</w:t>"),
+            fld("begin"),
+            code(r"PAGE \* ROMAN"),
+            fld("separate"),
+            run("<w:t>1</w:t>"),
+            fld("end"),
+            fld("begin"),
+            code("NUMPAGES"),
+            fld("separate"),
+            fld("end"),
+            fld("begin"),
+            code("DATE"),
+            fld("separate"),
+            run("<w:t>今天</w:t>"),
+            fld("end"),
+        ]
+        .concat();
+        let doc = parse::parse_document(
+            &format!(r#"<w:document xmlns:w="w"><w:body><w:p>{p}</w:p></w:body></w:document>"#),
+            parse::parse_styles(r#"<w:styles xmlns:w="w"/>"#),
+            Default::default(),
+        )
+        .unwrap();
+        let spans = |calib: &Calib| {
+            let Block::Para(p) = &build(&doc, calib).blocks[0] else {
+                unreachable!()
+            };
+            p.spans
+                .iter()
+                .map(|s| (p.text[s.range.clone()].to_string(), s.style.field))
+                .collect::<Vec<_>>()
+        };
+        let got = spans(&Calib::current());
+        let page = Field {
+            id: 0,
+            kind: FieldKind::Page,
+            format: Some("upperRoman"),
+        };
+        let pages = Field {
+            id: 1,
+            kind: FieldKind::NumPages,
+            format: None,
+        };
+        assert_eq!(
+            got,
+            [
+                ("第".to_string(), None),
+                ("1".to_string(), Some(page)),
+                ("1".to_string(), Some(pages)),
+                ("今天".to_string(), None),
+            ]
+        );
+        let legacy = spans(&Calib::legacy());
+        assert!(legacy.iter().all(|(_, f)| f.is_none()));
+        assert_eq!(
+            legacy.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+            "第1今天"
+        );
+    }
+
+    /// 某类页眉本节没写时沿用上一节的；写了就换成本节的。
+    #[test]
+    fn headers_are_inherited_by_kind() {
+        let mut doc = parse::parse_document(
+            r#"<w:document xmlns:w="w" xmlns:r="r"><w:body>
+<w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="h1"/><w:headerReference w:type="first" r:id="h2"/></w:sectPr></w:pPr></w:p>
+<w:p><w:pPr><w:sectPr><w:headerReference w:type="first" r:id="h3"/></w:sectPr></w:pPr></w:p>
+<w:p/><w:sectPr/></w:body></w:document>"#,
+            parse::parse_styles(r#"<w:styles xmlns:w="w"/>"#),
+            Default::default(),
+        )
+        .unwrap();
+        for (id, text) in [("h1", "默认一"), ("h2", "首页一"), ("h3", "首页二")] {
+            doc.header_footer.insert(
+                id.into(),
+                parse::parse_header_footer(&format!(
+                    r#"<w:hdr xmlns:w="w"><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:hdr>"#
+                )),
+            );
+        }
+        let ir = build(&doc, &Calib::current());
+        let text = |b: &Option<Vec<Block>>| match b.as_deref() {
+            Some([Block::Para(p)]) => p.text.clone(),
+            _ => String::new(),
+        };
+        let got: Vec<(String, String)> = ir
+            .sections
+            .iter()
+            .map(|s| (text(&s.headers.default), text(&s.headers.first)))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("默认一".into(), "首页一".into()),
+                ("默认一".into(), "首页二".into()),
+                ("默认一".into(), "首页二".into()),
             ]
         );
     }
