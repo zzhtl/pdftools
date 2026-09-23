@@ -15,8 +15,8 @@ mod para;
 mod text;
 
 pub use calib::{
-    Breaks, Calib, EmptyPara, FixedBaseline, GridLayout, HangingPunct, Justify, PageBottom,
-    PageBreakBefore, ParaSpacing, Tabs, TrailingSpaces,
+    Breaks, Calib, EmptyPara, FixedBaseline, GridLayout, HangingIndent, HangingPunct, Justify,
+    Overflow, PageBottom, PageBreakBefore, ParaSpacing, Tabs, TrailingSpaces,
 };
 
 use super::ir;

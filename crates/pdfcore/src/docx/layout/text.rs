@@ -243,6 +243,7 @@ impl ShapedPara {
 
     /// 从 `start` 开始，找最后一个装得下的断行点。返回 (断点偏移, 是否是强制断行)。
     /// `x0` 是本行起点（从正文区左缘量起），有制表符时要靠它定位。
+    /// `char_boundary`：一整串不可断的内容放不下时，在字符边界上断开（否则整串越过右边距）。
     pub fn next_break(
         &self,
         start: usize,
@@ -250,6 +251,7 @@ impl ShapedPara {
         hang: Hang,
         x0: f32,
         rules: &TabRules,
+        char_boundary: bool,
     ) -> (usize, bool) {
         let first = self.breaks.partition_point(|(i, _)| *i <= start);
         let fits = |idx| {
@@ -275,17 +277,35 @@ impl ShapedPara {
                 break;
             }
         }
+        let next = self
+            .breaks
+            .get(first)
+            .map(|(i, _)| *i)
+            .unwrap_or(self.text.len());
         match best {
             Some(b) => (b, false),
-            // 一个不可断的整体比行还宽（超长 URL、连续数字）：整个留在这一行里，越过右边距。
-            // 与重写前一致；在字符边界上硬断还没做。
-            None => (
-                self.breaks
-                    .get(first)
-                    .map(|(i, _)| *i)
-                    .unwrap_or(self.text.len()),
-                false,
-            ),
+            // 一个不可断的整体比行还宽（超长 URL、连续数字）。
+            None if !char_boundary => (next, false),
+            None => {
+                // 放得下的最后一个字符边界；组合符号不能和前一个字拆开。
+                // 一个字都放不下时也放一个，否则永远排不出去。
+                let mut cut = None;
+                for (i, c) in self.text[start..next].char_indices().skip(1) {
+                    if attaches_to_previous(c) {
+                        continue;
+                    }
+                    if !fits(start + i) {
+                        break;
+                    }
+                    cut = Some(start + i);
+                }
+                let first_char = self.text[start..next]
+                    .char_indices()
+                    .skip(1)
+                    .find(|(_, c)| !attaches_to_previous(*c))
+                    .map_or(next, |(i, _)| start + i);
+                (cut.unwrap_or(first_char), false)
+            }
         }
     }
 }

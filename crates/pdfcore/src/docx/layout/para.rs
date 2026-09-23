@@ -2,7 +2,9 @@
 
 use std::ops::Range;
 
-use super::calib::{Breaks, Calib, EmptyPara, HangingPunct, Justify, Tabs, TrailingSpaces};
+use super::calib::{
+    Breaks, Calib, EmptyPara, HangingIndent, HangingPunct, Justify, Overflow, Tabs, TrailingSpaces,
+};
 use super::metrics::line_box;
 use super::text::{self, Hang, Piece, ShapedPara, TabRules};
 use super::PaintOp;
@@ -130,14 +132,18 @@ fn tab_rules<'a>(para: &'a ir::Paragraph, env: &Env) -> TabRules<'a> {
     }
 }
 
+/// 一行的起点相对左缩进的偏移：首行缩进，或者悬挂缩进往左伸出的量。
+fn first_line_offset(para: &ir::Paragraph, is_first: bool, calib: &Calib) -> f32 {
+    match (is_first, calib.hanging_indent) {
+        (false, _) => 0.0,
+        (true, HangingIndent::Legacy) => para.first_line.max(0.0),
+        (true, HangingIndent::Outdent) => para.first_line,
+    }
+}
+
 /// 一行的起点，从正文区左缘量起。
-fn line_start(para: &ir::Paragraph, is_first: bool) -> f32 {
-    para.indent_left
-        + if is_first {
-            para.first_line.max(0.0)
-        } else {
-            0.0
-        }
+fn line_start(para: &ir::Paragraph, is_first: bool, calib: &Calib) -> f32 {
+    para.indent_left + first_line_offset(para, is_first, calib)
 }
 
 fn break_lines(para: &ir::Paragraph, sp: &ShapedPara, env: &Env, book: &FontBook) -> Vec<Line> {
@@ -150,17 +156,18 @@ fn break_lines(para: &ir::Paragraph, sp: &ShapedPara, env: &Env, book: &FontBook
     let mut start = 0usize;
     let mut is_first = true;
     while start < sp.text.len() {
-        let avail = if is_first {
-            avail_first - first_indent
-        } else {
-            avail_rest
+        let avail = match (is_first, env.calib.hanging_indent) {
+            (false, _) => avail_rest,
+            (true, HangingIndent::Legacy) => avail_first - first_indent,
+            (true, HangingIndent::Outdent) => avail_rest - para.first_line,
         };
         let (end, mandatory) = sp.next_break(
             start,
             avail,
             hang(para, env.calib),
-            line_start(para, is_first),
+            line_start(para, is_first, env.calib),
             &rules,
+            env.calib.overflow == Overflow::CharBoundary,
         );
         let is_last = end >= sp.text.len();
         let mut l = line(
@@ -223,18 +230,14 @@ fn line(
     let rules = tab_rules(para, env);
     let has_tabs = sp.tabs.iter().any(|t| range.contains(t));
     let line_width = if has_tabs {
-        let x0 = line_start(para, is_first);
+        let x0 = line_start(para, is_first, env.calib);
         sp.advance(measured.start, measured.end, x0, &rules) - x0
     } else {
         sp.width(measured.start, measured.end)
     };
     let content_left = env.left + para.indent_left;
     let avail = env.width - para.indent_left - para.indent_right;
-    let indent = if is_first {
-        para.first_line.max(0.0)
-    } else {
-        0.0
-    };
+    let indent = first_line_offset(para, is_first, env.calib);
 
     let mut x = match para.align {
         Align::Left | Align::Justify => content_left + indent,

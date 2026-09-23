@@ -22,6 +22,27 @@ pub struct Calib {
     pub breaks: Breaks,
     pub page_break_before: PageBreakBefore,
     pub tabs: Tabs,
+    pub hanging_indent: HangingIndent,
+    pub overflow: Overflow,
+}
+
+/// 悬挂缩进（首行缩进为负）的段落，首行从哪里开始。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HangingIndent {
+    /// 首行仍从左缩进处开始，可用宽度反而少了悬挂量。
+    Legacy,
+    /// 首行往左伸出悬挂量：从「左缩进 − 悬挂」开始，可用宽度相应多出这么多。
+    /// 编号列表的序号就靠这个伸到左边去。
+    Outdent,
+}
+
+/// 一整串不可断的内容（长网址、长数字）比一行还宽时怎么办。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overflow {
+    /// 整串留在一行里，越过右边距。
+    NextOpportunity,
+    /// 在字符边界上断开，把这一行排满（至少放一个字）。
+    CharBoundary,
 }
 
 /// `w:tab` 怎么排。
@@ -189,6 +210,8 @@ impl Calib {
             breaks: Breaks::Typed,
             page_break_before: PageBreakBefore::AnyPageTop,
             tabs: Tabs::Stops,
+            hanging_indent: HangingIndent::Outdent,
+            overflow: Overflow::CharBoundary,
         }
     }
 
@@ -206,6 +229,8 @@ impl Calib {
             breaks: Breaks::AsLineBreaks,
             page_break_before: PageBreakBefore::FirstPageTopOnly,
             tabs: Tabs::IdeographicSpace,
+            hanging_indent: HangingIndent::Legacy,
+            overflow: Overflow::NextOpportunity,
         }
     }
 }

@@ -1215,3 +1215,46 @@ fn tabs_jump_to_their_stops() {
         x(&g, ".")
     );
 }
+
+/// 悬挂缩进：首行从「左缩进 − 悬挂」开始，续行从左缩进开始。
+#[test]
+fn hanging_indent_outdents_the_first_line() {
+    if !require_cjk_font() {
+        return;
+    }
+    let body = format!(
+        r#"<w:p><w:pPr><w:ind w:left="840" w:hanging="420"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>{}</w:t></w:r></w:p>"#,
+        "悬挂缩进的段落首行往左伸出".repeat(8)
+    );
+    let pages = common::pdftext::extract(&convert(&make_docx("hanging.docx", &body)).value.pdf);
+    let margin = 1588.0 / 20.0;
+    let starts: Vec<f32> = pages[0].lines.iter().map(|l| l.x0 - margin).collect();
+    assert!(starts.len() >= 2, "{starts:?}");
+    assert!((starts[0] - 21.0).abs() < 0.01, "首行起点 {}", starts[0]);
+    assert!((starts[1] - 42.0).abs() < 0.01, "续行起点 {}", starts[1]);
+}
+
+/// 一整串不可断的内容比一行还宽时，在字符边界上断开，不越过右边距。
+#[test]
+fn unbreakable_runs_are_split_at_character_boundaries() {
+    if !require_cjk_font() {
+        return;
+    }
+    let body = format!(
+        r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="24"/></w:rPr><w:t>https://example.com/{}</w:t></w:r></w:p>"#,
+        "abcdefghij0123456789".repeat(12)
+    );
+    let pages = common::pdftext::extract(&convert(&make_docx("long_url.docx", &body)).value.pdf);
+    let right = pages[0].width - 1588.0 / 20.0;
+    let lines = &pages[0].lines;
+    assert!(lines.len() >= 3, "应当断成多行，实际 {} 行", lines.len());
+    for l in lines {
+        assert!(
+            l.x1 <= right + 0.01,
+            "有一行越过了右边距：{} > {right}",
+            l.x1
+        );
+    }
+    let text: String = lines.iter().map(|l| l.text.as_str()).collect();
+    assert!(text.ends_with("0123456789"), "字断丢了：{text}");
+}
