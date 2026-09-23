@@ -442,11 +442,10 @@ pub fn for_each_picture(story: &mut Story, f: &mut dyn FnMut(&mut Picture)) {
         match block {
             Block::Para(p) => {
                 for item in p.runs.iter_mut().flat_map(|r| &mut r.items) {
-                    if let RunItem::Drawing(Drawing {
-                        picture: Some(pic), ..
-                    }) = item
-                    {
-                        f(pic);
+                    if let RunItem::Drawing(d) = item {
+                        if let Some(pic) = d.picture.as_mut() {
+                            f(pic);
+                        }
                     }
                 }
             }
@@ -500,8 +499,9 @@ pub enum RunItem {
     Break(BreakKind),
     /// `w:noBreakHyphen`。
     NoBreakHyphen,
-    /// 图片、形状、嵌入对象（`w:drawing` / `w:pict` / `w:object`）。
-    Drawing(Drawing),
+    /// 图片、形状、嵌入对象（`w:drawing` / `w:pict` / `w:object`）。装箱：run 里
+    /// 几乎都是文字，不该让每一项都按一张图的大小占地方。
+    Drawing(Box<Drawing>),
     /// `w:sym`：用指定字体画的一个符号（Wingdings 的勾选框之类）。
     Sym {
         font: Option<String>,
@@ -524,6 +524,42 @@ pub struct Drawing {
     pub extent: Option<(i64, i64)>,
     /// 图片（`pic:pic`）。形状、图表、组合都不是。
     pub picture: Option<Picture>,
+    /// 浮动的（`wp:anchor`）怎么摆、怎么让文字。
+    pub anchor: Option<Anchor>,
+}
+
+/// `wp:anchor`：浮动对象的位置与环绕，原样记下。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Anchor {
+    pub h: AnchorPos,
+    pub v: AnchorPos,
+    pub wrap: WrapKind,
+    /// `@behindDoc`：画在文字下面。
+    pub behind: bool,
+    /// `@distT`、`@distB`、`@distL`、`@distR`：与文字的距离，EMU。
+    pub dist: [i64; 4],
+}
+
+/// `wp:positionH` / `wp:positionV`。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AnchorPos {
+    /// `@relativeFrom`：page、margin、column、paragraph、line……
+    pub from: Option<String>,
+    /// `wp:posOffset`，EMU。
+    pub offset: Option<i64>,
+    /// `wp:align`：left、center、right、top、bottom……
+    pub align: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WrapKind {
+    /// `wp:wrapNone`：不让文字，画在文字上面或下面。
+    #[default]
+    None,
+    TopAndBottom,
+    Square,
+    Tight,
+    Through,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

@@ -10,8 +10,8 @@ use super::props::{parse_ppr, parse_rpr, parse_sect_pr};
 use super::table::{parse_grid, parse_tbl_pr, parse_tc_pr, parse_tr_pr};
 use super::{attr, resolve_entity, skip, xml_err, Rd};
 use crate::docx::model::{
-    Block, BreakKind, Cell, Drawing, FieldChar, LinkRef, Para, Picture, Row, Run, RunItem, SectPr,
-    Story, Table,
+    Anchor, AnchorPos, Block, BreakKind, Cell, Drawing, FieldChar, LinkRef, Para, Picture, Row,
+    Run, RunItem, SectPr, Story, Table, WrapKind,
 };
 use crate::error::Result;
 
@@ -183,14 +183,16 @@ fn parse_run(r: &mut Rd) -> Result<Run> {
                         run.items.push(RunItem::Text(text));
                     }
                 }
-                "drawing" => run.items.push(RunItem::Drawing(parse_drawing(r)?)),
+                "drawing" => run
+                    .items
+                    .push(RunItem::Drawing(Box::new(parse_drawing(r)?))),
                 // VML 与嵌入对象：本版本只取替代文字。
                 name @ ("pict" | "object") => {
                     let name = name.to_string();
-                    run.items.push(RunItem::Drawing(Drawing {
+                    run.items.push(RunItem::Drawing(Box::new(Drawing {
                         alt: find_alt_text(r, &name)?,
                         ..Default::default()
-                    }));
+                    })));
                 }
                 // 域代码（`PAGE`、`TOC \o "1-3"`）是给 Word 看的指令，不是正文，
                 // 记下来给排版认页码域用。
@@ -277,19 +279,76 @@ fn read_text(r: &mut Rd, start: &BytesStart) -> Result<String> {
 
 /// 跳过一棵图片子树，顺便把 `wp:docPr/@descr`（替代文字）捞出来。
 /// 有替代文字的话，占位提示就能说清楚「这里原本是什么图」。
-/// `w:drawing`：行内还是浮动、显示大小、替代文字，是图片的话取图片与裁剪。
-/// 组合、形状、图表都不当图片。
+/// `w:drawing`：行内还是浮动、显示大小、替代文字，是图片的话取图片与裁剪；浮动的
+/// 再取位置与环绕。组合、形状、图表都不当图片。
 fn parse_drawing(r: &mut Rd) -> Result<Drawing> {
     let mut d = Drawing::default();
     let mut depth = 1usize;
     // 组合、图表里也可能有 `pic:pic`，但那不是一张单独的图。
     let mut composite = false;
+    // 正在读哪个方向的位置（true 是横向），里面的文字是偏移还是对齐。
+    let mut axis: Option<bool> = None;
+    let mut value: Option<&'static str> = None;
+    // `@simplePos="1"`：位置写在 `wp:simplePos` 里，相对纸张左上角。
+    let mut simple = false;
     loop {
         match r.read_event().map_err(xml_err)? {
             Event::Start(e) if e.local_name().as_ref() == "drawing" => depth += 1,
             Event::Start(e) | Event::Empty(e) => match e.local_name().as_ref() {
                 "inline" => d.inline = true,
-                "anchor" => d.inline = false,
+                "anchor" => {
+                    d.inline = false;
+                    let n = |k| {
+                        attr(&e, k)
+                            .and_then(|v| v.trim().parse::<i64>().ok())
+                            .unwrap_or(0)
+                    };
+                    simple = attr(&e, "simplePos").is_some_and(|v| v == "1" || v == "true");
+                    d.anchor = Some(Anchor {
+                        behind: attr(&e, "behindDoc").is_some_and(|v| v == "1" || v == "true"),
+                        dist: [n("distT"), n("distB"), n("distL"), n("distR")],
+                        ..Default::default()
+                    });
+                }
+                "simplePos" if simple => {
+                    if let Some(a) = d.anchor.as_mut() {
+                        let n = |k| attr(&e, k).and_then(|v| v.trim().parse::<i64>().ok());
+                        a.h = AnchorPos {
+                            from: Some("page".into()),
+                            offset: n("x"),
+                            align: None,
+                        };
+                        a.v = AnchorPos {
+                            from: Some("page".into()),
+                            offset: n("y"),
+                            align: None,
+                        };
+                    }
+                }
+                name @ ("positionH" | "positionV") if !simple => {
+                    axis = Some(name == "positionH");
+                    if let Some(a) = d.anchor.as_mut() {
+                        let pos = if name == "positionH" {
+                            &mut a.h
+                        } else {
+                            &mut a.v
+                        };
+                        pos.from = attr(&e, "relativeFrom");
+                    }
+                }
+                "posOffset" => value = Some("offset"),
+                "align" if axis.is_some() => value = Some("align"),
+                "wrapNone" | "wrapTopAndBottom" | "wrapSquare" | "wrapTight" | "wrapThrough" => {
+                    if let Some(a) = d.anchor.as_mut() {
+                        a.wrap = match e.local_name().as_ref() {
+                            "wrapTopAndBottom" => WrapKind::TopAndBottom,
+                            "wrapSquare" => WrapKind::Square,
+                            "wrapTight" => WrapKind::Tight,
+                            "wrapThrough" => WrapKind::Through,
+                            _ => WrapKind::None,
+                        };
+                    }
+                }
                 "extent" if d.extent.is_none() => {
                     let n = |k| attr(&e, k).and_then(|v| v.trim().parse::<i64>().ok());
                     d.extent = n("cx").zip(n("cy"));
@@ -315,12 +374,27 @@ fn parse_drawing(r: &mut Rd) -> Result<Drawing> {
                 }
                 _ => {}
             },
-            Event::End(e) if e.local_name().as_ref() == "drawing" => {
-                depth -= 1;
-                if depth == 0 {
-                    break;
+            Event::Text(t) => {
+                if let (Some(h), Some(kind), Some(a)) = (axis, value, d.anchor.as_mut()) {
+                    let pos = if h { &mut a.h } else { &mut a.v };
+                    let text = t.trim().to_string();
+                    match kind {
+                        "offset" => pos.offset = text.parse().ok(),
+                        _ => pos.align = Some(text),
+                    }
                 }
             }
+            Event::End(e) => match e.local_name().as_ref() {
+                "drawing" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                "positionH" | "positionV" => axis = None,
+                "posOffset" | "align" => value = None,
+                _ => {}
+            },
             Event::Eof => break,
             _ => {}
         }

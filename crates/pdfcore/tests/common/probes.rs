@@ -465,6 +465,97 @@ pub fn all() -> Vec<Probe> {
     body += &paras(4, "", 60);
     add("images_inline", builder.body(&body));
 
+    // 浮动图片：浮于文字上方、衬于文字下方（公章），按页面、版心、段落、行定位，
+    // 上下型环绕把字挤到图下面，跨页时跟着锚点段落走。
+    let mut builder = DocxBuilder::new();
+    let seal = builder.media("seal.png", png(60, 60));
+    let photo = builder.media(
+        "photo.jpeg",
+        super::images::jpeg_q(
+            &image::DynamicImage::ImageRgb8(super::images::photo(80, 50)),
+            90,
+        ),
+    );
+    let floating = |rid: &str,
+                    w: u32,
+                    h: u32,
+                    h_pos: &str,
+                    v_pos: &str,
+                    wrap: &str,
+                    behind: bool| {
+        format!(
+            r#"<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="251659264" behindDoc="{}" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/>{h_pos}{v_pos}<wp:extent cx="{}" cy="{}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>{wrap}<wp:docPr id="1" name="p"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="1" name="p"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{}" cy="{}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#,
+            behind as u8,
+            w * 12700,
+            h * 12700,
+            w * 12700,
+            h * 12700
+        )
+    };
+    let pos = |axis: &str, from: &str, inner: String| {
+        format!(r#"<wp:position{axis} relativeFrom="{from}">{inner}</wp:position{axis}>"#)
+    };
+    let off = |pt: u32| format!("<wp:posOffset>{}</wp:posOffset>", pt * 12700);
+    let align = |a: &str| format!("<wp:align>{a}</wp:align>");
+    let mut body = String::new();
+    for i in 0..4 {
+        body += &paras(4, "", 55 + i * 9);
+        body += &format!(
+            "<w:p>{}{}</w:p>",
+            run("盖章处"),
+            floating(
+                &seal,
+                60,
+                60,
+                &pos("H", "margin", align("right")),
+                &pos("V", "paragraph", off(0)),
+                "<wp:wrapNone/>",
+                i % 2 == 1
+            )
+        );
+        body += &paras(2, "", 70);
+        body += &format!(
+            "<w:p>{}{}</w:p>",
+            run("插图"),
+            floating(
+                &photo,
+                160,
+                100,
+                &pos("H", "margin", align("center")),
+                &pos("V", "paragraph", off(0)),
+                "<wp:wrapTopAndBottom/>",
+                false
+            )
+        );
+        body += &format!(
+            "<w:p>{}{}</w:p>",
+            run(&filler(i, 20)),
+            floating(
+                &seal,
+                30,
+                30,
+                &pos("H", "page", off(40 + i as u32 * 10)),
+                &pos("V", "line", off(5)),
+                "<wp:wrapNone/>",
+                false
+            )
+        );
+    }
+    body += &format!(
+        "<w:p>{}{}</w:p>",
+        run("页面定位"),
+        floating(
+            &photo,
+            80,
+            50,
+            &pos("H", "page", off(420)),
+            &pos("V", "page", off(60)),
+            "<wp:wrapNone/>",
+            false
+        )
+    );
+    add("images_floating", builder.body(&body));
+
     let numbering = r#"<w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="hybridMultilevel"/>
 <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="chineseCounting"/><w:lvlText w:val="%1、"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="420" w:hanging="420"/></w:pPr></w:lvl>
 <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="840" w:hanging="420"/></w:pPr></w:lvl>

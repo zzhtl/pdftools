@@ -376,6 +376,167 @@ fn inline_images_are_drawn() {
         && p.color.iter().all(|c| (c - 0.933).abs() < 0.01)));
 }
 
+/// 浮动的图（电子公章靠这个），对照 LibreOffice 实测：按页面、版心、段落定位；
+/// 衬于文字下方的先画、浮于文字上方的后画；上下型环绕把碰到的行挪到图下面；
+/// 锚点段落挪到下一页，图跟着走；四周型按上下型近似排并报告。
+#[test]
+fn floating_images_are_positioned() {
+    use common::pdfpaths;
+    if !require_cjk_font() {
+        return;
+    }
+    let png = {
+        let img = image::DynamicImage::ImageRgb8(common::images::photo(20, 20));
+        let mut bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        bytes
+    };
+    let pos = |axis: &str, from: &str, inner: &str| {
+        format!(r#"<wp:position{axis} relativeFrom="{from}">{inner}</wp:position{axis}>"#)
+    };
+    let off = |pt: f32| format!("<wp:posOffset>{}</wp:posOffset>", (pt * 12700.0) as i64);
+    let floating = |rid: &str, w: f32, h: f32, place: &str, wrap: &str, behind: bool| {
+        format!(
+            r#"<w:r><w:drawing><wp:anchor behindDoc="{}" distT="0" distB="0" distL="0" distR="0" simplePos="0"><wp:simplePos x="0" y="0"/>{place}<wp:extent cx="{}" cy="{}"/>{wrap}<wp:docPr id="1" name="p"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill><a:blip r:embed="{rid}"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#,
+            behind as u8,
+            (w * 12700.0) as i64,
+            (h * 12700.0) as i64
+        )
+    };
+    // 固定行距 20pt：一页放 34 行，与字体无关。
+    let p = |runs: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="400" w:lineRule="exact"/></w:pPr>{runs}</w:p>"#
+        )
+    };
+    let text = |t: &str| format!("<w:r><w:t>{t}</w:t></w:r>");
+    let convert_with = |name: &str, body: &dyn Fn(&str) -> String| {
+        let mut builder = DocxBuilder::new();
+        let rid = builder.media("seal.png", png.clone());
+        convert(&builder.body(&body(&rid)).build(name))
+    };
+
+    // 浮于文字上方：相对纸张左上角 (300, 200)；衬于文字下方：相对段落。
+    let report = convert_with("floating_layers.docx", &|rid: &str| {
+        p(&(text("公章")
+            + &floating(
+                rid,
+                40.0,
+                40.0,
+                &(pos("H", "page", &off(300.0)) + &pos("V", "page", &off(200.0))),
+                "<wp:wrapNone/>",
+                false,
+            )))
+            + &p(&(text("底图")
+                + &floating(
+                    rid,
+                    30.0,
+                    30.0,
+                    &(pos("H", "column", &off(0.0)) + &pos("V", "paragraph", &off(0.0))),
+                    "<wp:wrapNone/>",
+                    true,
+                )))
+    });
+    let pdf = &report.value.pdf;
+    let placed = &pdfpaths::images(pdf)[0];
+    assert!(
+        placed.iter().any(|i| {
+            let [x0, y0, x1, y1] = i.bbox;
+            (x0 - 300.0).abs() < 0.01
+                && (y1 - (841.9 - 200.0)).abs() < 0.01
+                && (x1 - x0 - 40.0).abs() < 0.01
+                && (y1 - y0 - 40.0).abs() < 0.01
+        }),
+        "{placed:?}"
+    );
+    // 每个 Do 画的是哪张图：看它前面最近的 cm 给的宽度。
+    let ops = all_content_ops(pdf);
+    let first_text = ops.iter().position(|o| o.operator == "BT").unwrap();
+    let last_text = ops.iter().rposition(|o| o.operator == "ET").unwrap();
+    let drawn_at = |width: f32| {
+        let mut current = 0.0;
+        ops.iter()
+            .enumerate()
+            .find_map(|(i, o)| match o.operator.as_str() {
+                "cm" => {
+                    current = o.operands[0].as_float().unwrap_or(0.0);
+                    None
+                }
+                "Do" if (current - width).abs() < 0.01 => Some(i),
+                _ => None,
+            })
+            .expect("找不到这张图")
+    };
+    assert!(drawn_at(30.0) < first_text, "衬于文字下方的图要先画");
+    assert!(drawn_at(40.0) > last_text, "浮于文字上方的图要后画");
+
+    // 上下型：图在段落顶上，这一段的字挪到图下面。
+    let report = convert_with("floating_top_bottom.docx", &|rid: &str| {
+        p(&(text("上下型")
+            + &floating(
+                rid,
+                100.0,
+                60.0,
+                &(pos("H", "margin", &off(0.0)) + &pos("V", "paragraph", &off(0.0))),
+                "<wp:wrapTopAndBottom/>",
+                false,
+            )))
+            + &p(&text("之后"))
+    });
+    let pdf = &report.value.pdf;
+    let image = &pdfpaths::images(pdf)[0][0];
+    let lines = &common::pdftext::extract(pdf)[0].lines;
+    assert!((image.bbox[3] - (841.9 - 72.0)).abs() < 0.01, "{image:?}");
+    assert!(
+        lines[0].y < image.bbox[1],
+        "字要在图下面：{lines:?} {image:?}"
+    );
+    assert!((lines[0].y - lines[1].y - 20.0).abs() < 0.01);
+
+    // 前面 34 行占满第一页：锚点段落排到第二页，图跟着到第二页。
+    let report = convert_with("floating_next_page.docx", &|rid: &str| {
+        (0..34)
+            .map(|i| p(&text(&format!("正文{i}"))))
+            .collect::<String>()
+            + &p(&(text("锚点")
+                + &floating(
+                    rid,
+                    20.0,
+                    20.0,
+                    &(pos("H", "margin", &off(0.0)) + &pos("V", "paragraph", &off(0.0))),
+                    "<wp:wrapNone/>",
+                    false,
+                )))
+    });
+    let placed = pdfpaths::images(&report.value.pdf);
+    assert_eq!((placed[0].len(), placed[1].len()), (0, 1), "{placed:?}");
+
+    // 四周型：按上下型排，并且说清楚。
+    let report = convert_with("floating_square.docx", &|rid: &str| {
+        p(&(text("四周型")
+            + &floating(
+                rid,
+                40.0,
+                40.0,
+                &(pos("H", "margin", &off(0.0)) + &pos("V", "paragraph", &off(0.0))),
+                r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+                false,
+            )))
+    });
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.detail.contains("按上下型排")),
+        "{:?}",
+        report.warnings
+    );
+}
+
 /// Word 默认插入的「网格型」表格只写了 `w:tblStyle`：框线、单元格里的段距都来自表格样式；
 /// 首行的条件格式铺底纹（加粗在 `ir` 的单元测试里验：宋体没有粗体时是合成的，字体名看不出）。
 #[test]

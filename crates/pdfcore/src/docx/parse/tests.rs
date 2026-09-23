@@ -1,7 +1,9 @@
 //! 解析层：只看「读到了什么」，不涉及层叠与排版。
 
 use super::*;
-use crate::docx::model::{Align, Block, Drawing, Para, Picture, RunItem};
+use crate::docx::model::{
+    Align, Anchor, AnchorPos, Block, Drawing, Para, Picture, RunItem, WrapKind,
+};
 
 fn body(inner: &str) -> Document {
     let xml = format!(
@@ -74,7 +76,7 @@ fn alternate_content_yields_one_branch() {
     let items: Vec<&RunItem> = ps[0].runs.iter().flat_map(|r| &r.items).collect();
     assert_eq!(
         items,
-        vec![&RunItem::Drawing(Drawing::default())],
+        vec![&RunItem::Drawing(Box::default())],
         "只该有 Fallback 里那一个"
     );
     assert_eq!(ps.len(), 2);
@@ -104,10 +106,10 @@ fn attribute_values_are_unescaped() {
     let items: Vec<&RunItem> = paras(&doc)[0].runs.iter().flat_map(|r| &r.items).collect();
     assert_eq!(
         items,
-        vec![&RunItem::Drawing(Drawing {
+        vec![&RunItem::Drawing(Box::new(Drawing {
             alt: Some("\"公章\" & 签名".into()),
             ..Default::default()
-        })]
+        }))]
     );
 }
 
@@ -388,7 +390,7 @@ fn inline_pictures_are_read() {
         pic(&group)
     ));
     let drawing = |i: usize| match &paras(&doc)[i].runs[0].items[0] {
-        RunItem::Drawing(d) => d.clone(),
+        RunItem::Drawing(d) => (**d).clone(),
         other => panic!("{other:?}"),
     };
     assert_eq!(
@@ -401,7 +403,74 @@ fn inline_pictures_are_read() {
                 target: Some("rId7".into()),
                 crop: [25_000, 0, 10_000, 0],
             }),
+            anchor: None,
         }
     );
     assert_eq!(drawing(1).picture, None);
+}
+
+/// 浮动的图：位置（偏移或对齐）、环绕、衬于文字下方、与文字的距离；`simplePos`
+/// 写的是相对纸张左上角的位置。
+#[test]
+fn anchored_pictures_are_read() {
+    let anchor = |attrs: &str, inner: &str| {
+        format!(
+            r#"<w:p><w:r><w:drawing><wp:anchor {attrs}>{inner}<wp:extent cx="12700" cy="25400"/><wp:docPr id="1" name="印章"/></wp:anchor></w:drawing></w:r></w:p>"#
+        )
+    };
+    let doc = body(
+        &(anchor(
+            r#"behindDoc="1" distT="12700" distB="0" distL="25400" distR="0" simplePos="0""#,
+            r#"<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>center</wp:align></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>-63500</wp:posOffset></wp:positionV><wp:wrapTopAndBottom/>"#,
+        ) + &anchor(
+            r#"behindDoc="0" simplePos="1""#,
+            r#"<wp:simplePos x="127000" y="254000"/><wp:positionH relativeFrom="column"><wp:posOffset>1</wp:posOffset></wp:positionH><wp:wrapNone/>"#,
+        )),
+    );
+    let anchors: Vec<Anchor> = paras(&doc)
+        .iter()
+        .map(|p| match &p.runs[0].items[0] {
+            RunItem::Drawing(d) => match &**d {
+                Drawing {
+                    inline: false,
+                    anchor: Some(a),
+                    extent: Some((12700, 25400)),
+                    ..
+                } => a.clone(),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        anchors[0],
+        Anchor {
+            h: AnchorPos {
+                from: Some("margin".into()),
+                offset: None,
+                align: Some("center".into()),
+            },
+            v: AnchorPos {
+                from: Some("paragraph".into()),
+                offset: Some(-63500),
+                align: None,
+            },
+            wrap: WrapKind::TopAndBottom,
+            behind: true,
+            dist: [12700, 0, 25400, 0],
+        }
+    );
+    let page = |offset| AnchorPos {
+        from: Some("page".into()),
+        offset: Some(offset),
+        align: None,
+    };
+    assert_eq!(
+        (anchors[1].h.clone(), anchors[1].v.clone()),
+        (page(127000), page(254000))
+    );
+    assert_eq!(
+        (anchors[1].wrap, anchors[1].behind),
+        (WrapKind::None, false)
+    );
 }

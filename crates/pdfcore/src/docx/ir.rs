@@ -50,6 +50,62 @@ pub enum ObjectContent {
     Missing { alt: Option<String> },
 }
 
+/// 浮动的图（`wp:anchor`）：不占行里的位置，放段落时按锚点定位。
+#[derive(Debug, Clone, PartialEq)]
+pub struct FloatObject {
+    pub width: f32,
+    pub height: f32,
+    pub content: ObjectContent,
+    pub h: Placement,
+    pub v: Placement,
+    pub wrap: Wrap,
+    /// 画在文字下面（`@behindDoc`）；否则画在上面。
+    pub behind: bool,
+    /// 上、下、左、右与文字的距离（点）。
+    pub dist: [f32; 4],
+}
+
+/// 一个方向上的位置：相对什么，偏移多少或者怎么对齐。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placement {
+    pub from: RelativeFrom,
+    pub at: At,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelativeFrom {
+    Page,
+    Margin,
+    Column,
+    Paragraph,
+    Line,
+    /// 横向相对锚点所在的字。按所在的栏近似。
+    Character,
+    LeftMargin,
+    RightMargin,
+    TopMargin,
+    BottomMargin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum At {
+    /// 从参照区的起点（左边、上边）量的偏移（点），正数往右、往下。
+    Offset(f32),
+    /// 靠参照区的起点、居中、靠终点（`wp:align`）。
+    Start,
+    Center,
+    End,
+}
+
+/// 浮动的图怎么让文字。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wrap {
+    /// 不让文字（`wp:wrapNone`）。
+    None,
+    /// 上下型：图所在的那一段横条上不排字，碰到的行挪到图下面。
+    TopAndBottom,
+}
+
 /// EMU（DrawingML 的长度单位）换成点。
 fn emu(v: i64) -> f32 {
     v as f32 / 12_700.0
@@ -324,6 +380,8 @@ pub struct Paragraph {
     pub spans: Vec<Span>,
     /// 行内对象，按在文字里出现的顺序，见 [`OBJECT`]。
     pub objects: Vec<InlineObject>,
+    /// 锚在这一段上的浮动对象。
+    pub floats: Vec<FloatObject>,
     /// 段落标记（¶）的格式。空段落的行高由它决定。
     pub mark: RunStyle,
 }
@@ -564,8 +622,10 @@ pub struct Document {
     pub default_tab_stop: f32,
     /// 不认识、按阿拉伯数字输出的编号格式。
     pub num_format_fallbacks: Vec<String>,
-    /// 画成灰框的行内对象（形状、图表、找不到的图片）有几个。
+    /// 画成灰框的对象（形状、图表、找不到的图片）有几个。
     pub missing_objects: usize,
+    /// 文字绕着图走的环绕按上下型近似排了几个。
+    pub approximated_wraps: usize,
     pub blocks: Vec<Block>,
 }
 
@@ -584,6 +644,7 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
         fonts: &fonts,
         calib,
         missing: Default::default(),
+        approximated: Default::default(),
     };
     let mut blocks = Vec::with_capacity(doc.body.len());
     let mut ends: Vec<(&model::SectPr, Range<usize>)> = Vec::new();
@@ -649,6 +710,7 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
             .map(|l| l.fallbacks.into_iter().collect())
             .unwrap_or_default(),
         missing_objects: ctx.missing.get(),
+        approximated_wraps: ctx.approximated.get(),
         blocks,
     }
 }
@@ -691,8 +753,10 @@ struct Ctx<'a> {
     resolver: &'a Resolver<'a>,
     fonts: &'a FontNames<'a>,
     calib: &'a Calib,
-    /// 画成灰框的行内对象有几个。
+    /// 画成灰框的对象有几个。
     missing: std::cell::Cell<usize>,
+    /// 按上下型近似排的环绕（四周型、紧密型、穿越型）有几个。
+    approximated: std::cell::Cell<usize>,
 }
 
 /// `table`：段落在表格里时表格样式给的格式。
@@ -715,6 +779,7 @@ fn push_paragraph(
     let mut spans: Vec<Span> = Vec::with_capacity(p.runs.len());
     let mut drawings = Vec::new();
     let mut objects = Vec::new();
+    let mut floats = Vec::new();
     let images = calib.images == Images::Inline;
     // 页码类域的结果文字标上记号，排版时代入真实的数。重写前不认域，结果照原样显示。
     let fields_on = calib.header_footer == HeaderFooter::Drawn;
@@ -779,30 +844,40 @@ fn push_paragraph(
                 RunItem::NoBreakHyphen => push("\u{2011}".into(), &style),
                 RunItem::Drawing(d) if images && d.inline => match d.extent {
                     Some((cx, cy)) if cx > 0 && cy > 0 => {
-                        let target = d
-                            .picture
-                            .as_ref()
-                            .and_then(|p| Some((p.target.clone()?, p.crop)));
-                        let content = match target {
-                            Some((part, crop)) => ObjectContent::Image {
-                                part,
-                                crop: crop.map(|c| c as f32 / 100_000.0),
-                            },
-                            None => {
-                                ctx.missing.set(ctx.missing.get() + 1);
-                                ObjectContent::Missing { alt: d.alt.clone() }
-                            }
-                        };
                         objects.push(InlineObject {
                             width: emu(cx),
                             height: emu(cy),
-                            content,
+                            content: object_content(d, ctx),
                         });
                         push(OBJECT.to_string(), &style);
                     }
                     // 零大小的图看不见，也不占位置。
                     _ => {}
                 },
+                RunItem::Drawing(d) if images && d.anchor.is_some() => {
+                    let size = d.extent.filter(|(cx, cy)| *cx > 0 && *cy > 0);
+                    if let (Some(a), Some((cx, cy))) = (&d.anchor, size) {
+                        let wrap = match a.wrap {
+                            model::WrapKind::None => Wrap::None,
+                            model::WrapKind::TopAndBottom => Wrap::TopAndBottom,
+                            // 文字绕着图走的几种，本版本按上下型排。
+                            _ => {
+                                ctx.approximated.set(ctx.approximated.get() + 1);
+                                Wrap::TopAndBottom
+                            }
+                        };
+                        floats.push(FloatObject {
+                            width: emu(cx),
+                            height: emu(cy),
+                            content: object_content(d, ctx),
+                            h: placement(&a.h, true),
+                            v: placement(&a.v, false),
+                            wrap,
+                            behind: a.behind,
+                            dist: a.dist.map(emu),
+                        });
+                    }
+                }
                 RunItem::Drawing(d) => drawings.push(d.alt.clone()),
                 RunItem::FieldChar(FieldChar::Begin) if fields_on => fields.begin(),
                 RunItem::FieldCode(code) if fields_on => fields.code(code),
@@ -913,6 +988,7 @@ fn push_paragraph(
     let mark = run_style(&mark_rpr, fonts, calib);
     let mut para = paragraph(&ppr, text, spans, mark, char_size);
     para.objects = objects;
+    para.floats = floats;
     para.numbering_dropped = dropped;
     para.number = number;
     para.style_id = ppr
@@ -926,6 +1002,50 @@ fn push_paragraph(
             text: Vec::new(),
         }));
     }
+}
+
+/// 图片对象画什么：找得到的图片，或者画不出来的（形状、图表、找不到的图）。
+fn object_content(d: &model::Drawing, ctx: &Ctx) -> ObjectContent {
+    match d
+        .picture
+        .as_ref()
+        .and_then(|p| Some((p.target.clone()?, p.crop)))
+    {
+        Some((part, crop)) => ObjectContent::Image {
+            part,
+            crop: crop.map(|c| c as f32 / 100_000.0),
+        },
+        None => {
+            ctx.missing.set(ctx.missing.get() + 1);
+            ObjectContent::Missing { alt: d.alt.clone() }
+        }
+    }
+}
+
+/// `wp:positionH` / `wp:positionV` 换成排版用的位置。没写参照时横向相对栏、
+/// 纵向相对段落（Word 的缺省）。
+fn placement(p: &model::AnchorPos, horizontal: bool) -> Placement {
+    let from = match p.from.as_deref() {
+        Some("page") => RelativeFrom::Page,
+        Some("margin") => RelativeFrom::Margin,
+        Some("column") => RelativeFrom::Column,
+        Some("paragraph") => RelativeFrom::Paragraph,
+        Some("line") => RelativeFrom::Line,
+        Some("character") => RelativeFrom::Character,
+        Some("leftMargin" | "insideMargin") => RelativeFrom::LeftMargin,
+        Some("rightMargin" | "outsideMargin") => RelativeFrom::RightMargin,
+        Some("topMargin") => RelativeFrom::TopMargin,
+        Some("bottomMargin") => RelativeFrom::BottomMargin,
+        _ if horizontal => RelativeFrom::Column,
+        _ => RelativeFrom::Paragraph,
+    };
+    let at = match p.align.as_deref() {
+        Some("center") => At::Center,
+        Some("right" | "bottom" | "outside") => At::End,
+        Some(_) => At::Start,
+        None => At::Offset(p.offset.map(emu).unwrap_or(0.0)),
+    };
+    Placement { from, at }
 }
 
 /// 把 `w:rFonts` 的字体槽落实成字体名：主题字体要查主题部件。
@@ -1150,6 +1270,7 @@ fn paragraph(
         text,
         spans,
         objects: Vec::new(),
+        floats: Vec::new(),
         mark,
     }
 }

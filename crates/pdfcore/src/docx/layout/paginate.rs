@@ -109,6 +109,16 @@ pub(super) struct Paginator {
     heights: Vec<f32>,
     /// 各页放了几行。
     lines: Vec<usize>,
+    /// 当前页上上下型环绕的图挡住的横条（与 `used` 同一个量法），碰到的行挪到下面。
+    bands: Vec<(f32, f32)>,
+}
+
+/// 一段的浮动对象放在了哪一页、放之前各层有多少东西：段落挪到下一页时撤回。
+struct FloatMark {
+    page: usize,
+    under: usize,
+    over: usize,
+    bands: usize,
 }
 
 struct OpenBox {
@@ -145,6 +155,7 @@ impl Paginator {
             soft_top: false,
             heights: Vec::new(),
             lines: vec![0],
+            bands: Vec::new(),
         }
     }
 
@@ -182,6 +193,7 @@ impl Paginator {
             soft_top,
             heights: Vec::new(),
             lines: vec![0],
+            bands: Vec::new(),
         }
     }
 
@@ -193,7 +205,7 @@ impl Paginator {
             .zip(self.heights)
             .zip(self.lines)
             .map(|((p, height), lines)| StoryPage {
-                ops: p.ops,
+                ops: p.under.into_iter().chain(p.ops).chain(p.over).collect(),
                 height,
                 lines,
             })
@@ -234,6 +246,7 @@ impl Paginator {
             .push(Page::new(&frame.page, number, self.section, kind));
         self.heights.push(self.used);
         self.lines.push(0);
+        self.bands.clear();
         self.used = 0.0;
         self.last_after = 0.0;
     }
@@ -357,7 +370,13 @@ impl Paginator {
                 // 框的下边框也要放得下：跨页时前一页照样收口。
                 let reserve = para.decor.as_ref().map_or(0.0, ParaDecor::bottom);
                 let mut next = 0;
+                // 浮动对象跟着段落的第一行定在哪一页；第一行挪走时撤回重放。
+                let mut floats: Option<FloatMark> = None;
                 while next < lines.len() {
+                    if next == 0 && floats.is_none() && !para.floats.is_empty() {
+                        floats = Some(self.place_floats(para));
+                    }
+                    self.skip_bands(lines[next].height);
                     let lead = para.decor.as_ref().map_or(0.0, |d| self.lead(d));
                     let mut n = fit_lines(
                         &lines[next..],
@@ -365,10 +384,19 @@ impl Paginator {
                         self.frame.capacity - reserve,
                         self.at_page_top(),
                     );
-                    if para.widow_control {
+                    // 一次放得下的几行里有碰到图的：放到它前面为止，下一轮再绕过去。
+                    let clear = self.clear_of_bands(&lines[next..next + n], self.used + lead);
+                    if clear < n {
+                        n = clear;
+                    } else if para.widow_control {
                         n = widow_orphan(lines.len(), next, n, &lines[..], self.at_page_top());
                     }
                     if n == 0 {
+                        if next == 0 {
+                            if let Some(mark) = floats.take() {
+                                self.undo_floats(mark);
+                            }
+                        }
                         self.new_page();
                         continue;
                     }
@@ -396,11 +424,112 @@ impl Paginator {
         self.last_after = para.space_after;
     }
 
+    /// 放一段的浮动对象：按页面（或者所在的栏、段落）定位，画进正文下面或上面的一层；
+    /// 上下型的记下它挡住的横条。单元格、页眉页脚这类故事没有纸张，都相对栏与段落。
+    fn place_floats(&mut self, para: &ParaBox) -> FloatMark {
+        use ir::{At, RelativeFrom as F};
+        let index = self.page_index();
+        let page = self.pages.last().expect("至少有一页");
+        let mark = FloatMark {
+            page: index,
+            under: page.under.len(),
+            over: page.over.len(),
+            bands: self.bands.len(),
+        };
+        let story = !self.schedule.is_empty();
+        let geom = self.frame.page;
+        // 离纸张上边多远（故事里是离故事顶端多远）。
+        let from_top = |used: f32| geom.h_pt - self.y(used);
+        let body_top = from_top(0.0);
+        let para_top = from_top(self.used);
+        let place = |(start, len): (f32, f32), size: f32, at: At| match at {
+            At::Offset(o) => start + o,
+            At::Start => start,
+            At::Center => start + (len - size) / 2.0,
+            At::End => start + len - size,
+        };
+        let mut placed = Vec::new();
+        for f in &para.floats {
+            let h_area = match f.h.from {
+                _ if story => para.column,
+                F::Page => (0.0, geom.w_pt),
+                F::Margin => (geom.margin_left, geom.content_width()),
+                F::LeftMargin => (0.0, geom.margin_left),
+                F::RightMargin => (geom.w_pt - geom.margin_right, geom.margin_right),
+                _ => para.column,
+            };
+            let v_area = match f.v.from {
+                _ if story => (para_top, 0.0),
+                F::Page => (0.0, geom.h_pt),
+                F::Margin => (geom.margin_top, geom.content_height()),
+                F::TopMargin => (0.0, geom.margin_top),
+                F::BottomMargin => (geom.h_pt - geom.margin_bottom, geom.margin_bottom),
+                _ => (para_top, 0.0),
+            };
+            let x = place(h_area, f.width, f.h.at);
+            let top = place(v_area, f.height, f.v.at);
+            let rect = [x, geom.h_pt - top - f.height, f.width, f.height];
+            if f.wrap == ir::Wrap::TopAndBottom {
+                self.bands.push((
+                    top - f.dist[0] - body_top,
+                    top + f.height + f.dist[1] - body_top,
+                ));
+            }
+            placed.push((f.behind, object_ops(&f.content, rect)));
+        }
+        let page = self.pages.last_mut().expect("至少有一页");
+        for (behind, ops) in placed {
+            if behind {
+                page.under.extend(ops);
+            } else {
+                page.over.extend(ops);
+            }
+        }
+        mark
+    }
+
+    fn undo_floats(&mut self, mark: FloatMark) {
+        if let Some(page) = self.pages.get_mut(mark.page) {
+            page.under.truncate(mark.under);
+            page.over.truncate(mark.over);
+        }
+        if mark.page == self.page_index() {
+            self.bands.truncate(mark.bands);
+        }
+    }
+
+    /// 高 `h` 的下一样东西碰到图挡住的横条，就挪到横条下面。
+    fn skip_bands(&mut self, h: f32) {
+        while let Some(&(_, bottom)) = self
+            .bands
+            .iter()
+            .find(|(top, bottom)| *top < self.used + h - FIT_TOLERANCE && *bottom > self.used)
+        {
+            self.used = bottom;
+        }
+    }
+
+    /// 从 `from` 起往下接着放这几行，碰到横条之前放得下几行。
+    fn clear_of_bands(&self, lines: &[Line], mut from: f32) -> usize {
+        for (i, line) in lines.iter().enumerate() {
+            if self
+                .bands
+                .iter()
+                .any(|(top, bottom)| *top < from + line.height - FIT_TOLERANCE && *bottom > from)
+            {
+                return i;
+            }
+            from += line.height;
+        }
+        lines.len()
+    }
+
     /// 放一张表格：一行一行地放，放不下的行在页底拆开（写了 `w:cantSplit`、固定行高的
     /// 整行挪到下一页），续页先重复标题行。一页上的这一截凑齐了才画：纵向合并的格要
     /// 知道自己在这一页上占多高。
     pub fn place_table(&mut self, t: &TableBox) {
         self.close_box();
+        self.skip_bands(t.first_fit());
         let mut part = TablePart::default();
         // 纵向合并的格跨页时，前几页各给了它多高。
         let mut merged = HashMap::new();
@@ -594,6 +723,21 @@ impl TablePart {
         self.height += t.band(f.ri, f.at_top) + f.height;
         self.body = true;
         self.frags.push(f);
+    }
+}
+
+/// 一个浮动对象画出来的操作：`rect` 是左下角与宽高（PDF 坐标）。
+fn object_ops(content: &ir::ObjectContent, [x, y, w, h]: [f32; 4]) -> Vec<PaintOp> {
+    match content {
+        ir::ObjectContent::Image { part, crop } => vec![PaintOp::Image {
+            part: part.clone(),
+            x,
+            y,
+            w,
+            h,
+            crop: *crop,
+        }],
+        ir::ObjectContent::Missing { .. } => super::para::missing_box(x, y, w, h),
     }
 }
 

@@ -105,7 +105,11 @@ impl PaintOp {
 
 #[derive(Debug, Clone)]
 pub struct Page {
+    /// 画在正文下面的（衬于文字下方的浮动图）。
+    pub under: Vec<PaintOp>,
     pub ops: Vec<PaintOp>,
+    /// 画在正文上面的（浮于文字上方的浮动图）。
+    pub over: Vec<PaintOp>,
     /// 纸张大小（点）：(宽, 高)。各节可以不同。
     pub size: (f32, f32),
     /// 页码：显示出来的那个数，不一定等于第几页。
@@ -129,7 +133,9 @@ pub enum PageKind {
 impl Page {
     fn new(page: &ir::PageGeom, number: i32, section: usize, kind: PageKind) -> Self {
         Self {
+            under: Vec::new(),
             ops: Vec::new(),
+            over: Vec::new(),
             size: (page.w_pt, page.h_pt),
             number,
             section,
@@ -245,6 +251,15 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
             format!(
                 "{} 个行内的形状、图表或找不到的图片本版本画不出来，已按原大小画成灰框",
                 doc.missing_objects
+            ),
+        ));
+    }
+    if doc.approximated_wraps > 0 {
+        warnings.push(Warning::new(
+            WarningKind::UnsupportedElement,
+            format!(
+                "{} 张四周型、紧密型或穿越型环绕的图本版本按上下型排：图所在的那一段横条上不排字，文字不绕着图走",
+                doc.approximated_wraps
             ),
         ));
     }
@@ -672,6 +687,7 @@ fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
         text,
         spans,
         objects: Vec::new(),
+        floats: Vec::new(),
         mark: style,
     }
 }

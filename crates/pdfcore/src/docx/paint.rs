@@ -26,7 +26,7 @@ pub fn paint(
     // `.notdef`（GID 0）可能对应好几个不同的缺字。
     let mut notdef: BTreeMap<FontId, BTreeSet<String>> = BTreeMap::new();
     for p in &laid.pages {
-        for op in &p.ops {
+        for op in p.under.iter().chain(&p.ops).chain(&p.over) {
             let PaintOp::Text {
                 font,
                 glyphs,
@@ -80,7 +80,13 @@ pub fn paint(
     for laid_page in &laid.pages {
         let (w, h) = laid_page.size;
         let mut canvas = Canvas::new(w, h);
-        for op in &laid_page.ops {
+        // 衬于文字下方的图、正文、浮于文字上方的图，依次画。
+        for op in laid_page
+            .under
+            .iter()
+            .chain(&laid_page.ops)
+            .chain(&laid_page.over)
+        {
             match op {
                 PaintOp::Text {
                     font,

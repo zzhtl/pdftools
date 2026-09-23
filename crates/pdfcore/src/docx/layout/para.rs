@@ -12,9 +12,25 @@ use super::PaintOp;
 use crate::docx::ir::{self, Align, Grid, LineSpacing};
 use crate::fonts::FontBook;
 
-/// 画不出来的行内对象：浅灰的底、深一点的边。
-const MISSING_FILL: [u8; 3] = [0xEE, 0xEE, 0xEE];
-const MISSING_EDGE: [u8; 3] = [0x99, 0x99, 0x99];
+/// 画不出来的对象：浅灰的底、深一点的边，按原大小画，版面不乱。
+pub(super) fn missing_box(x: f32, y: f32, w: f32, h: f32) -> Vec<PaintOp> {
+    let corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)];
+    std::iter::once(PaintOp::Rect {
+        x,
+        y,
+        w,
+        h,
+        color: [0xEE; 3],
+    })
+    .chain(corners.windows(2).map(|pair| PaintOp::Line {
+        from: pair[0],
+        to: pair[1],
+        width: 0.5,
+        color: [0x99; 3],
+        dash: Vec::new(),
+    }))
+    .collect()
+}
 
 /// 测量环境：一栏的横向位置与宽度，以及排版规则。
 pub(super) struct Env<'a> {
@@ -63,6 +79,10 @@ pub(super) struct ParaBox {
     /// 与下一段合成同一个框（边框、底纹、缩进都相同）。排完所有段落后才知道。
     pub joins_next: bool,
     pub body: ParaBody,
+    /// 锚在这一段上的浮动对象，放第一行时按页面定位。
+    pub floats: Vec<ir::FloatObject>,
+    /// 所在的栏：左边缘的 x 与宽度。浮动对象相对栏定位时用。
+    pub column: (f32, f32),
 }
 
 /// 段落边框与底纹围成的框。横向位置在测量时就定了；纵向由分页决定 ——
@@ -181,6 +201,8 @@ pub(super) fn measure(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> P
         decor: decor(para, env),
         joins_next: false,
         body,
+        floats: para.floats.clone(),
+        column: (env.left, env.width),
     }
 }
 
@@ -453,26 +475,7 @@ fn line(
                     h,
                     crop: *crop,
                 }),
-                // 画不出来的：浅灰底、深灰边的框，版面不乱。
-                ir::ObjectContent::Missing { .. } => {
-                    ops.push(PaintOp::Rect {
-                        x,
-                        y,
-                        w,
-                        h,
-                        color: MISSING_FILL,
-                    });
-                    let corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)];
-                    for pair in corners.windows(2) {
-                        ops.push(PaintOp::Line {
-                            from: pair[0],
-                            to: pair[1],
-                            width: 0.5,
-                            color: MISSING_EDGE,
-                            dash: Vec::new(),
-                        });
-                    }
-                }
+                ir::ObjectContent::Missing { .. } => ops.extend(missing_box(x, y, w, h)),
             }
             x += w + extra;
             continue;
