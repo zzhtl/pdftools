@@ -41,7 +41,9 @@ pub fn render_gray(pdf: &[u8], dpi: f32) -> Vec<Gray> {
             // 白底不透明，预乘与否结果相同。
             let px = pix
                 .data_as_u8_slice()
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|p| {
                     (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32).round() as u8
                 })
