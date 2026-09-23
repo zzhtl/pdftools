@@ -1,6 +1,7 @@
-//! 四个页签共用的部件：文件列表、添加文件的对话框、开始按钮。
+//! 各页签共用的部件：文件列表、添加文件的对话框、开始按钮。
 
 use std::collections::HashSet;
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
 /// 各类输入文件的扩展名，对话框的过滤器与拖进来的文件都按它认。
@@ -13,12 +14,11 @@ pub fn has_extension(path: &Path, exts: &[&str]) -> bool {
         .is_some_and(|e| exts.iter().any(|x| x.eq_ignore_ascii_case(e)))
 }
 
-/// 一个页签的文件列表：去重、排序、选中。
-#[derive(Default)]
-pub struct FileList {
-    pub items: Vec<PathBuf>,
-    /// 选中的文件。按路径记：列表重排、删除之后选中的还是那几个文件。
-    selected: HashSet<PathBuf>,
+/// 一个页签的列表：去重、排序、选中。多半是文件；PDF 页面操作里是一页页的格子。
+pub struct FileList<T = PathBuf> {
+    pub items: Vec<T>,
+    /// 选中的条目。按条目本身记：列表重排、删除之后选中的还是那几个。
+    selected: HashSet<T>,
     /// Shift 连选的起点。
     anchor: Option<usize>,
     /// 成员每变一次（增、删、清空；排序不算）就加一。跟着列表走的后台活（读时间、
@@ -26,15 +26,26 @@ pub struct FileList {
     changes: u64,
 }
 
-impl FileList {
+impl<T> Default for FileList<T> {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            selected: HashSet::new(),
+            anchor: None,
+            changes: 0,
+        }
+    }
+}
+
+impl<T: Clone + Eq + Hash> FileList<T> {
     /// 加进来，`accept` 不认的与已经在列表里的跳过。返回跳过了几个不认的。
     pub fn add(
         &mut self,
-        paths: impl IntoIterator<Item = PathBuf>,
-        accept: impl Fn(&Path) -> bool,
+        paths: impl IntoIterator<Item = T>,
+        accept: impl Fn(&T) -> bool,
     ) -> usize {
         // 查重用集合：一次拖进上万个文件时，逐个在列表里线性查找要卡上好几秒。
-        let mut have: HashSet<PathBuf> = self.items.iter().cloned().collect();
+        let mut have: HashSet<T> = self.items.iter().cloned().collect();
         let before = self.items.len();
         let mut rejected = 0;
         for p in paths {
@@ -52,6 +63,14 @@ impl FileList {
 
     pub fn changes(&self) -> u64 {
         self.changes
+    }
+
+    /// 在 `at` 处插进一批（不查重）。
+    pub fn insert(&mut self, at: usize, items: impl IntoIterator<Item = T>) {
+        let at = at.min(self.items.len());
+        self.items.splice(at..at, items);
+        self.anchor = None;
+        self.changes += 1;
     }
 
     pub fn clear(&mut self) {
@@ -126,7 +145,9 @@ impl FileList {
             }
         }
     }
+}
 
+impl FileList<PathBuf> {
     /// 按文件名自然排序：`第2章` 要排在 `第10章` 前面，
     /// 而字典序会把 `10` 排到 `2` 前面 —— 对「照片 1.jpg ... 照片 10.jpg」这种命名尤其致命。
     pub fn sort_by_name(&mut self) {
@@ -199,29 +220,28 @@ pub fn file_list(
             for i in range {
                 let path = list.items[i].clone();
                 let selected = list.is_selected(i);
-                let resp = ui
-                    .dnd_drag_source(egui::Id::new((id_salt, "row", i)), i, |ui| {
-                        // 每行一样高：只画看得见的行，靠的就是按行高算出哪些行在视口里。
-                        let size = egui::vec2(ui.available_width(), row_height);
-                        let layout = egui::Layout::left_to_right(egui::Align::Center);
-                        ui.allocate_ui_with_layout(size, layout, |ui| {
-                            ui.set_height(row_height);
-                            if ui.small_button("✖").on_hover_text("移出列表").clicked() {
-                                remove = Some(i);
-                            }
-                            let index = egui::Button::selectable(selected, format!("{:>3}", i + 1))
-                                .min_size(egui::vec2(34.0, 0.0));
-                            if ui
-                                .add(index)
-                                .on_hover_text("点选；Ctrl 加选，Shift 连选，Delete 删除选中的")
-                                .clicked()
-                            {
-                                clicked = Some((i, modifiers.command, modifiers.shift));
-                            }
-                            row(ui, i, &path);
-                        });
-                    })
-                    .response;
+                let size = egui::vec2(ui.available_width(), row_height);
+                let resp = drag_source(ui, egui::Id::new((id_salt, "row", i)), i, size, |ui| {
+                    // 每行一样高：只画看得见的行，靠的就是按行高算出哪些行在视口里。
+                    let layout = egui::Layout::left_to_right(egui::Align::Center);
+                    ui.allocate_ui_with_layout(size, layout, |ui| {
+                        ui.set_height(row_height);
+                        if ui.small_button("✖").on_hover_text("移出列表").clicked() {
+                            remove = Some(i);
+                        }
+                        let index = egui::Button::selectable(selected, format!("{:>3}", i + 1))
+                            .min_size(egui::vec2(34.0, 0.0));
+                        if ui
+                            .add(index)
+                            .on_hover_text("点选；Ctrl 加选，Shift 连选，Delete 删除选中的")
+                            .clicked()
+                        {
+                            clicked = Some((i, modifiers.command, modifiers.shift));
+                        }
+                        row(ui, i, &path);
+                    });
+                })
+                .response;
 
                 // 拖拽经过时画一条插入位置指示线，不然用户不知道会插到哪。
                 if let Some(payload) = resp.dnd_hover_payload::<usize>() {
@@ -256,6 +276,44 @@ pub fn file_list(
         && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
     {
         list.remove_selected();
+    }
+}
+
+/// 可以拖动的一块（列表的一行、网格的一格），里面的按钮、输入框照样点得动。`size`
+/// 是这一块将要占的大小。
+///
+/// 不用 egui 自带的 `dnd_drag_source`：它等内容画完才在上面盖一层只收拖动的感应区，
+/// 而 egui 遇到「最上层只收拖动」时会把点击丢掉 —— 行里的 ✖、序号、时间输入框就全都
+/// 点不动了。这里先登记感应区、再画内容：内容在上层，点击归它们，拖动归底下的感应区。
+/// 里面的文字不让选：可选的文字也收拖动，按在文件名上一拖就成了选字而不是挪行。
+pub fn drag_source<P: std::any::Any + Send + Sync, R>(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    payload: P,
+    size: egui::Vec2,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    if ui.ctx().is_being_dragged(id) {
+        egui::DragAndDrop::set_payload(ui.ctx(), payload);
+        // 拖动中画到浮层上，跟着指针走（与 egui 自带的做法一样）。
+        let layer = egui::LayerId::new(egui::Order::Tooltip, id);
+        let inner = ui.scope_builder(egui::UiBuilder::new().layer_id(layer), add_contents);
+        if let Some(p) = ui.ctx().pointer_interact_pos() {
+            let delta = p - inner.response.rect.center();
+            ui.ctx()
+                .transform_layer_shapes(layer, egui::emath::TSTransform::from_translation(delta));
+        }
+        inner
+    } else {
+        let rect = egui::Rect::from_min_size(ui.cursor().min, size);
+        let drag = ui
+            .interact(rect, id, egui::Sense::drag())
+            .on_hover_cursor(egui::CursorIcon::Grab);
+        let inner = ui.scope(|ui| {
+            ui.style_mut().interaction.selectable_labels = false;
+            add_contents(ui)
+        });
+        egui::InnerResponse::new(inner.inner, drag | inner.response)
     }
 }
 

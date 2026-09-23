@@ -1,12 +1,13 @@
 //! Word 转 PDF。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use pdfcore::ops::docx_to_pdf;
 use pdfcore::{Progress, ProgressSink};
 
 use crate::app::App;
-use crate::job::{human_size, run_batch, write_atomic, Done, Job};
+use crate::job::{human_size, run_batch, run_batch_parallel, write_atomic, Done, Job, Stop};
 
 use super::common::{self, FileList, WORD_EXTENSIONS};
 use super::{file_label, FOOTER};
@@ -118,36 +119,50 @@ fn start(app: &mut App, ctx: &egui::Context, single: bool) {
 
     app.job = Some(Job::spawn(ctx, files.len(), move |worker| {
         let mut namer = pdfcore::fsio::OutputNamer::new(&files);
-        if let Target::File(p) = &target {
-            if namer.is_input(p) {
-                return Err("输出文件不能是原文档本身，请换一个文件名".into());
-            }
-        }
-        let (mut pages, mut bytes) = (0usize, 0usize);
-        let batch = run_batch(worker, &files, |path, sink| {
+        let pages = AtomicUsize::new(0);
+        let bytes = AtomicUsize::new(0);
+        let convert = |path: &Path, sink: &dyn ProgressSink, out: &Path| {
             let report = docx_to_pdf::run(path, sink)?;
             for w in report.warnings {
                 sink.emit(Progress::Warn(w));
             }
-            let out = match &target {
-                Target::File(p) => p.clone(),
-                // 批量输出不覆盖任何东西：不同目录下的同名文档、目录里原有的 PDF 都会自动改名。
-                Target::Dir(d) => namer.name(
-                    d,
-                    &path.file_stem().unwrap_or_default().to_string_lossy(),
-                    "pdf",
-                ),
-            };
-            write_atomic(&out, &report.value.pdf)?;
-            pages += report.value.pages;
-            bytes += report.value.pdf.len();
-            let detail = format!(
+            write_atomic(out, &report.value.pdf)?;
+            pages.fetch_add(report.value.pages, Ordering::Relaxed);
+            bytes.fetch_add(report.value.pdf.len(), Ordering::Relaxed);
+            Ok::<_, Stop>(format!(
                 "{} 页，{}",
                 report.value.pages,
                 human_size(report.value.pdf.len() as u64)
-            );
-            Ok((out, detail))
-        })?;
+            ))
+        };
+        let batch = match &target {
+            Target::File(out) => {
+                if namer.is_input(out) {
+                    return Err("输出文件不能是原文档本身，请换一个文件名".into());
+                }
+                run_batch(worker, &files, |path, sink| {
+                    Ok((out.clone(), convert(path, sink, out)?))
+                })?
+            }
+            Target::Dir(dir) => {
+                // 批量输出不覆盖任何东西：不同目录下的同名文档、目录里原有的 PDF 都会自动
+                // 改名。名字先按文件顺序定好，几份同时转，谁先转完不影响叫什么。
+                let names: Vec<PathBuf> = files
+                    .iter()
+                    .map(|p| {
+                        namer.name(
+                            dir,
+                            &p.file_stem().unwrap_or_default().to_string_lossy(),
+                            "pdf",
+                        )
+                    })
+                    .collect();
+                run_batch_parallel(worker, &files, |i, path, sink| {
+                    Ok((names[i].clone(), convert(path, sink, &names[i])?))
+                })?
+            }
+        };
+        let (pages, bytes) = (pages.into_inner(), bytes.into_inner());
 
         let mut summary = format!(
             "已转换 {} 个文档，共 {pages} 页，{}",

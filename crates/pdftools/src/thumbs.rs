@@ -6,8 +6,10 @@
 //!
 //! 解码在后台几个线程里做（见 [`Loader`]），只解看得见的那些行；JPEG 先用 EXIF 自带
 //! 的小图，不必解开整张大图。纹理最多留 [`MAX_TEXTURES`] 张，最久没看的先释放。
+//! PDF 页面的缩略图（见 `tabs::pdf_pages`）走同一套，只是画法不同。
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -30,37 +32,50 @@ struct Entry {
     used: u64,
 }
 
-pub struct ThumbCache {
-    loader: Loader<Option<egui::ColorImage>>,
-    map: HashMap<PathBuf, Entry>,
+pub struct ThumbCache<K> {
+    loader: Loader<K, Option<egui::ColorImage>>,
+    map: HashMap<K, Entry>,
     frame: u64,
+    /// 纹理的名字只用于调试，编个号就行。
+    uploaded: u64,
 }
 
-impl ThumbCache {
-    pub fn new(ctx: &egui::Context) -> Self {
+/// 图片文件的缩略图。
+pub fn images(ctx: &egui::Context) -> ThumbCache<PathBuf> {
+    ThumbCache::new(ctx, |p: &PathBuf| decode_thumb(p))
+}
+
+impl<K: Clone + Eq + Hash + Send + 'static> ThumbCache<K> {
+    /// `draw` 在后台线程上把一个键画成缩略图；画不出来返回 None。
+    pub fn new(
+        ctx: &egui::Context,
+        draw: impl Fn(&K) -> Option<egui::ColorImage> + Send + Sync + 'static,
+    ) -> Self {
         let threads = std::thread::available_parallelism()
             .map_or(2, |n| n.get() / 2)
             .clamp(2, 4);
         Self {
-            loader: Loader::new(ctx, threads, decode_thumb),
+            loader: Loader::new(ctx, threads, draw),
             map: HashMap::new(),
             frame: 0,
+            uploaded: 0,
         }
     }
 
     /// 在 `App::logic` 里调用：把解码好的图上传成纹理，超出上限的释放掉。
     pub fn pump(&mut self, ctx: &egui::Context) {
         self.frame += 1;
-        for (path, img) in self.loader.drain() {
+        for (key, img) in self.loader.drain() {
             let thumb = match img {
                 Some(img) => {
-                    let name = path.to_string_lossy().to_string();
+                    self.uploaded += 1;
+                    let name = format!("thumb-{}", self.uploaded);
                     Thumb::Ready(ctx.load_texture(name, img, egui::TextureOptions::LINEAR))
                 }
                 None => Thumb::Failed,
             };
-            let used = self.map.get(&path).map_or(self.frame, |e| e.used);
-            self.map.insert(path, Entry { thumb, used });
+            let used = self.map.get(&key).map_or(self.frame, |e| e.used);
+            self.map.insert(key, Entry { thumb, used });
         }
         let ready = self
             .map
@@ -68,40 +83,40 @@ impl ThumbCache {
             .filter(|e| matches!(e.thumb, Thumb::Ready(_)))
             .count();
         if ready > MAX_TEXTURES {
-            let mut old: Vec<(u64, PathBuf)> = self
+            let mut old: Vec<(u64, K)> = self
                 .map
                 .iter()
                 .filter(|(_, e)| matches!(e.thumb, Thumb::Ready(_)) && e.used + 1 < self.frame)
-                .map(|(p, e)| (e.used, p.clone()))
+                .map(|(k, e)| (e.used, k.clone()))
                 .collect();
-            old.sort();
-            for (_, p) in old.into_iter().take(ready - MAX_TEXTURES) {
-                self.map.remove(&p);
+            old.sort_by_key(|(used, _)| *used);
+            for (_, k) in old.into_iter().take(ready - MAX_TEXTURES) {
+                self.map.remove(&k);
             }
         }
     }
 
-    /// 这张图的缩略图；还没有就排进后台去解。
-    pub fn get(&mut self, path: &Path) -> Thumb {
-        if let Some(e) = self.map.get_mut(path) {
+    /// 这个键的缩略图；还没有就排进后台去画。
+    pub fn get(&mut self, key: &K) -> Thumb {
+        if let Some(e) = self.map.get_mut(key) {
             e.used = self.frame;
             return e.thumb.clone();
         }
         self.map.insert(
-            path.to_path_buf(),
+            key.clone(),
             Entry {
                 thumb: Thumb::Pending,
                 used: self.frame,
             },
         );
-        self.loader.request(path);
+        self.loader.request(key);
         Thumb::Pending
     }
 
-    /// 文件被移出列表后释放对应纹理，还没解的也不解了。
-    pub fn retain(&mut self, keep: &std::collections::HashSet<PathBuf>) {
-        self.map.retain(|k, _| keep.contains(k));
-        self.loader.retain(|p| keep.contains(p));
+    /// 移出列表的释放对应纹理，还没画的也不画了。
+    pub fn retain(&mut self, keep: impl Fn(&K) -> bool) {
+        self.map.retain(|k, _| keep(k));
+        self.loader.retain(keep);
     }
 }
 

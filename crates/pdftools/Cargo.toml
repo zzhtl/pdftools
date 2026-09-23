@@ -1,6 +1,6 @@
 [package]
 name = "pdftools"
-description = "跨平台 PDF 工具箱：图片转 PDF、Word 转 PDF、压缩"
+description = "跨平台 PDF 工具箱：图片转 PDF、Word 转 PDF、压缩、页面整理、转图片"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -44,7 +44,8 @@ section = "utils"
 priority = "optional"
 extended-description = """\
 跨平台桌面 PDF 工具箱，不联网、不上传、文件不出本机。
-支持多图片无损合成 PDF、Word 转 PDF、PDF 压缩与图片批量压缩。"""
+支持多图片无损合成 PDF、Word 转 PDF、PDF 压缩、图片批量压缩、
+PDF 合并拆分与页面整理、PDF 转图片。"""
 depends = "$auto, libgl1, libegl1, libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6, libxrandr2, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-cursor0, libwayland-egl1"
 assets = [
     ["target/release/pdftools", "usr/bin/", "755"],

@@ -33,7 +33,7 @@ impl Default for State {
 impl State {
     /// 返回不认的文件有几个。
     pub fn add_paths(&mut self, paths: Vec<PathBuf>) -> usize {
-        self.files.add(paths, probe::looks_like_image)
+        self.files.add(paths, |p| probe::looks_like_image(p))
     }
 }
 

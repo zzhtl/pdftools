@@ -118,7 +118,7 @@ fn size_and_orientation_follow_the_page() {
     let opts = Options {
         dpi: 144.0,
         format: Format::Png,
-        pages: vec![],
+        pages: String::new(),
     };
     let mut namer = OutputNamer::new([&pdf]);
     let report = pdf_to_images::run(&pdf, &out, &opts, &mut namer, &NoProgress).unwrap();
@@ -165,7 +165,7 @@ fn chosen_pages_as_jpeg_never_overwrite() {
     let opts = Options {
         dpi: 72.0,
         format: Format::Jpeg,
-        pages: vec![3, 1],
+        pages: "3，1".into(),
     };
     let mut namer = OutputNamer::new([&pdf]);
     let report = pdf_to_images::run(&pdf, &d, &opts, &mut namer, &NoProgress).unwrap();
@@ -178,7 +178,7 @@ fn chosen_pages_as_jpeg_never_overwrite() {
     assert_eq!((third.width(), third.height()), (300, 200));
 
     let opts = Options {
-        pages: vec![4],
+        pages: "4".into(),
         ..opts
     };
     let err = pdf_to_images::run(&pdf, &d, &opts, &mut namer, &NoProgress).err();
@@ -247,7 +247,7 @@ fn fonts_not_embedded_are_found_on_the_system() {
     let opts = Options {
         dpi: 72.0,
         format: Format::Png,
-        pages: vec![],
+        pages: String::new(),
     };
     let mut namer = OutputNamer::new([&path]);
     let report = pdf_to_images::run(&path, &d, &opts, &mut namer, &NoProgress).unwrap();
@@ -305,7 +305,7 @@ fn cancelling_stops_rendering() {
     let opts = Options {
         dpi: 72.0,
         format: Format::Png,
-        pages: vec![],
+        pages: String::new(),
     };
     let sink = CancelAfterFirst(AtomicBool::new(false));
     let mut namer = OutputNamer::new([&path]);

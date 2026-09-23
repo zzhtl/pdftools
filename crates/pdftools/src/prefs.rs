@@ -1,4 +1,5 @@
-//! 下次打开还记得的设置：停在哪个页签、各页的档位与灰度、各页上次用的文件夹。
+//! 下次打开还记得的设置：停在哪个页签、各页的档位与灰度、转图片的分辨率与格式、
+//! 各页上次用的文件夹。
 //! 窗口大小位置由 eframe 自己记。文件列表不记 —— 隔一次启动，那些文件可能已经
 //! 挪走、删掉了。
 //!
@@ -9,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use pdfcore::imaging::Tier;
+use pdfcore::ops::pdf_to_images::Format;
 
 use crate::app::{App, Tab};
 
@@ -20,6 +22,8 @@ struct Prefs {
     docx: TabPrefs,
     pdf_compress: TabPrefs,
     img_compress: TabPrefs,
+    pdf_pages: TabPrefs,
+    pdf2img: TabPrefs,
 }
 
 /// 各页共用一个形状，没有的项（Word 页没有档位）留默认值。
@@ -28,6 +32,9 @@ struct Prefs {
 struct TabPrefs {
     tier: String,
     grayscale: bool,
+    /// 转图片的分辨率；0 表示没记过。
+    dpi: u32,
+    format: String,
     open_dir: Option<String>,
     out_dir: Option<String>,
 }
@@ -52,11 +59,24 @@ pub fn save(app: &App, storage: &mut dyn eframe::Storage) {
             grayscale: app.compress.grayscale,
             open_dir: dir(&app.compress.open_dir),
             out_dir: dir(&app.compress.out_dir),
+            ..Default::default()
         },
         img_compress: TabPrefs {
             tier: tier_key(app.img_compress.tier).to_owned(),
             open_dir: dir(&app.img_compress.open_dir),
             out_dir: dir(&app.img_compress.out_dir),
+            ..Default::default()
+        },
+        pdf_pages: TabPrefs {
+            open_dir: dir(&app.pages.open_dir),
+            out_dir: dir(&app.pages.out_dir),
+            ..Default::default()
+        },
+        pdf2img: TabPrefs {
+            dpi: app.pdf2img.dpi,
+            format: app.pdf2img.format.extension().to_owned(),
+            open_dir: dir(&app.pdf2img.open_dir),
+            out_dir: dir(&app.pdf2img.out_dir),
             ..Default::default()
         },
     };
@@ -93,6 +113,22 @@ pub fn load(app: &mut App, storage: &dyn eframe::Storage) {
     }
     app.img_compress.open_dir = dir(p.img_compress.open_dir);
     app.img_compress.out_dir = dir(p.img_compress.out_dir);
+
+    app.pages.open_dir = dir(p.pdf_pages.open_dir);
+    app.pages.out_dir = dir(p.pdf_pages.out_dir);
+
+    if crate::tabs::pdf2img::DPI_CHOICES.contains(&p.pdf2img.dpi) {
+        app.pdf2img.dpi = p.pdf2img.dpi;
+    }
+    if let Some(f) = find(
+        [Format::Png, Format::Jpeg],
+        Format::extension,
+        &p.pdf2img.format,
+    ) {
+        app.pdf2img.format = f;
+    }
+    app.pdf2img.open_dir = dir(p.pdf2img.open_dir);
+    app.pdf2img.out_dir = dir(p.pdf2img.out_dir);
 }
 
 fn find<T: Copy, const N: usize>(all: [T; N], key: fn(T) -> &'static str, name: &str) -> Option<T> {
@@ -105,6 +141,8 @@ fn tab_key(tab: Tab) -> &'static str {
         Tab::DocxToPdf => "docx2pdf",
         Tab::PdfCompress => "pdf_compress",
         Tab::ImagesCompress => "img_compress",
+        Tab::PdfPages => "pdf_pages",
+        Tab::PdfToImages => "pdf2img",
     }
 }
 
@@ -154,10 +192,16 @@ mod tests {
         app.img_compress.tier = Tier::Lossless;
         app.docx.open_dir = Some(PathBuf::from("/data/公文"));
         app.images.out_dir = Some(PathBuf::from("/data/out"));
+        app.pdf2img.dpi = 300;
+        app.pdf2img.format = Format::Jpeg;
+        app.pages.out_dir = Some(PathBuf::from("/data/拆分"));
         let mut mem = Memory::default();
         save(&app, &mut mem);
 
         let again = fresh(&ctx, Some(&mem));
+        assert_eq!(again.pdf2img.dpi, 300);
+        assert_eq!(again.pdf2img.format, Format::Jpeg);
+        assert_eq!(again.pages.out_dir, Some(PathBuf::from("/data/拆分")));
         assert_eq!(again.tab, Tab::PdfCompress);
         assert_eq!(again.images.tier, Tier::HighQuality);
         assert_eq!(again.compress.tier, Tier::Extreme);
@@ -175,7 +219,7 @@ mod tests {
         let mut mem = Memory::default();
         mem.set_string(
             eframe::APP_KEY,
-            r#"(tab: "pdf_pages", pdf_compress: (tier: "ultra", grayscale: true), img_compress: (tier: "extreme"), future: 3)"#
+            r#"(tab: "later_tab", pdf_compress: (tier: "ultra", grayscale: true), img_compress: (tier: "extreme"), pdf2img: (dpi: 123, format: "gif"), future: 3)"#
                 .to_owned(),
         );
         let app = fresh(&ctx, Some(&mem));
@@ -184,6 +228,8 @@ mod tests {
         assert_eq!(app.compress.tier, defaults.compress.tier);
         assert!(app.compress.grayscale);
         assert_eq!(app.img_compress.tier, Tier::Extreme);
+        assert_eq!(app.pdf2img.dpi, defaults.pdf2img.dpi);
+        assert_eq!(app.pdf2img.format, defaults.pdf2img.format);
 
         mem.set_string(eframe::APP_KEY, "not ron".to_owned());
         let app = fresh(&ctx, Some(&mem));

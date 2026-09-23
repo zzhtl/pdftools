@@ -36,8 +36,9 @@ impl Format {
 pub struct Options {
     pub dpi: f32,
     pub format: Format,
-    /// 要哪几页（从 1 开始，见 [`crate::pdf::ranges::parse`]）；空表示全部。
-    pub pages: Vec<usize>,
+    /// 要哪几页，写法见 [`crate::pdf::ranges::parse`]；空表示全部。按每份 PDF
+    /// 自己的页数解释：批量转换时同一个范围套用到每一份上。
+    pub pages: String,
 }
 
 pub struct Outcome {
@@ -72,16 +73,7 @@ pub fn run(
     if count == 0 {
         return Err(CoreError::Pdf("这份 PDF 没有页面".into()));
     }
-    let pages: Vec<usize> = if opts.pages.is_empty() {
-        (1..=count).collect()
-    } else {
-        opts.pages.clone()
-    };
-    if let Some(p) = pages.iter().find(|&&p| p == 0 || p > count) {
-        return Err(CoreError::Unsupported(format!(
-            "没有第 {p} 页（共 {count} 页）"
-        )));
-    }
+    let pages = crate::pdf::ranges::parse(&opts.pages, count).map_err(CoreError::Unsupported)?;
     std::fs::create_dir_all(out_dir).map_err(|e| CoreError::io(out_dir, e))?;
 
     // 名字在开画之前按页码顺序定好：并行画完的先后不影响叫什么。

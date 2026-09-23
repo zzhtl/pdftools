@@ -11,7 +11,7 @@ use crate::loader::Loader;
 use crate::prefs;
 use crate::tabs;
 use crate::theme;
-use crate::thumbs::ThumbCache;
+use crate::thumbs::{self, ThumbCache};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -19,14 +19,18 @@ pub enum Tab {
     DocxToPdf,
     PdfCompress,
     ImagesCompress,
+    PdfPages,
+    PdfToImages,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [
+    pub const ALL: [Tab; 6] = [
         Tab::ImagesToPdf,
         Tab::DocxToPdf,
         Tab::PdfCompress,
         Tab::ImagesCompress,
+        Tab::PdfPages,
+        Tab::PdfToImages,
     ];
 
     pub fn title(self) -> &'static str {
@@ -35,6 +39,24 @@ impl Tab {
             Tab::DocxToPdf => "Word 转 PDF",
             Tab::PdfCompress => "PDF 压缩",
             Tab::ImagesCompress => "图片压缩",
+            Tab::PdfPages => "PDF 页面",
+            Tab::PdfToImages => "PDF 转图片",
+        }
+    }
+
+    /// 拖进来的 PDF、图片落到哪一页：当前页签收这类文件就留在当前页签，
+    /// 否则按类型去默认的页签。
+    fn for_pdfs(self) -> Tab {
+        match self {
+            Tab::PdfCompress | Tab::PdfPages | Tab::PdfToImages => self,
+            _ => Tab::PdfCompress,
+        }
+    }
+
+    fn for_images(self) -> Tab {
+        match self {
+            Tab::ImagesCompress => self,
+            _ => Tab::ImagesToPdf,
         }
     }
 }
@@ -45,10 +67,12 @@ pub struct App {
     pub docx: tabs::docx2pdf::State,
     pub compress: tabs::pdf_compress::State,
     pub img_compress: tabs::img_compress::State,
+    pub pages: tabs::pdf_pages::State,
+    pub pdf2img: tabs::pdf2img::State,
     pub job: Option<Job>,
-    pub thumbs: ThumbCache,
+    pub thumbs: ThumbCache<PathBuf>,
     /// 在后台读图片的拍摄时间。
-    pub times: Loader<Option<DatedFile>>,
+    pub times: Loader<PathBuf, Option<DatedFile>>,
     /// 拖进来、命令行给的文件里有多少没认出来：一句提示，用户点掉为止。
     pub notice: Option<String>,
     /// 启动时探测到的界面字体名；None 表示本机没有中文字体。
@@ -72,9 +96,11 @@ impl App {
             docx: Default::default(),
             compress: Default::default(),
             img_compress: Default::default(),
+            pages: tabs::pdf_pages::State::new(ctx),
+            pdf2img: Default::default(),
             job: None,
-            thumbs: ThumbCache::new(ctx),
-            times: Loader::new(ctx, 2, |p: &Path| pdfcore::imaging::read_time_quick(p)),
+            thumbs: thumbs::images(ctx),
+            times: Loader::new(ctx, 2, |p: &PathBuf| pdfcore::imaging::read_time_quick(p)),
             notice: None,
             ui_font,
             images_seen: 0,
@@ -93,37 +119,46 @@ impl App {
         if paths.is_empty() {
             return;
         }
+        let here = self.tab;
         let ext = |p: &Path| {
             p.extension()
                 .and_then(|e| e.to_str())
                 .map(|e| e.to_ascii_lowercase())
                 .unwrap_or_default()
         };
+        // HEIC 图片转 PDF 收下（给一句有用的提示），图片压缩不收。
+        let image = |p: &Path| {
+            pdfcore::imaging::probe::looks_like_image(p)
+                || (here.for_images() == Tab::ImagesToPdf && pdfcore::imaging::probe::is_heif(p))
+        };
         let (mut docx, mut pdfs, mut images, mut other) = (vec![], vec![], vec![], vec![]);
         for p in paths {
             match ext(&p).as_str() {
                 "docx" | "doc" => docx.push(p),
                 "pdf" => pdfs.push(p),
-                _ if pdfcore::imaging::probe::looks_like_image(&p)
-                    || pdfcore::imaging::probe::is_heif(&p) =>
-                {
-                    images.push(p)
-                }
+                _ if image(&p) => images.push(p),
                 _ => other.push(p),
             }
         }
 
         if !images.is_empty() {
-            self.tab = Tab::ImagesToPdf;
-            self.images.add_paths(images);
+            self.tab = here.for_images();
+            match self.tab {
+                Tab::ImagesCompress => self.img_compress.add_paths(images),
+                _ => self.images.add_paths(images),
+            };
         }
         if !docx.is_empty() {
             self.tab = Tab::DocxToPdf;
             self.docx.add_paths(docx);
         }
         if !pdfs.is_empty() {
-            self.tab = Tab::PdfCompress;
-            self.compress.add_paths(pdfs);
+            self.tab = here.for_pdfs();
+            match self.tab {
+                Tab::PdfPages => self.pages.add_paths(pdfs),
+                Tab::PdfToImages => self.pdf2img.add_paths(pdfs),
+                _ => self.compress.add_paths(pdfs),
+            };
         }
         self.note_skipped(&other);
     }
@@ -160,6 +195,7 @@ impl eframe::App for App {
             job.pump();
         }
         self.thumbs.pump(ctx);
+        self.pages.pump(ctx);
         // 图片列表的成员变了才对一遍：新来的排进后台读时间，移走的不再读、纹理释放。
         let files = &self.images.files;
         if files.changes() != self.images_seen {
@@ -171,7 +207,7 @@ impl eframe::App for App {
             }
             let keep: HashSet<PathBuf> = files.items.iter().cloned().collect();
             self.times.retain(|p| keep.contains(p));
-            self.thumbs.retain(&keep);
+            self.thumbs.retain(|p| keep.contains(p));
         }
         // 读出来的时间放进缓存，手动填过的不覆盖。
         for (path, time) in self.times.drain() {
@@ -239,9 +275,11 @@ impl eframe::App for App {
                 Tab::DocxToPdf => tabs::docx2pdf::ui(self, ui),
                 Tab::PdfCompress => tabs::pdf_compress::ui(self, ui),
                 Tab::ImagesCompress => tabs::img_compress::ui(self, ui),
+                Tab::PdfPages => tabs::pdf_pages::ui(self, ui),
+                Tab::PdfToImages => tabs::pdf2img::ui(self, ui),
             }
         });
-        drop_overlay(&ctx);
+        drop_overlay(&ctx, self.tab);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -265,20 +303,7 @@ impl App {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
-        if dropped.is_empty() {
-            return;
-        }
-        // 在「图片压缩」页拖图片时应当留在本页，其余情况按文件类型自动分派。
-        if self.tab == Tab::ImagesCompress {
-            let files = expand_folders(dropped);
-            let before = files.clone();
-            self.img_compress.add_paths(files);
-            let skipped: Vec<PathBuf> = before
-                .into_iter()
-                .filter(|p| !pdfcore::imaging::probe::looks_like_image(p))
-                .collect();
-            self.note_skipped(&skipped);
-        } else {
+        if !dropped.is_empty() {
             self.open_paths(dropped);
         }
     }
@@ -478,7 +503,7 @@ pub fn tier_selector(ui: &mut egui::Ui, tier: &mut Tier, enabled: bool) {
 }
 
 /// 文件拖到窗口上方还没松开时，盖一层说明：松开就添加，按类型分到各页。
-fn drop_overlay(ctx: &egui::Context) {
+fn drop_overlay(ctx: &egui::Context, here: Tab) {
     if ctx.input(|i| i.raw.hovered_files.is_empty()) {
         return;
     }
@@ -488,10 +513,15 @@ fn drop_overlay(ctx: &egui::Context) {
         egui::Id::new("drop-overlay"),
     ));
     painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(170));
+    let text = format!(
+        "松开以添加\n图片 → {}　　Word → Word 转 PDF　　PDF → {}\n文件夹会展开成里面的文件",
+        here.for_images().title(),
+        here.for_pdfs().title()
+    );
     painter.text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
-        "松开以添加\n图片 → 图片转 PDF　　Word → Word 转 PDF　　PDF → PDF 压缩\n文件夹会展开成里面的文件",
+        text,
         egui::FontId::proportional(20.0),
         egui::Color32::WHITE,
     );

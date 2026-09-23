@@ -64,7 +64,7 @@ impl State {
                 }
             }
         }
-        self.files.add(paths, probe::looks_like_image) - heif
+        self.files.add(paths, |p| probe::looks_like_image(p)) - heif
     }
 
     pub fn clear(&mut self) {

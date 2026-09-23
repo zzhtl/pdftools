@@ -15,31 +15,13 @@ pub fn parse(text: &str, count: usize) -> Result<Vec<usize>, String> {
     }
     let mut pages = Vec::new();
     let mut seen = vec![false; count + 1];
-    let is_sep = |c: char| matches!(c, ',' | '，' | '、' | ';' | '；') || c.is_whitespace();
-    let is_dash = |c: char| matches!(c, '-' | '–' | '—' | '~' | '～');
-    for part in text.split(is_sep).filter(|p| !p.is_empty()) {
-        let (from, to) = match part.split_once(is_dash) {
-            None => {
-                let n = number(part, count)?;
-                (n, n)
+    for (from, to) in spans(text)? {
+        let to = to.unwrap_or(count);
+        for n in [from, to] {
+            if n > count {
+                return Err(format!("没有第 {n} 页（共 {count} 页）"));
             }
-            Some((a, b)) => {
-                let from = if a.trim().is_empty() {
-                    1
-                } else {
-                    number(a, count)?
-                };
-                let to = if b.trim().is_empty() {
-                    count
-                } else {
-                    number(b, count)?
-                };
-                if from > to {
-                    return Err(format!("「{part}」的起始页比结束页大"));
-                }
-                (from, to)
-            }
-        };
+        }
         for (p, seen) in (from..=to).zip(&mut seen[from..=to]) {
             if !*seen {
                 *seen = true;
@@ -53,18 +35,55 @@ pub fn parse(text: &str, count: usize) -> Result<Vec<usize>, String> {
     Ok(pages)
 }
 
-fn number(s: &str, count: usize) -> Result<usize, String> {
-    let s = s.trim();
-    let n: usize = s.parse().map_err(|_| format!("「{s}」不是页码"))?;
-    if n == 0 || n > count {
-        return Err(format!("没有第 {n} 页（共 {count} 页）"));
+/// 只看写法对不对，不管页数（还没打开文件时用）。
+pub fn check(text: &str) -> Result<(), String> {
+    spans(text).map(|_| ())
+}
+
+/// 逐段拆成 (起, 止)，止为 None 表示到最后一页。
+fn spans(text: &str) -> Result<Vec<(usize, Option<usize>)>, String> {
+    let is_sep = |c: char| matches!(c, ',' | '，' | '、' | ';' | '；') || c.is_whitespace();
+    let is_dash = |c: char| matches!(c, '-' | '–' | '—' | '~' | '～');
+    let mut spans = Vec::new();
+    for part in text.split(is_sep).filter(|p| !p.is_empty()) {
+        let span = match part.split_once(is_dash) {
+            None => {
+                let n = number(part)?;
+                (n, Some(n))
+            }
+            Some((a, b)) => {
+                let from = if a.trim().is_empty() { 1 } else { number(a)? };
+                let to = if b.trim().is_empty() {
+                    None
+                } else {
+                    Some(number(b)?)
+                };
+                if to.is_some_and(|to| from > to) {
+                    return Err(format!("「{part}」的起始页比结束页大"));
+                }
+                (from, to)
+            }
+        };
+        spans.push(span);
     }
-    Ok(n)
+    if spans.is_empty() && !text.trim().is_empty() {
+        return Err("没有选中任何一页".into());
+    }
+    Ok(spans)
+}
+
+fn number(s: &str) -> Result<usize, String> {
+    let s = s.trim();
+    match s.parse::<usize>() {
+        Ok(0) => Err("页码从 1 开始".into()),
+        Ok(n) => Ok(n),
+        Err(_) => Err(format!("「{s}」不是页码")),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{check, parse};
 
     #[test]
     fn ranges_lists_and_open_ends() {
@@ -86,10 +105,21 @@ mod tests {
 
     #[test]
     fn mistakes_are_explained() {
-        assert_eq!(parse("0", 3), Err("没有第 0 页（共 3 页）".into()));
+        assert_eq!(parse("0", 3), Err("页码从 1 开始".into()));
         assert_eq!(parse("2-9", 3), Err("没有第 9 页（共 3 页）".into()));
         assert_eq!(parse("3-1", 3), Err("「3-1」的起始页比结束页大".into()));
         assert_eq!(parse("a", 3), Err("「a」不是页码".into()));
         assert_eq!(parse(",", 3), Err("没有选中任何一页".into()));
+        // 开放的结尾从最后一页之后开始。
+        assert_eq!(parse("5-", 3), Err("没有第 5 页（共 3 页）".into()));
+    }
+
+    /// 还不知道页数时只查写法：超出页数的要等打开文件才知道。
+    #[test]
+    fn syntax_is_checked_without_a_page_count() {
+        assert_eq!(check(""), Ok(()));
+        assert_eq!(check("1-3, 900-"), Ok(()));
+        assert_eq!(check("3-1"), Err("「3-1」的起始页比结束页大".into()));
+        assert_eq!(check("x"), Err("「x」不是页码".into()));
     }
 }

@@ -386,6 +386,112 @@ pub fn run_batch(
     Ok(batch)
 }
 
+/// 同 [`run_batch`]，但几个文件同时做（最多 4 个线程）。`each` 拿到文件的序号、路径
+/// 与汇报口，会在几个线程上同时调用。
+///
+/// 文件内部的步骤不报进度 —— 几个文件的步骤交错着来，进度条会来回跳 —— 整批进度按
+/// 做完的个数算；逐个文件的结果按做完的先后报。全部失败时原因取排在最前面的那个，
+/// 与线程谁先谁后无关。
+pub fn run_batch_parallel(
+    worker: &Worker,
+    files: &[PathBuf],
+    each: impl Fn(usize, &Path, &dyn ProgressSink) -> Result<(PathBuf, String), Stop> + Sync,
+) -> Result<Batch, Stop> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let total = files.len();
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, 4)
+        .min(total.max(1));
+    let next = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+    let batch = Mutex::new(Batch {
+        succeeded: 0,
+        failed: 0,
+        last_output: None,
+    });
+    let first_error: Mutex<Option<(usize, String)>> = Mutex::new(None);
+    worker.set(Some(0.0), format!("0/{total}"));
+
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= total || worker.is_cancelled() {
+                    return;
+                }
+                let path = &files[i];
+                let name = file_label(path);
+                let sink = Quiet {
+                    worker,
+                    name: &name,
+                };
+                let (output, error, detail) = match each(i, path, &sink) {
+                    Ok((out, detail)) => (Some(out), None, detail),
+                    // 取消由外面统一收尾；这一个不算成也不算败。
+                    Err(Stop::Cancelled) => return,
+                    Err(Stop::Failed(e)) => (None, Some(e), String::new()),
+                };
+                {
+                    let mut b = batch.lock().expect("批量汇总锁");
+                    match &error {
+                        None => {
+                            b.succeeded += 1;
+                            b.last_output = output.clone();
+                        }
+                        Some(e) => {
+                            b.failed += 1;
+                            let mut first = first_error.lock().expect("批量汇总锁");
+                            if first.as_ref().is_none_or(|(k, _)| i < *k) {
+                                *first = Some((i, format!("{name}：{e}")));
+                            }
+                        }
+                    }
+                }
+                worker.item(ItemResult {
+                    input: path.clone(),
+                    output,
+                    error,
+                    detail,
+                });
+                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                worker.set(Some(n as f32 / total as f32), format!("已完成 {n}/{total}"));
+            });
+        }
+    });
+
+    if worker.is_cancelled() {
+        return Err(Stop::Cancelled);
+    }
+    let batch = batch.into_inner().expect("批量汇总锁");
+    if batch.succeeded == 0 {
+        if let Some((_, e)) = first_error.into_inner().expect("批量汇总锁") {
+            return Err(Stop::Failed(e));
+        }
+    }
+    Ok(batch)
+}
+
+/// 并行批量里单个文件的汇报口：只转发警告（前面加文件名）。
+struct Quiet<'a> {
+    worker: &'a Worker,
+    name: &'a str,
+}
+
+impl ProgressSink for Quiet<'_> {
+    fn emit(&self, progress: Progress) {
+        if let Progress::Warn(mut w) = progress {
+            w.detail = format!("{}：{}", self.name, w.detail);
+            self.worker.warn(w);
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.worker.is_cancelled()
+    }
+}
+
 /// 原子落盘，见 [`pdfcore::fsio::write_atomic`]。
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
     pdfcore::fsio::write_atomic(path, data).map_err(|e| e.to_string())
@@ -574,5 +680,59 @@ mod tests {
         });
         wait(&mut job);
         assert_eq!(job.state, State::Failed("x.pdf：坏了".into()));
+    }
+
+    /// 并行的批量与逐个做的规矩一样：坏的记下接着做，每个都有结果；全坏了按排在
+    /// 最前面的报；取消就停。
+    #[test]
+    fn a_parallel_batch_keeps_the_same_rules() {
+        let ctx = egui::Context::default();
+        let files: Vec<PathBuf> = (0..40)
+            .map(|i| PathBuf::from(format!("{i}.docx")))
+            .collect();
+        let inputs = files.clone();
+        let mut job = Job::spawn(&ctx, files.len(), move |w| {
+            let b = run_batch_parallel(w, &inputs, |i, p, _| {
+                // 做得有快有慢，完成的先后与序号无关。
+                std::thread::sleep(Duration::from_millis((i % 3) as u64));
+                if i % 10 == 7 {
+                    Err(Stop::Failed("打不开".into()))
+                } else {
+                    Ok((p.with_extension("pdf"), String::new()))
+                }
+            })?;
+            Ok(Done {
+                summary: format!("{} 成 {} 败", b.succeeded, b.failed),
+                output: None,
+            })
+        });
+        wait(&mut job);
+        assert_eq!(job.state, State::Finished("36 成 4 败".into()));
+        assert_eq!(job.items.len(), 40);
+        assert_eq!(job.progress.fraction, Some(1.0));
+
+        let inputs = files.clone();
+        let mut job = Job::spawn(&ctx, 40, move |w| {
+            run_batch_parallel(w, &inputs, |i, _, _| {
+                std::thread::sleep(Duration::from_millis(((40 - i) % 4) as u64));
+                Err(Stop::Failed(format!("坏了 {i}")))
+            })?;
+            unreachable!()
+        });
+        wait(&mut job);
+        assert_eq!(job.state, State::Failed("0.docx：坏了 0".into()));
+
+        let mut job = Job::spawn(&ctx, 40, move |w| {
+            run_batch_parallel(w, &files, |i, p, _| {
+                if i == 5 {
+                    w.cancel.cancel();
+                }
+                Ok((p.with_extension("pdf"), String::new()))
+            })?;
+            unreachable!("取消以后不该走到这里");
+        });
+        wait(&mut job);
+        assert_eq!(job.state, State::Cancelled);
+        assert!(job.succeeded() < 40);
     }
 }

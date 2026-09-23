@@ -80,6 +80,12 @@ impl Document {
         self.pdf.pages().len()
     }
 
+    /// 打开时读进来的字节。按页操作导出时用它，而不是再去读一次文件：文件在这期间
+    /// 被改过的话，界面上看到的页与导出的页就对不上了。
+    pub fn data(&self) -> &[u8] {
+        self.pdf.data().as_ref()
+    }
+
     /// 第 `index` 页（从 0 开始）显示出来的宽高，单位点：按裁剪框、转过 `/Rotate` 之后的。
     pub fn page_size(&self, index: usize) -> (f32, f32) {
         self.pdf.pages()[index].render_dimensions()
