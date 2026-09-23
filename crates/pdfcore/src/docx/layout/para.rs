@@ -3,7 +3,8 @@
 use std::ops::Range;
 
 use super::calib::{
-    Breaks, Calib, EmptyPara, HangingIndent, HangingPunct, Justify, Overflow, Tabs, TrailingSpaces,
+    Breaks, Calib, EmptyPara, Flow, HangingIndent, HangingPunct, Justify, Overflow, Tabs,
+    TrailingSpaces,
 };
 use super::metrics::line_box;
 use super::text::{self, Hang, Piece, ShapedPara, TabRules};
@@ -46,7 +47,28 @@ pub(super) struct ParaBox {
     pub space_before: f32,
     pub space_after: f32,
     pub page_break_before: bool,
+    pub keep_next: bool,
+    pub keep_lines: bool,
+    pub widow_control: bool,
     pub body: ParaBody,
+}
+
+impl ParaBox {
+    /// 各行的高度之和（不含段距）。
+    pub fn body_height(&self) -> f32 {
+        match &self.body {
+            ParaBody::Empty { height } => *height,
+            ParaBody::Lines(lines) => lines.iter().map(|l| l.height).sum(),
+        }
+    }
+
+    /// 第一行在页底要容得下的高度。
+    pub fn first_line_height(&self) -> f32 {
+        match &self.body {
+            ParaBody::Empty { height } => *height,
+            ParaBody::Lines(lines) => lines.first().map_or(0.0, |l| l.fit_height),
+        }
+    }
 }
 
 pub(super) fn measure(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> ParaBox {
@@ -72,10 +94,14 @@ pub(super) fn measure(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> P
             },
         }
     };
+    let flow = env.calib.flow == Flow::Word;
     ParaBox {
         space_before: para.space_before,
         space_after: para.space_after,
         page_break_before: para.page_break_before,
+        keep_next: flow && para.keep_next,
+        keep_lines: flow && para.keep_lines,
+        widow_control: flow && para.widow_control,
         body,
     }
 }

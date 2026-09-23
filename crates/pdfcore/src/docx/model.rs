@@ -151,6 +151,15 @@ pub struct PPr {
     pub overflow_punct: Option<bool>,
     /// `w:tabs`：自定义制表位。样式里的与段落上的要合并，见 [`merge_tabs`]。
     pub tabs: Vec<TabDef>,
+    /// `w:keepNext`：与下一段在同一页。
+    pub keep_next: Option<bool>,
+    /// `w:keepLines`：段中不分页。
+    pub keep_lines: Option<bool>,
+    /// `w:widowControl`：孤行控制。哪一级都没写时是开着的 —— WPS 要关掉它就得在
+    /// Normal 样式里明确写 `w:val="0"`，LibreOffice 也按开着排。
+    pub widow_control: Option<bool>,
+    /// `w:contextualSpacing`：与同一样式的相邻段落之间不加段距。
+    pub contextual_spacing: Option<bool>,
     /// 本段挂了自动编号（`w:numPr`）。
     pub numbering: bool,
     /// `w:pPr/w:rPr`：段落标记自身的格式。它参与 run 的层叠，优先级低于 run 上的直接格式。
@@ -192,6 +201,10 @@ impl PPr {
             self.overflow_punct = other.overflow_punct;
         }
         merge_tabs(&mut self.tabs, &other.tabs);
+        macro_rules! take {
+            ($($f:ident),*) => { $( if other.$f.is_some() { self.$f = other.$f; } )* };
+        }
+        take!(keep_next, keep_lines, widow_control, contextual_spacing);
         self.numbering |= other.numbering;
         self.mark_rpr.merge(&other.mark_rpr);
     }

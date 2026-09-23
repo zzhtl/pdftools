@@ -160,6 +160,12 @@ pub struct Paragraph {
     pub overflow_punct: bool,
     /// 自定义制表位，按位置升序。竖线位不在其中。
     pub tabs: Vec<TabStop>,
+    pub keep_next: bool,
+    pub keep_lines: bool,
+    pub widow_control: bool,
+    pub contextual_spacing: bool,
+    /// 段落样式（没写 `w:pStyle` 时是默认段落样式）。判断「同一样式的相邻段落」用。
+    pub style_id: Option<String>,
     /// 本段挂了自动编号，但编号文字没有生成。
     pub numbering_dropped: bool,
     pub text: String,
@@ -364,7 +370,12 @@ fn push_paragraph(
         .unwrap_or(calib.default_size_pt);
 
     let mark = run_style(&mark, calib);
-    out.push(Block::Para(paragraph(&ppr, text, spans, mark, char_size)));
+    let mut para = paragraph(&ppr, text, spans, mark, char_size);
+    para.style_id = ppr
+        .style_id
+        .clone()
+        .or_else(|| doc.styles.default_paragraph_style.clone());
+    out.push(Block::Para(para));
     for alt in drawings {
         out.push(Block::Placeholder(Placeholder {
             kind: PlaceholderKind::Drawing { alt },
@@ -495,6 +506,11 @@ fn paragraph(
                 leader: t.leader,
             })
             .collect(),
+        keep_next: ppr.keep_next.unwrap_or(false),
+        keep_lines: ppr.keep_lines.unwrap_or(false),
+        widow_control: ppr.widow_control.unwrap_or(true),
+        contextual_spacing: ppr.contextual_spacing.unwrap_or(false),
+        style_id: None,
         numbering_dropped: ppr.numbering,
         text,
         spans,

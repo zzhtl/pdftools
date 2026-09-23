@@ -26,6 +26,22 @@ pub struct Calib {
     pub overflow: Overflow,
     pub run_format: RunFormat,
     pub cascade: Cascade,
+    pub flow: Flow,
+}
+
+/// 段落之间的版流控制：`w:keepNext`、`w:keepLines`、`w:widowControl`、
+/// `w:contextualSpacing`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flow {
+    /// 都不认。
+    Legacy,
+    /// - 与下段同页：一串连续的 keepNext 段落加上下一段的第一行，当前页放不下、
+    ///   又不在页首时，整串移到下一页；已经在页首就照排，超过一页的串自然被断开。
+    /// - 段中不分页：整段放不下就整段挪走；比一页还高时照常拆。
+    /// - 孤行控制：段落的第一行不单独留在页底，最后一行不单独落到下一页；
+    ///   哪一级都没写 `w:widowControl` 时是开着的。
+    /// - 同一样式的相邻段落之间不加段距（`contextualSpacing` 写在谁身上管谁的那一侧）。
+    Word,
 }
 
 /// 样式层叠。见 `resolve` 模块。
@@ -234,6 +250,7 @@ impl Calib {
             overflow: Overflow::CharBoundary,
             run_format: RunFormat::Full,
             cascade: Cascade::Spec,
+            flow: Flow::Word,
         }
     }
 
@@ -255,6 +272,7 @@ impl Calib {
             overflow: Overflow::NextOpportunity,
             run_format: RunFormat::Legacy,
             cascade: Cascade::Legacy,
+            flow: Flow::Legacy,
         }
     }
 }

@@ -15,8 +15,9 @@ mod para;
 mod text;
 
 pub use calib::{
-    Breaks, Calib, Cascade, EmptyPara, FixedBaseline, GridLayout, HangingIndent, HangingPunct,
-    Justify, Overflow, PageBottom, PageBreakBefore, ParaSpacing, RunFormat, Tabs, TrailingSpaces,
+    Breaks, Calib, Cascade, EmptyPara, FixedBaseline, Flow, GridLayout, HangingIndent,
+    HangingPunct, Justify, Overflow, PageBottom, PageBreakBefore, ParaSpacing, RunFormat, Tabs,
+    TrailingSpaces,
 };
 
 use super::ir;
@@ -107,20 +108,54 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
     let mut pages = paginate::Paginator::new(&doc.page, grid_area(doc, calib), collapse, calib);
     let mut warnings = Vec::new();
 
-    let mut numbered = 0usize;
-    for block in &doc.blocks {
-        match block {
-            ir::Block::Para(p) => {
-                if p.numbering_dropped {
-                    numbered += 1;
+    // 先把所有块量好，放的时候才能往后看（与下段同页要知道下一段有多高）。
+    let mut measured: Vec<Measured> = doc
+        .blocks
+        .iter()
+        .map(|block| match block {
+            ir::Block::Para(p) => Measured::Para(para::measure(p, &env, book)),
+            ir::Block::Placeholder(ph) => Measured::Placeholder(
+                placeholder_paras(ph)
+                    .iter()
+                    .map(|p| para::measure(p, &env, book))
+                    .collect(),
+            ),
+        })
+        .collect();
+    if calib.flow == Flow::Word {
+        contextual_spacing(&doc.blocks, &mut measured);
+    }
+
+    let numbered = doc
+        .blocks
+        .iter()
+        .filter(|b| matches!(b, ir::Block::Para(p) if p.numbering_dropped))
+        .count();
+    for (i, (block, m)) in doc.blocks.iter().zip(&measured).enumerate() {
+        match (block, m) {
+            (_, Measured::Para(b)) => {
+                if b.keep_next {
+                    // 这一串与下段同页的段落，以及紧跟在后面的那一段。
+                    let chain: Vec<&para::ParaBox> = measured[i..]
+                        .iter()
+                        .map_while(|m| match m {
+                            Measured::Para(p) if p.keep_next => Some(p),
+                            _ => None,
+                        })
+                        .collect();
+                    let next = match measured.get(i + chain.len()) {
+                        Some(Measured::Para(p)) => Some(p),
+                        _ => None,
+                    };
+                    pages.keep_together(&chain, next);
                 }
-                pages.place_para(&para::measure(p, &env, book));
+                pages.place_para(b);
             }
             // 不支持的内容：一句说明 + 能抽出来的文字，并记下在第几页。
             //
             // 不静默丢弃，是因为用户会以为转全了；不整份拒绝，是因为其余内容通常完全可用。
             // 对法律文书来说，悄悄丢一张表格是**危险**的。
-            ir::Block::Placeholder(ph) => {
+            (ir::Block::Placeholder(ph), Measured::Placeholder(paras)) => {
                 warnings.push(
                     Warning::new(
                         WarningKind::UnsupportedElement,
@@ -128,9 +163,12 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
                     )
                     .at_page(pages.page_index() + 1),
                 );
-                for p in placeholder_paras(ph) {
-                    pages.place_para(&para::measure(&p, &env, book));
+                for b in paras {
+                    pages.place_para(b);
                 }
+            }
+            (ir::Block::Para(_), Measured::Placeholder(_)) => {
+                unreachable!("量出来的与原块一一对应")
             }
         }
     }
@@ -156,6 +194,39 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
     LaidOut {
         pages: pages.finish(),
         warnings,
+    }
+}
+
+/// 量好的块，与 `ir::Document::blocks` 一一对应。
+enum Measured {
+    Para(para::ParaBox),
+    Placeholder(Vec<para::ParaBox>),
+}
+
+/// 同一样式的相邻段落之间不加段距：`contextualSpacing` 写在谁身上，就去掉谁靠近
+/// 同样式邻居的那一侧（段前或段后）。占位块把相邻关系隔开。
+fn contextual_spacing(blocks: &[ir::Block], measured: &mut [Measured]) {
+    let style = |i: usize| match blocks.get(i) {
+        Some(ir::Block::Para(p)) => Some(p),
+        _ => None,
+    };
+    for (i, m) in measured.iter_mut().enumerate() {
+        let (Some(p), Measured::Para(b)) = (style(i), m) else {
+            continue;
+        };
+        if !p.contextual_spacing {
+            continue;
+        }
+        let same = |j: Option<usize>| {
+            j.and_then(style)
+                .is_some_and(|q| q.style_id.is_some() && q.style_id == p.style_id)
+        };
+        if same(i.checked_sub(1)) {
+            b.space_before = 0.0;
+        }
+        if same(Some(i + 1)) {
+            b.space_after = 0.0;
+        }
     }
 }
 
@@ -218,6 +289,11 @@ fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
         auto_space: true,
         overflow_punct: true,
         tabs: Vec::new(),
+        keep_next: false,
+        keep_lines: false,
+        widow_control: false,
+        contextual_spacing: false,
+        style_id: None,
         numbering_dropped: false,
         text,
         spans,

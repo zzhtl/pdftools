@@ -1497,3 +1497,62 @@ fn hyperlinks_become_clickable() {
     );
     assert!(rect[2] <= x("。") + 0.01, "不该盖到链接后面的字：{rect:?}");
 }
+
+/// 版流控制。行高一律用 20pt 固定行距，与字体无关：版心 697.9pt 放得下 34 行。
+#[test]
+fn keep_next_keep_lines_widows_and_contextual_spacing() {
+    if !require_cjk_font() {
+        return;
+    }
+    // `after` 是段后距（twip）。
+    let para_after = |after: u32, ppr: &str, text: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:spacing w:after="{after}" w:line="400" w:lineRule="exact"/>{ppr}</w:pPr><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    };
+    let para = |ppr: &str, text: &str| para_after(0, ppr, text);
+    let filler = |n: usize| {
+        (0..n)
+            .map(|i| para("", &format!("填充行{i}")))
+            .collect::<String>()
+    };
+    // 三行的段落：每行 36 个字排满。
+    let three_lines = "三行段落的文字".repeat(15);
+    let page_of = |name: &str, body: &str, needle: &str| -> usize {
+        let pages = common::pdftext::extract(&convert(&make_docx(name, body)).value.pdf);
+        pages
+            .iter()
+            .position(|p| p.text().contains(needle))
+            .unwrap_or_else(|| panic!("{name}：找不到「{needle}」"))
+    };
+
+    // 33 行之后：标题（第 34 行）放得下，下一段的第一行放不下 —— 标题跟着下一段换页。
+    let body = filler(33) + &para("<w:keepNext/>", "标题") + &para("", "正文");
+    assert_eq!(page_of("keep_next.docx", &body, "标题"), 1);
+    let body = filler(33) + &para("", "标题") + &para("", "正文");
+    assert_eq!(page_of("no_keep_next.docx", &body, "标题"), 0);
+
+    // 32 行之后，三行的段落只放得下两行：段中不分页就整段挪走。
+    let body = filler(32) + &para(r#"<w:keepLines/><w:widowControl w:val="0"/>"#, &three_lines);
+    assert_eq!(page_of("keep_lines.docx", &body, "三行段落"), 1);
+    // 孤行控制（缺省开着）：两行留下、一行落到下一页会成孤行，往下挪一行又成了
+    // 页底孤行 —— 整段挪走。
+    let body = filler(32) + &para("", &three_lines);
+    assert_eq!(page_of("widow.docx", &body, "三行段落"), 1);
+    // 明确关掉时照常拆开。
+    let body = filler(32) + &para(r#"<w:widowControl w:val="0"/>"#, &three_lines);
+    assert_eq!(page_of("no_widow.docx", &body, "三行段落"), 0);
+
+    // 同一样式的相邻段落之间不加段距。
+    let spaced = |ctx: &str| {
+        (0..3)
+            .map(|i| para_after(400, ctx, &format!("标记{i}行")))
+            .collect::<String>()
+    };
+    let gap = |name: &str, ctx: &str| {
+        let pages = common::pdftext::extract(&convert(&make_docx(name, &spaced(ctx))).value.pdf);
+        pages[0].lines[0].y - pages[0].lines[1].y
+    };
+    assert!((gap("spaced.docx", "") - 40.0).abs() < 0.01);
+    assert!((gap("contextual.docx", "<w:contextualSpacing/>") - 20.0).abs() < 0.01);
+}

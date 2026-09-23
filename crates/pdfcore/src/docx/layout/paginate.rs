@@ -59,12 +59,51 @@ impl<'a> Paginator<'a> {
         self.used <= f32::EPSILON
     }
 
+    /// 段前距实际要加多少：与上一段的段后距取较大值时，只补差额。
+    fn gap_before(&self, para: &ParaBox, last_after: f32) -> f32 {
+        if self.collapse_spacing {
+            (para.space_before - last_after).max(0.0)
+        } else {
+            para.space_before
+        }
+    }
+
+    /// 与下段同页：`chain` 里的各段整段、再加 `next` 的第一行，当前页放不下、
+    /// 又不在页首时，先换页。在页首就照排 —— 比一页还长的串只能被断开。
+    pub fn keep_together(&mut self, chain: &[&ParaBox], next: Option<&ParaBox>) {
+        if self.at_page_top() || chain.first().is_some_and(|p| p.page_break_before) {
+            return;
+        }
+        let mut last_after = self.last_after;
+        let mut need = 0.0;
+        for p in chain {
+            need += self.gap_before(p, last_after) + p.body_height() + p.space_after;
+            last_after = p.space_after;
+        }
+        if let Some(n) = next {
+            if !n.page_break_before {
+                need += self.gap_before(n, last_after) + n.first_line_height();
+            }
+        }
+        if self.used + need > self.capacity + FIT_TOLERANCE {
+            self.new_page();
+        }
+    }
+
     pub fn place_para(&mut self, para: &ParaBox) {
         let at_top = match self.page_break_before {
             PageBreakBefore::FirstPageTopOnly => self.at_page_top() && self.pages.len() == 1,
             PageBreakBefore::AnyPageTop => self.at_page_top(),
         };
         if para.page_break_before && !at_top {
+            self.new_page();
+        }
+        // 段中不分页：整段放不下、又不在页首，就整段挪到下一页。
+        if para.keep_lines
+            && !self.at_page_top()
+            && self.used + self.gap_before(para, self.last_after) + para.body_height()
+                > self.capacity + FIT_TOLERANCE
+        {
             self.new_page();
         }
         // 段前距在页首也照常生效。
@@ -84,7 +123,10 @@ impl<'a> Paginator<'a> {
             ParaBody::Lines(lines) => {
                 let mut next = 0;
                 while next < lines.len() {
-                    let n = fit_lines(&lines[next..], self.used, self.capacity);
+                    let mut n = fit_lines(&lines[next..], self.used, self.capacity);
+                    if para.widow_control {
+                        n = widow_orphan(lines.len(), next, n, &lines[..], self.at_page_top());
+                    }
                     if n == 0 {
                         self.new_page();
                         continue;
@@ -113,6 +155,31 @@ impl<'a> Paginator<'a> {
         let page = self.pages.last_mut().expect("至少有一页");
         page.ops.extend(line.ops.iter().map(|op| op.shifted(base)));
         self.used += line.height;
+    }
+}
+
+/// 孤行控制：段落从第 `next` 行起、当前页放得下 `n` 行时，实际该放几行。
+///
+/// - 最后一行不单独落到下一页：只剩一行放不下时，再往下一页多挪一行；
+/// - 第一行不单独留在页底：段落的头一行放得下、第二行放不下时，整段挪走。
+///
+/// 分页符造成的拆分不算。在页首时至少放一行，否则永远排不出去。
+fn widow_orphan(total: usize, next: usize, n: usize, lines: &[Line], at_top: bool) -> usize {
+    let split_by_overflow = next + n < total && n > 0 && !lines[next + n - 1].page_break_after;
+    if !split_by_overflow {
+        return n;
+    }
+    let mut m = n;
+    if total - (next + m) == 1 && m >= 2 {
+        m -= 1;
+    }
+    if next == 0 && m == 1 && total >= 2 {
+        m = 0;
+    }
+    if at_top {
+        m.max(1)
+    } else {
+        m
     }
 }
 
@@ -187,6 +254,21 @@ mod tests {
         let l = [line(40.56, 31.2), line(40.56, 31.2)];
         assert_eq!(fit_lines(&l, 0.0, 72.0), 2);
         assert_eq!(fit_lines(&l, 0.0, 71.0), 1);
+    }
+
+    #[test]
+    fn widows_and_orphans_are_avoided() {
+        let l = lines(&[10.0; 6]);
+        // 6 行里放得下 5 行：最后一行不单独落下去，改放 4 行。
+        assert_eq!(widow_orphan(6, 0, 5, &l, false), 4);
+        // 只放得下第一行：整段挪走。
+        assert_eq!(widow_orphan(6, 0, 1, &l, false), 0);
+        // 在页首时至少放一行。
+        assert_eq!(widow_orphan(6, 0, 1, &l, true), 1);
+        // 整段放得下：不动。
+        assert_eq!(widow_orphan(6, 0, 6, &l, false), 6);
+        // 两行的段落只放得下一行：两条规则一起，整段挪走。
+        assert_eq!(widow_orphan(2, 0, 1, &l, false), 0);
     }
 
     #[test]

@@ -184,6 +184,10 @@ pub(super) fn parse_ppr(r: &mut Rd) -> Result<(PPr, Option<SectPr>)> {
                 "autoSpaceDE" => ppr.auto_space_latin = Some(on_off(&e)),
                 "autoSpaceDN" => ppr.auto_space_digits = Some(on_off(&e)),
                 "overflowPunct" => ppr.overflow_punct = Some(on_off(&e)),
+                "keepNext" => ppr.keep_next = Some(on_off(&e)),
+                "keepLines" => ppr.keep_lines = Some(on_off(&e)),
+                "widowControl" => ppr.widow_control = Some(on_off(&e)),
+                "contextualSpacing" => ppr.contextual_spacing = Some(on_off(&e)),
                 // 段落属性里的 `w:tab` 只会出现在 `w:tabs` 里。
                 "tab" => {
                     if let Some(t) = parse_tab(&e) {
