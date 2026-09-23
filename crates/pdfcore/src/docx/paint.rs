@@ -108,7 +108,10 @@ pub fn paint(
                     width,
                     color,
                     dash,
-                } => canvas.stroke_line(*from, *to, *width, *color, Some(dash)),
+                } => {
+                    let dash = (!dash.is_empty()).then_some(dash.as_slice());
+                    canvas.stroke_line(*from, *to, *width, *color, dash)
+                }
                 PaintOp::Link {
                     x1,
                     y1,

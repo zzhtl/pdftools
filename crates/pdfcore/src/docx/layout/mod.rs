@@ -13,12 +13,13 @@ mod metrics;
 mod paginate;
 mod para;
 mod script;
+mod table;
 mod text;
 
 pub use calib::{
     AutoSpace, Breaks, Calib, Cascade, CharClass, CharGrid, Decor, EmptyPara, FixedBaseline, Flow,
     GridLayout, HangingIndent, HangingPunct, HeaderFooter, Justify, Kerning, LineGap, ListNumbers,
-    Overflow, PageBottom, PageBreakBefore, ParaSpacing, RunFormat, Sections, Tabs, Theme,
+    Overflow, PageBottom, PageBreakBefore, ParaSpacing, RunFormat, Sections, Tables, Tabs, Theme,
     TrailingSpaces,
 };
 
@@ -44,7 +45,8 @@ pub enum PaintOp {
         synthetic_bold: bool,
         synthetic_italic: bool,
     },
-    /// 虚线、点线：下划线与段落边框。`dash` 是 PDF 的虚线样式（线段、间隔交替）。
+    /// 描边的线：段落边框、表格框线，以及虚线、点线的下划线。`dash` 是 PDF 的虚线
+    /// 样式（线段、间隔交替），空的是实线。
     Line {
         from: (f32, f32),
         to: (f32, f32),
@@ -143,8 +145,8 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
             [PageKind::Default, PageKind::First, PageKind::Even].map(|kind| {
                 let mut height = |set: &ir::HeaderSet| {
                     let blocks = pick_story(set, kind).filter(|_| hf_on)?;
-                    let paras = story_boxes(blocks, s, doc, book, calib, &|_| None);
-                    Some(stack_story(&paras, &s.page, collapse, calib).1)
+                    let boxes = story_boxes(blocks, s, doc, book, calib, collapse, &|_| None);
+                    Some(stack(boxes, collapse, calib).1)
                 };
                 (height(&s.headers), height(&s.footers))
             })
@@ -176,19 +178,14 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
             width: section.page.content_width(),
             default_tab_stop: doc.default_tab_stop,
             char_pitch: section.char_pitch,
+            punct_hangs: true,
             calib,
         };
-        measured.extend(doc.blocks[section.blocks.clone()].iter().map(|block| {
-            match block {
-                ir::Block::Para(p) => Measured::Para(para::measure(p, &env, book)),
-                ir::Block::Placeholder(ph) => Measured::Placeholder(
-                    placeholder_paras(ph)
-                        .iter()
-                        .map(|p| para::measure(p, &env, book))
-                        .collect(),
-                ),
-            }
-        }));
+        measured.extend(
+            doc.blocks[section.blocks.clone()]
+                .iter()
+                .map(|block| measure_block(block, &env, book, collapse, &|_| None)),
+        );
     }
     if calib.flow == Flow::Word {
         contextual_spacing(&doc.blocks, &mut measured);
@@ -266,7 +263,7 @@ fn pick_story(set: &ir::HeaderSet, kind: PageKind) -> Option<&[ir::Block]> {
     }
 }
 
-/// 量页眉页脚里的段落。它们不吸附行网格（LibreOffice 实测）。`value` 给出域的值，
+/// 量页眉页脚。它们不吸附行网格（LibreOffice 实测）。`value` 给出域的值，
 /// None 时用缓存的结果。
 fn story_boxes(
     blocks: &[ir::Block],
@@ -274,60 +271,99 @@ fn story_boxes(
     doc: &ir::Document,
     book: &mut FontBook,
     calib: &Calib,
+    collapse: bool,
     value: &dyn Fn(&ir::Field) -> Option<String>,
-) -> Vec<para::ParaBox> {
+) -> Vec<Measured> {
     let env = para::Env {
         grid: None,
         left: section.page.margin_left,
         width: section.page.content_width(),
         default_tab_stop: doc.default_tab_stop,
         char_pitch: None,
+        punct_hangs: true,
         calib,
     };
-    let mut measured: Vec<Measured> = blocks
-        .iter()
-        .map(|block| match block {
-            ir::Block::Para(p) => Measured::Para(para::measure(&with_fields(p, value), &env, book)),
-            ir::Block::Placeholder(ph) => Measured::Placeholder(
-                placeholder_paras(ph)
-                    .iter()
-                    .map(|p| para::measure(p, &env, book))
-                    .collect(),
-            ),
-        })
-        .collect();
-    join_boxes(&mut measured);
-    measured
-        .into_iter()
-        .flat_map(|m| match m {
-            Measured::Para(b) => vec![b],
-            Measured::Placeholder(paras) => paras,
-        })
-        .collect()
+    measure_blocks(blocks, &env, book, collapse, value)
 }
 
-/// 把段落从纸张顶端往下叠起来：返回绘制操作与总高度。
-fn stack_story(
-    paras: &[para::ParaBox],
-    page: &ir::PageGeom,
+/// 量一个块。表格的各格递归地量好、叠起来。`value` 给出域的值，None 时用缓存的结果。
+fn measure_block(
+    block: &ir::Block,
+    env: &para::Env,
+    book: &mut FontBook,
     collapse: bool,
-    calib: &Calib,
-) -> (Vec<PaintOp>, f32) {
-    let frame = paginate::Frame {
+    value: &dyn Fn(&ir::Field) -> Option<String>,
+) -> Measured {
+    match block {
+        ir::Block::Para(p) => Measured::Para(para::measure(&with_fields(p, value), env, book)),
+        ir::Block::Placeholder(ph) => Measured::Placeholder(
+            placeholder_paras(ph)
+                .iter()
+                .map(|p| para::measure(p, env, book))
+                .collect(),
+        ),
+        ir::Block::Table(t) => Measured::Table(table::measure(t, env, &mut |blocks, env| {
+            let boxes = measure_blocks(blocks, env, book, collapse, value);
+            stack(boxes, collapse, env.calib)
+        })),
+    }
+}
+
+/// 量一串块（单元格、页眉页脚），同正文一样处理段距与合框。
+fn measure_blocks(
+    blocks: &[ir::Block],
+    env: &para::Env,
+    book: &mut FontBook,
+    collapse: bool,
+    value: &dyn Fn(&ir::Field) -> Option<String>,
+) -> Vec<Measured> {
+    let mut measured: Vec<Measured> = blocks
+        .iter()
+        .map(|block| measure_block(block, env, book, collapse, value))
+        .collect();
+    if env.calib.flow == Flow::Word {
+        contextual_spacing(blocks, &mut measured);
+    }
+    join_boxes(&mut measured);
+    measured
+}
+
+/// 把量好的块从上往下叠起来，不分页：返回绘制操作（y 以顶端为 0）与总高度。
+/// 单元格、页眉页脚里的分页符不起作用。
+fn stack(mut measured: Vec<Measured>, collapse: bool, calib: &Calib) -> (Vec<PaintOp>, f32) {
+    let endless = paginate::Frame {
         page: ir::PageGeom {
+            w_pt: 0.0,
+            h_pt: 0.0,
             margin_top: 0.0,
-            ..*page
+            margin_bottom: 0.0,
+            margin_left: 0.0,
+            margin_right: 0.0,
+            header_dist: 0.0,
+            footer_dist: 0.0,
         },
         origin: 0.0,
         capacity: f32::MAX / 4.0,
     };
-    let mut stack =
-        paginate::Paginator::new(paginate::Frames::uniform(frame), None, collapse, calib);
-    for p in paras {
-        stack.place_para(p);
+    let mut pages =
+        paginate::Paginator::new(paginate::Frames::uniform(endless), None, collapse, calib);
+    for m in &mut measured {
+        match m {
+            Measured::Para(p) => {
+                p.ignore_page_breaks();
+                pages.place_para(p);
+            }
+            Measured::Placeholder(paras) => {
+                for p in paras {
+                    p.ignore_page_breaks();
+                    pages.place_para(p);
+                }
+            }
+            Measured::Table(t) => pages.place_table(t),
+        }
     }
-    let height = stack.used();
-    let ops = stack
+    let height = pages.used();
+    let ops = pages
         .finish()
         .into_iter()
         .next()
@@ -425,13 +461,13 @@ fn draw_headers_footers(
             let Some(blocks) = pick_story(set, kind) else {
                 continue;
             };
-            let paras = story_boxes(blocks, s, doc, book, calib, &value);
-            let (ops, height) = stack_story(&paras, &s.page, collapse, calib);
+            let boxes = story_boxes(blocks, s, doc, book, calib, collapse, &value);
+            let (ops, height) = stack(boxes, collapse, calib);
             grew |= height > frozen.unwrap_or(0.0) + 1.0;
             let dy = if is_header {
-                -s.page.header_dist
+                s.page.h_pt - s.page.header_dist
             } else {
-                s.page.footer_dist + height - s.page.h_pt
+                s.page.footer_dist + height
             };
             page.ops.extend(ops.iter().map(|op| op.shifted(dy)));
         }
@@ -487,8 +523,31 @@ fn place_block(
                 pages.place_para(b);
             }
         }
-        (ir::Block::Para(_), Measured::Placeholder(_)) => {
-            unreachable!("量出来的与原块一一对应")
+        (ir::Block::Table(t), Measured::Table(tb)) => {
+            let mut inside = Vec::new();
+            table_placeholders(t, &mut inside);
+            for ph in inside {
+                warnings.push(
+                    Warning::new(
+                        WarningKind::UnsupportedElement,
+                        format!("{} 未能渲染", ph.kind.label()),
+                    )
+                    .at_page(pages.page_index() + 1),
+                );
+            }
+            pages.place_table(tb);
+        }
+        _ => unreachable!("量出来的与原块一一对应"),
+    }
+}
+
+/// 表格里画不出来的内容（嵌套的表格、图片），按出现的顺序。
+fn table_placeholders<'a>(t: &'a ir::Table, out: &mut Vec<&'a ir::Placeholder>) {
+    for block in t.rows.iter().flat_map(|r| &r.cells).flat_map(|c| &c.blocks) {
+        match block {
+            ir::Block::Placeholder(ph) => out.push(ph),
+            ir::Block::Table(inner) => table_placeholders(inner, out),
+            ir::Block::Para(_) => {}
         }
     }
 }
@@ -497,6 +556,7 @@ fn place_block(
 enum Measured {
     Para(para::ParaBox),
     Placeholder(Vec<para::ParaBox>),
+    Table(table::TableBox),
 }
 
 /// 同一样式的相邻段落之间不加段距：`contextualSpacing` 写在谁身上，就去掉谁靠近
@@ -644,6 +704,7 @@ mod tests {
                 width: 400.0,
                 default_tab_stop: 36.0,
                 char_pitch: None,
+                punct_hangs: true,
                 calib: &calib,
             };
             let b = para::measure(&p, &env, &mut book);

@@ -22,6 +22,8 @@ pub(super) struct Env<'a> {
     pub default_tab_stop: f32,
     /// 字符网格的格宽（点），见 [`CharGrid::Cells`](super::calib::CharGrid)。
     pub char_pitch: Option<f32>,
+    /// 行尾标点能伸出栏外。单元格里不能，见 [`Tables::Drawn`](super::calib::Tables)。
+    pub punct_hangs: bool,
     pub calib: &'a Calib,
 }
 
@@ -115,6 +117,14 @@ impl ParaBox {
         }
     }
 
+    /// 去掉段前分页与行尾的分页符：单元格、页眉页脚不分页。
+    pub fn ignore_page_breaks(&mut self) {
+        self.page_break_before = false;
+        if let ParaBody::Lines(lines) = &mut self.body {
+            lines.iter_mut().for_each(|l| l.page_break_after = false);
+        }
+    }
+
     /// 边框占的高度：上、下边框各自的厚度与距离。
     pub fn decor_height(&self) -> f32 {
         self.decor.as_ref().map_or(0.0, |d| d.top() + d.bottom())
@@ -203,10 +213,12 @@ fn mark_line(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> Option<Lin
 }
 
 /// 行尾哪些东西可以悬挂在右边距外。
-fn hang(para: &ir::Paragraph, calib: &Calib) -> Hang {
+fn hang(para: &ir::Paragraph, env: &Env) -> Hang {
     Hang {
-        spaces: calib.trailing_spaces == TrailingSpaces::Hang,
-        punct: para.overflow_punct && calib.hanging_punct == HangingPunct::Punctuation,
+        spaces: env.calib.trailing_spaces == TrailingSpaces::Hang,
+        punct: para.overflow_punct
+            && env.punct_hangs
+            && env.calib.hanging_punct == HangingPunct::Punctuation,
     }
 }
 
@@ -267,7 +279,7 @@ fn break_lines(para: &ir::Paragraph, sp: &ShapedPara, env: &Env, book: &FontBook
         let (end, mandatory) = sp.next_break(
             start,
             avail,
-            hang(para, env.calib),
+            hang(para, env),
             line_start(para, sp, is_first, env.calib),
             &rules,
             env.calib.overflow == Overflow::CharBoundary,
@@ -329,7 +341,7 @@ fn line(
     );
 
     // 悬挂在右边距外的行尾空格、标点不参与对齐。
-    let measured = range.start..sp.measured_end(range.start, range.end, hang(para, env.calib));
+    let measured = range.start..sp.measured_end(range.start, range.end, hang(para, env));
     let rules = tab_rules(para, env);
     let has_tabs = sp.tabs.iter().any(|t| range.contains(t));
     let line_width = if has_tabs {

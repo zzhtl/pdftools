@@ -508,17 +508,136 @@ pub enum BreakKind {
 
 #[derive(Debug, Clone, Default)]
 pub struct Table {
+    pub props: TblPr,
+    /// `w:tblGrid/w:gridCol`：各列的宽度，twips。
+    pub grid: Vec<i32>,
     pub rows: Vec<Row>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Row {
+    pub props: TrPr,
+    /// `w:tblPrEx`：这一行对表格属性的例外（边框、单元格边距）。
+    pub exceptions: TblPr,
     pub cells: Vec<Cell>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Cell {
+    pub props: TcPr,
     pub content: Story,
+}
+
+/// 表格、单元格的宽度（`w:tblW`、`w:tcW`）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Width {
+    Auto,
+    Twips(i32),
+    /// 占版心（或所在单元格）宽度的百分比。
+    Percent(f32),
+}
+
+/// 表格或单元格的四边（与表格内部的横线、竖线）。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TableBorders {
+    pub top: Option<Border>,
+    pub left: Option<Border>,
+    pub bottom: Option<Border>,
+    pub right: Option<Border>,
+    pub inside_h: Option<Border>,
+    pub inside_v: Option<Border>,
+}
+
+impl TableBorders {
+    pub fn merge(&mut self, other: &TableBorders) {
+        macro_rules! take {
+            ($($f:ident),*) => { $( if other.$f.is_some() { self.$f = other.$f; } )* };
+        }
+        take!(top, left, bottom, right, inside_h, inside_v);
+    }
+}
+
+/// 单元格边距（`w:tblCellMar`、`w:tcMar`），twips。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CellMargins {
+    pub top: Option<i32>,
+    pub left: Option<i32>,
+    pub bottom: Option<i32>,
+    pub right: Option<i32>,
+}
+
+impl CellMargins {
+    pub fn merge(&mut self, other: &CellMargins) {
+        macro_rules! take {
+            ($($f:ident),*) => { $( if other.$f.is_some() { self.$f = other.$f; } )* };
+        }
+        take!(top, left, bottom, right);
+    }
+}
+
+/// `w:tblPr`（`w:tblPrEx` 也用它，只是只有其中几项）。
+#[derive(Debug, Clone, Default)]
+pub struct TblPr {
+    pub style_id: Option<String>,
+    pub width: Option<Width>,
+    /// `w:jc`：表格在版心里的对齐。
+    pub align: Option<Align>,
+    /// `w:tblInd`：表格往里缩进多少，twips。从哪里量随兼容模式而变，见 `ir::Table::indent`。
+    pub indent: Option<i32>,
+    pub borders: TableBorders,
+    pub cell_margins: CellMargins,
+    /// `w:tblLayout w:type="fixed"`：列宽不随内容调整。
+    pub fixed_layout: bool,
+    pub shading: Option<Option<[u8; 3]>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeightRule {
+    Auto,
+    AtLeast,
+    Exact,
+}
+
+/// `w:trPr`。
+#[derive(Debug, Clone, Default)]
+pub struct TrPr {
+    /// `w:trHeight`：行高（twips）与它的含义。
+    pub height: Option<(i32, HeightRule)>,
+    /// `w:cantSplit`：这一行不跨页拆开。
+    pub cant_split: bool,
+    /// `w:tblHeader`：标题行，跨页时在新的一页重复。
+    pub header: bool,
+    /// `w:gridBefore` / `w:gridAfter`：行首、行尾空出几列。
+    pub grid_before: u32,
+    pub grid_after: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VMerge {
+    /// 纵向合并的第一格。
+    Restart,
+    /// 并入上面那一格。
+    Continue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VAlign {
+    Top,
+    Center,
+    Bottom,
+}
+
+/// `w:tcPr`。
+#[derive(Debug, Clone, Default)]
+pub struct TcPr {
+    pub width: Option<Width>,
+    /// `w:gridSpan`：横跨几列。没写是 1。
+    pub grid_span: Option<u32>,
+    pub v_merge: Option<VMerge>,
+    pub borders: TableBorders,
+    pub shading: Option<Option<[u8; 3]>>,
+    pub margins: CellMargins,
+    pub v_align: Option<VAlign>,
 }
 
 /// `w:docGrid` —— 中文排版的**行网格**。
@@ -736,6 +855,9 @@ pub struct Settings {
     pub even_and_odd_headers: bool,
     /// `w:themeFontLang/@w:eastAsia`（`zh-CN` 之类）：东亚主题字体取主题里哪个文种的字体。
     pub theme_font_lang_east_asia: Option<String>,
+    /// `w:compatSetting[@w:name="compatibilityMode"]`：按哪一版 Word 排版（14 是
+    /// Word 2010，15 是 Word 2013 及以后）。
+    pub compat_mode: Option<u32>,
 }
 
 #[derive(Debug, Clone)]

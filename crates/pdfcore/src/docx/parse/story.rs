@@ -7,6 +7,7 @@
 use quick_xml::events::{BytesStart, Event};
 
 use super::props::{parse_ppr, parse_rpr, parse_sect_pr};
+use super::table::{parse_grid, parse_tbl_pr, parse_tc_pr, parse_tr_pr};
 use super::{attr, resolve_entity, skip, xml_err, Rd};
 use crate::docx::model::{
     Block, BreakKind, Cell, FieldChar, LinkRef, Para, Row, Run, RunItem, SectPr, Story, Table,
@@ -77,7 +78,7 @@ fn skips_subtree(name: &str) -> bool {
             | "Choice"
             // 内容控件的属性（占位格式、下拉项……），不是正文。
             | "sdtPr" | "sdtEndPr"
-            // 表格、行、单元格的属性，本版本还不用。
+            // 表格、行、单元格的属性由各自的解析函数先读走，出现在别处就不是正文。
             | "tblPr" | "tblGrid" | "tblPrEx" | "trPr" | "tcPr"
     )
 }
@@ -299,6 +300,8 @@ fn parse_table(r: &mut Rd) -> Result<Table> {
     loop {
         match r.read_event().map_err(xml_err)? {
             Event::Start(e) => match e.local_name().as_ref() {
+                "tblPr" => table.props = parse_tbl_pr(r, "tblPr")?,
+                "tblGrid" => table.grid = parse_grid(r)?,
                 "tr" => table.rows.push(parse_row(r)?),
                 name if skips_subtree(name) => skip(r, name)?,
                 // 包在内容控件、customXml 里的行。
@@ -317,12 +320,9 @@ fn parse_row(r: &mut Rd) -> Result<Row> {
     loop {
         match r.read_event().map_err(xml_err)? {
             Event::Start(e) => match e.local_name().as_ref() {
-                "tc" => {
-                    let mut cell = Cell::default();
-                    let mut no_section = None;
-                    parse_blocks(r, "tc", &mut cell.content, &mut no_section)?;
-                    row.cells.push(cell);
-                }
+                "trPr" => row.props = parse_tr_pr(r)?,
+                "tblPrEx" => row.exceptions = parse_tbl_pr(r, "tblPrEx")?,
+                "tc" => row.cells.push(parse_cell(r)?),
                 name if skips_subtree(name) => skip(r, name)?,
                 _ => {}
             },
@@ -332,4 +332,28 @@ fn parse_row(r: &mut Rd) -> Result<Row> {
         }
     }
     Ok(row)
+}
+
+/// 一个单元格：属性，以及与正文同样的块级内容。
+fn parse_cell(r: &mut Rd) -> Result<Cell> {
+    let mut cell = Cell::default();
+    loop {
+        match r.read_event().map_err(xml_err)? {
+            Event::Start(e) => match e.local_name().as_ref() {
+                "tcPr" => cell.props = parse_tc_pr(r)?,
+                "p" => cell.content.push(Block::Para(parse_paragraph(r)?)),
+                "tbl" => cell.content.push(Block::Table(parse_table(r)?)),
+                name if skips_subtree(name) => skip(r, name)?,
+                // 内容控件、customXml 里的段落与表格。
+                _ => {}
+            },
+            Event::Empty(e) if e.local_name().as_ref() == "p" => {
+                cell.content.push(Block::Para(Para::default()))
+            }
+            Event::End(e) if e.local_name().as_ref() == "tc" => break,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(cell)
 }

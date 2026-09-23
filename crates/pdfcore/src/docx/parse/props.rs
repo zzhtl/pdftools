@@ -28,7 +28,7 @@ fn parse_color(s: &str) -> Option<[u8; 3]> {
 /// `w:shd` 实际的填充色。`w:val` 是图案：`clear` 只有底色（`w:fill`），`solid`
 /// 全是前景色（`w:color`），`pctN` 是前景色按 N% 盖在底色上；其余图案按底色画。
 /// 没有颜色（auto、`nil`）时返回 None。
-fn parse_shd(e: &quick_xml::events::BytesStart) -> Option<[u8; 3]> {
+pub(super) fn parse_shd(e: &quick_xml::events::BytesStart) -> Option<[u8; 3]> {
     let val = attr(e, "val").unwrap_or_default();
     let color = |name| {
         attr(e, name)
@@ -56,7 +56,7 @@ fn parse_shd(e: &quick_xml::events::BytesStart) -> Option<[u8; 3]> {
 }
 
 /// `w:pBdr` 里的一条边。多线样式（三线、粗细线）近似成双线，其余线型近似成单线。
-fn parse_border(e: &quick_xml::events::BytesStart) -> Border {
+pub(super) fn parse_border(e: &quick_xml::events::BytesStart) -> Border {
     let style = match attr(e, "val").as_deref() {
         None | Some("nil") | Some("none") => BorderStyle::None,
         Some("dotted") => BorderStyle::Dotted,

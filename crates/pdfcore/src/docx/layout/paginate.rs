@@ -2,6 +2,7 @@
 
 use super::calib::{Calib, PageBreakBefore};
 use super::para::{Line, ParaBody, ParaBox, ParaDecor};
+use super::table::TableBox;
 use super::{Page, PageKind, PaintOp};
 use crate::docx::ir::{self, BorderStyle, PageGeom, SectionStart};
 
@@ -289,6 +290,42 @@ impl Paginator {
         self.last_after = para.space_after;
     }
 
+    /// 放一张表格。行不拆开，纵向合并连在一起的几行放在同一页；放不下又不在页首
+    /// 就换页：旧页按最后一行的下边收口，新页上下一行按它自己的上边开头。
+    pub fn place_table(&mut self, t: &TableBox) {
+        self.close_box();
+        let mut from = 0;
+        // 本页上已经放了这张表格的行。
+        let mut placed = false;
+        while from < t.row_count() {
+            let to = t.group_end(from);
+            let need = t.height(from, to, !placed) + t.closing(to);
+            if self.used + need > self.frame.capacity + FIT_TOLERANCE && !self.at_page_top() {
+                if placed {
+                    self.close_table(t, from - 1);
+                }
+                self.new_page();
+                placed = false;
+                continue;
+            }
+            let y = self.y(self.used);
+            let page = self.pages.last_mut().expect("至少有一页");
+            self.used += t.draw(from, to, !placed, y, &mut page.ops);
+            placed = true;
+            from = to + 1;
+        }
+        if placed {
+            self.close_table(t, t.row_count() - 1);
+        }
+        self.last_after = 0.0;
+    }
+
+    fn close_table(&mut self, t: &TableBox, ri: usize) {
+        let y = self.y(self.used);
+        let page = self.pages.last_mut().expect("至少有一页");
+        self.used += t.close(ri, y, &mut page.ops);
+    }
+
     /// 本页接下来要放 `d` 框里的行，第一行之前还要占多高：框还没开就是上边框，
     /// 接着上一段的框就是分隔线（有的话）。
     fn lead(&self, d: &ParaDecor) -> f32 {
@@ -398,7 +435,7 @@ const FIT_TOLERANCE: f32 = 1e-3;
 
 /// 框的哪一边。
 #[derive(Clone, Copy)]
-enum Side {
+pub(super) enum Side {
     Top,
     Bottom,
     Left,
@@ -407,62 +444,47 @@ enum Side {
 
 /// 画一条边框线。`outer` 是它的外沿（上边框的上沿、左边框的左沿），线往框里长；
 /// `span` 是它沿线方向的范围。
-fn edge(ops: &mut Vec<PaintOp>, b: &ir::Border, side: Side, (lo, hi): (f32, f32), outer: f32) {
+///
+/// 实线也按描边画，不画成细长的矩形：阅读器给描边保底一个像素宽，0.5pt 的表格线
+/// 缩小看时不会变淡、时有时无。平头线端，盖住的范围与矩形相同。
+pub(super) fn edge(
+    ops: &mut Vec<PaintOp>,
+    b: &ir::Border,
+    side: Side,
+    (lo, hi): (f32, f32),
+    outer: f32,
+) {
     let inward = match side {
         Side::Top | Side::Right => -1.0,
         Side::Bottom | Side::Left => 1.0,
     };
     let horizontal = matches!(side, Side::Top | Side::Bottom);
     let w = b.width;
-    // 离外沿 `from` 处起、一条线宽的带子。
-    let band = |from: f32| {
-        let (a, c) = (outer + inward * from, outer + inward * (from + w));
-        let (p0, p1) = (a.min(c), a.max(c));
-        if horizontal {
-            PaintOp::Rect {
-                x: lo,
-                y: p0,
-                w: hi - lo,
-                h: p1 - p0,
-                color: b.color,
-            }
+    // 离外沿 `from` 处起、一条线宽的线。
+    let line = |from: f32, dash: Vec<f32>| {
+        let mid = outer + inward * (from + w / 2.0);
+        let (from, to) = if horizontal {
+            ((lo, mid), (hi, mid))
         } else {
-            PaintOp::Rect {
-                x: p0,
-                y: lo,
-                w: p1 - p0,
-                h: hi - lo,
-                color: b.color,
-            }
+            ((mid, lo), (mid, hi))
+        };
+        PaintOp::Line {
+            from,
+            to,
+            width: w,
+            color: b.color,
+            dash,
         }
     };
+    let unit = w.max(0.5);
     match b.style {
         BorderStyle::Double => {
-            ops.push(band(0.0));
-            ops.push(band(2.0 * w));
+            ops.push(line(0.0, Vec::new()));
+            ops.push(line(2.0 * w, Vec::new()));
         }
-        BorderStyle::Dotted | BorderStyle::Dashed => {
-            let mid = outer + inward * w / 2.0;
-            let unit = w.max(0.5);
-            let dash = if b.style == BorderStyle::Dotted {
-                vec![unit, unit]
-            } else {
-                vec![unit * 6.0, unit * 3.0]
-            };
-            let (from, to) = if horizontal {
-                ((lo, mid), (hi, mid))
-            } else {
-                ((mid, lo), (mid, hi))
-            };
-            ops.push(PaintOp::Line {
-                from,
-                to,
-                width: w,
-                color: b.color,
-                dash,
-            });
-        }
-        _ => ops.push(band(0.0)),
+        BorderStyle::Dotted => ops.push(line(0.0, vec![unit, unit])),
+        BorderStyle::Dashed => ops.push(line(0.0, vec![unit * 6.0, unit * 3.0])),
+        _ => ops.push(line(0.0, Vec::new())),
     }
 }
 

@@ -37,6 +37,27 @@ pub struct Calib {
     pub kerning: Kerning,
     pub line_gap: LineGap,
     pub char_grid: CharGrid,
+    pub tables: Tables,
+}
+
+/// 表格。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tables {
+    /// 不画：一句说明加上表格里的文字，并给出警告。
+    Placeholder,
+    /// 画出来。对照 LibreOffice 实测：
+    /// - 列宽取 `w:tblGrid`，是相邻两条列边界之间的距离；竖框线骑在列边界上，文字
+    ///   从列边界让出左右边距（默认各 5.4pt，上下为 0）；
+    /// - 左对齐时，Word 2013 起（`compatibilityMode` ≥ 15，没写也按 15）左框线的外沿
+    ///   在版心左边加 `w:tblInd` 处；Word 2010 让首格文字对齐正文，表格往左让出左边距。
+    ///   居中的表格按列宽居中，右对齐的最后一条列边界落在版心右边，都不看 `w:tblInd`；
+    /// - 竖直方向依次是上框线、第一行、行间框线……下框线，各占自己的线宽；行高的
+    ///   最小值、固定值都含本行的上框线；
+    /// - 底纹从上框线的外沿铺到下一条框线，横向从左框线中线到右框线中线；
+    /// - 纵向合并的格内容比几行加起来还高时，撑高最后一行；合并的几行放在同一页；
+    /// - 行不拆开：放不下就换页，旧页按最后一行的下边收口，新页按下一行自己的上边开头；
+    /// - 单元格里行尾的标点不伸出去：放不下就带着前一个字换行。
+    Drawn,
 }
 
 /// 字符网格（`w:docGrid w:type="linesAndChars"`，公文按它排成每行 28 字）。
@@ -416,6 +437,7 @@ impl Calib {
             kerning: Kerning::Word,
             line_gap: LineGap::Above,
             char_grid: CharGrid::Cells,
+            tables: Tables::Drawn,
         }
     }
 
@@ -448,6 +470,7 @@ impl Calib {
             kerning: Kerning::Always,
             line_gap: LineGap::Below,
             char_grid: CharGrid::Ignored,
+            tables: Tables::Placeholder,
         }
     }
 }

@@ -18,7 +18,7 @@
 use std::ops::Range;
 
 use super::layout::{
-    Calib, Cascade, CharGrid, HeaderFooter, ListNumbers, RunFormat, Sections, Theme,
+    Calib, Cascade, CharGrid, HeaderFooter, ListNumbers, RunFormat, Sections, Tables, Theme,
 };
 use super::model::{
     self, BreakKind, FieldChar, FontRef, LineRule, NumSuffix, PPr, RPr, RunItem, ThemeScript,
@@ -344,17 +344,19 @@ pub struct Borders {
     pub between: Option<Border>,
 }
 
+/// 一条框线换成点。`nil`、`none` 或零宽都是「没有」。
+fn border(b: model::Border) -> Option<Border> {
+    (b.style != BorderStyle::None && b.size_eighths > 0).then(|| Border {
+        style: b.style,
+        width: b.size_eighths as f32 / 8.0,
+        space: b.space_pt as f32,
+        color: b.color.unwrap_or([0, 0, 0]),
+    })
+}
+
 impl Borders {
     fn from_model(b: &model::ParaBorders) -> Self {
-        let side = |b: Option<model::Border>| {
-            b.filter(|b| b.style != BorderStyle::None && b.size_eighths > 0)
-                .map(|b| Border {
-                    style: b.style,
-                    width: b.size_eighths as f32 / 8.0,
-                    space: b.space_pt as f32,
-                    color: b.color.unwrap_or([0, 0, 0]),
-                })
-        };
+        let side = |b: Option<model::Border>| b.and_then(border);
         Self {
             top: side(b.top),
             left: side(b.left),
@@ -396,6 +398,63 @@ pub struct Placeholder {
 pub enum Block {
     Para(Paragraph),
     Placeholder(Placeholder),
+    Table(Table),
+}
+
+/// 表格。单位已换成点。
+#[derive(Debug, Clone)]
+pub struct Table {
+    /// 各列的宽度（`w:tblGrid`）：相邻两条列边界（框线的中线）之间的距离。
+    pub columns: Vec<f32>,
+    /// 左对齐时，第一条列边界离版心左边多远。由 `w:tblInd` 按兼容模式折算，
+    /// 见 [`Tables::Drawn`]。
+    pub indent: f32,
+    /// 表格在版心里的对齐（`w:jc`）。
+    pub align: Align,
+    pub rows: Vec<TableRow>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TableRow {
+    /// 行高：最小值或固定值（都含本行的上框线）。
+    pub height: Option<(f32, model::HeightRule)>,
+    pub cant_split: bool,
+    pub header: bool,
+    pub cells: Vec<TableCell>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TableCell {
+    /// 从第几列开始（`w:gridBefore` 已算进去），横跨几列。
+    pub col: usize,
+    pub span: usize,
+    /// 纵向合并：本格往下占几行（含本行）。
+    pub rows: usize,
+    /// 纵向合并里接在上一格下面的格：内容、底纹、框线都归开头的那一格。
+    pub continued: bool,
+    /// 四边的框线，已按单元格在表格里的位置取好（外沿用表格的四边，内部用
+    /// insideH / insideV），再叠上行例外与单元格自己的。
+    pub borders: CellBorders,
+    pub shading: Option<[u8; 3]>,
+    /// 上、左、下、右边距。
+    pub margins: [f32; 4],
+    pub v_align: model::VAlign,
+    pub blocks: Vec<Block>,
+}
+
+/// 单元格一条边的框线。`explicit`：单元格自己写的，与相邻单元格争这条边时优先。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Edge {
+    pub border: Option<Border>,
+    pub explicit: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CellBorders {
+    pub top: Edge,
+    pub left: Edge,
+    pub bottom: Edge,
+    pub right: Edge,
 }
 
 /// 一节：页面设置相同的一段正文。
@@ -508,6 +567,9 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
                     start = blocks.len();
                 }
             }
+            model::Block::Table(t) if calib.tables == Tables::Drawn => {
+                blocks.push(table(t, &ctx, &mut lists))
+            }
             model::Block::Table(t) => blocks.push(Block::Placeholder(table_placeholder(t))),
         }
     }
@@ -583,6 +645,9 @@ fn story_blocks(story: &model::Story, ctx: &Ctx) -> Vec<Block> {
     for block in story {
         match block {
             model::Block::Para(p) => push_paragraph(&mut out, p, ctx, None),
+            model::Block::Table(t) if ctx.calib.tables == Tables::Drawn => {
+                out.push(table(t, ctx, &mut None))
+            }
             model::Block::Table(t) => out.push(Block::Placeholder(table_placeholder(t))),
         }
     }
@@ -1018,7 +1083,203 @@ fn paragraph(
     }
 }
 
-/// 表格还画不出来：留下行列数和每个单元格的文字。
+/// 单元格的默认边距：左右各 108 twips（5.4pt），上下为 0。
+const DEFAULT_CELL_MARGINS: model::CellMargins = model::CellMargins {
+    top: Some(0),
+    left: Some(108),
+    bottom: Some(0),
+    right: Some(108),
+};
+
+/// 列数的上限。Word 的表格最多 63 列；超过这个数的只能是坏文件，按占位处理，
+/// 不去按它分配列宽。
+const MAX_COLUMNS: usize = 256;
+
+/// 表格：列宽、各格占哪几列哪几行、每格四边的框线与边距都在这里定下来。
+fn table(t: &model::Table, ctx: &Ctx, lists: &mut Option<Lists>) -> Block {
+    let span_of = |c: &model::Cell| c.props.grid_span.unwrap_or(1).max(1) as usize;
+    // 各行每一格从第几列开始。
+    let starts: Vec<Vec<usize>> = t
+        .rows
+        .iter()
+        .map(|row| {
+            let mut col = row.props.grid_before as usize;
+            row.cells
+                .iter()
+                .map(|c| {
+                    let start = col;
+                    col = col.saturating_add(span_of(c));
+                    start
+                })
+                .collect()
+        })
+        .collect();
+    let ncols = t
+        .rows
+        .iter()
+        .zip(&starts)
+        .map(|(row, s)| {
+            let end = s.last().zip(row.cells.last());
+            end.map_or(0, |(&col, c)| col.saturating_add(span_of(c)))
+                .saturating_add(row.props.grid_after as usize)
+        })
+        .max()
+        .unwrap_or(0)
+        .max(t.grid.len());
+    if ncols > MAX_COLUMNS {
+        return Block::Placeholder(table_placeholder(t));
+    }
+    // 列宽以 tblGrid 为准；网格缺列时用只占这一列的格写的宽度补，再不行就用已有列的平均宽度。
+    let mut columns: Vec<f32> = t.grid.iter().map(|&w| tw(w)).collect();
+    if columns.len() < ncols {
+        let mut from_cells = vec![None; ncols];
+        for (row, s) in t.rows.iter().zip(&starts) {
+            for (c, &col) in row.cells.iter().zip(s) {
+                if let (1, Some(model::Width::Twips(w))) = (span_of(c), c.props.width) {
+                    from_cells[col].get_or_insert(tw(w));
+                }
+            }
+        }
+        let fallback = match columns.len() {
+            0 => 72.0,
+            n => columns.iter().sum::<f32>() / n as f32,
+        };
+        let known = columns.len();
+        columns.extend(from_cells[known..].iter().map(|w| w.unwrap_or(fallback)));
+    }
+
+    // 纵向合并：写着 vMerge（续）、上一行同一列也有格开头的，接在那一格下面。
+    let cell_at = |ri: usize, col: usize| starts.get(ri)?.iter().position(|&s| s == col);
+    let continued = |ri: usize, col: usize| {
+        ri > 0
+            && cell_at(ri - 1, col).is_some()
+            && cell_at(ri, col)
+                .is_some_and(|k| t.rows[ri].cells[k].props.v_merge == Some(model::VMerge::Continue))
+    };
+
+    let last_row = t.rows.len().saturating_sub(1);
+    let rows = t
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(ri, row)| {
+            let mut edges = t.props.borders;
+            edges.merge(&row.exceptions.borders);
+            let mut margins = DEFAULT_CELL_MARGINS;
+            margins.merge(&t.props.cell_margins);
+            margins.merge(&row.exceptions.cell_margins);
+            let cells = row
+                .cells
+                .iter()
+                .zip(&starts[ri])
+                .map(|(cell, &col)| {
+                    let span = span_of(cell);
+                    let is_continued = continued(ri, col);
+                    let rows = if is_continued {
+                        1
+                    } else {
+                        1 + (ri + 1..t.rows.len())
+                            .take_while(|&rj| continued(rj, col))
+                            .count()
+                    };
+                    // 按位置取表格的框线：外沿用四边，内部用 insideH / insideV。
+                    let inherited = |b: Option<model::Border>| Edge {
+                        border: b.and_then(border),
+                        explicit: false,
+                    };
+                    let own = |mine: Option<model::Border>, fallback: Edge| match mine {
+                        Some(b) => Edge {
+                            border: border(b),
+                            explicit: true,
+                        },
+                        None => fallback,
+                    };
+                    let tc = &cell.props.borders;
+                    let outer = |at_edge: bool, edge, inside| {
+                        inherited(if at_edge { edge } else { inside })
+                    };
+                    let borders = CellBorders {
+                        top: own(tc.top, outer(ri == 0, edges.top, edges.inside_h)),
+                        bottom: own(
+                            tc.bottom,
+                            outer(ri + rows - 1 == last_row, edges.bottom, edges.inside_h),
+                        ),
+                        left: own(tc.left, outer(col == 0, edges.left, edges.inside_v)),
+                        right: own(
+                            tc.right,
+                            outer(col + span >= ncols, edges.right, edges.inside_v),
+                        ),
+                    };
+                    let mut m = margins;
+                    m.merge(&cell.props.margins);
+                    let pt = |v: Option<i32>| v.map(tw).unwrap_or(0.0);
+                    let shading = cell
+                        .props
+                        .shading
+                        .or(row.exceptions.shading)
+                        .or(t.props.shading)
+                        .flatten();
+                    let mut blocks = Vec::new();
+                    for b in &cell.content {
+                        match b {
+                            model::Block::Para(p) => {
+                                push_paragraph(&mut blocks, p, ctx, lists.as_mut())
+                            }
+                            // 嵌套的表格：本版本按占位处理。
+                            model::Block::Table(inner) => {
+                                blocks.push(Block::Placeholder(table_placeholder(inner)))
+                            }
+                        }
+                    }
+                    TableCell {
+                        col,
+                        span,
+                        rows,
+                        continued: is_continued,
+                        borders,
+                        shading,
+                        margins: [pt(m.top), pt(m.left), pt(m.bottom), pt(m.right)],
+                        v_align: cell.props.v_align.unwrap_or(model::VAlign::Top),
+                        blocks,
+                    }
+                })
+                .collect();
+            TableRow {
+                height: row.props.height.map(|(h, rule)| (tw(h), rule)),
+                cant_split: row.props.cant_split,
+                header: row.props.header,
+                cells,
+            }
+        })
+        .collect();
+
+    // Word 2013 起 `w:tblInd` 量到左框线的外沿；之前的版本让首格的文字与正文对齐，
+    // 表格往左让出单元格的左边距。
+    let indent = t.props.indent.map(tw).unwrap_or(0.0)
+        + if ctx.doc.settings.compat_mode.is_some_and(|m| m <= 14) {
+            let mut m = DEFAULT_CELL_MARGINS;
+            m.merge(&t.props.cell_margins);
+            -m.left.map(tw).unwrap_or(0.0)
+        } else {
+            t.props
+                .borders
+                .left
+                .and_then(border)
+                .map_or(0.0, |b| b.thickness() / 2.0)
+        };
+    Block::Table(Table {
+        columns,
+        indent,
+        align: match t.props.align {
+            Some(model::Align::Center) => Align::Center,
+            Some(model::Align::Right) => Align::Right,
+            _ => Align::Left,
+        },
+        rows,
+    })
+}
+
+/// 画不出来的表格：留下行列数和每个单元格的文字。
 fn table_placeholder(t: &model::Table) -> Placeholder {
     let mut text = Vec::new();
     collect_cell_texts(t, &mut text);
@@ -1098,7 +1359,7 @@ mod tests {
                     p.spans[0].style.font_latin.clone(),
                     p.spans[0].style.font_east_asia.clone(),
                 ),
-                Block::Placeholder(_) => panic!("只有段落"),
+                _ => panic!("只有段落"),
             })
             .collect()
     }
@@ -1281,6 +1542,113 @@ mod tests {
                 ("默认一".into(), "首页二".into()),
                 ("默认一".into(), "首页二".into()),
             ]
+        );
+    }
+
+    /// 表格：列宽取 tblGrid；框线按位置取表格的四边或 insideH / insideV，行例外与
+    /// 单元格自己写的依次盖上去；纵向合并记在开头那一格上。
+    #[test]
+    fn table_cells_get_positional_borders_and_merges() {
+        let b = |side: &str, sz: u32| {
+            format!(r#"<w:{side} w:val="single" w:sz="{sz}" w:color="000000"/>"#)
+        };
+        let tbl_borders: String = [("top", 12), ("left", 12), ("bottom", 12), ("right", 12)]
+            .iter()
+            .chain(&[("insideH", 4), ("insideV", 4)])
+            .map(|&(side, sz)| b(side, sz))
+            .collect();
+        let cell = |pr: &str, text: &str| {
+            format!("<w:tc><w:tcPr>{pr}</w:tcPr><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>")
+        };
+        let rows = [
+            cell(r#"<w:vMerge w:val="restart"/>"#, "甲")
+                + &cell("", "乙")
+                + &cell(r#"<w:shd w:val="clear" w:fill="FF0000"/>"#, "丙"),
+            r#"<w:tblPrEx><w:tblBorders><w:insideV w:val="nil"/></w:tblBorders></w:tblPrEx>"#
+                .to_string()
+                + &cell("<w:vMerge/>", "")
+                + &cell(
+                    r#"<w:gridSpan w:val="2"/><w:tcBorders><w:top w:val="nil"/></w:tcBorders>"#,
+                    "丁",
+                ),
+            cell("", "戊") + &cell(r#"<w:gridSpan w:val="2"/>"#, "己"),
+        ];
+        let body = format!(
+            r#"<w:tbl><w:tblPr><w:tblBorders>{tbl_borders}</w:tblBorders><w:tblInd w:w="100" w:type="dxa"/><w:tblCellMar><w:left w:w="200" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="4000"/><w:gridCol w:w="1000"/></w:tblGrid>{}</w:tbl><w:p/>"#,
+            rows.iter()
+                .map(|r| format!("<w:tr>{r}</w:tr>"))
+                .collect::<String>()
+        );
+        let build_with = |mode: &str| {
+            let doc = parse::parse_document(
+                &format!(r#"<w:document xmlns:w="w"><w:body>{body}</w:body></w:document>"#),
+                parse::parse_styles(r#"<w:styles xmlns:w="w"/>"#),
+                parse::parse_settings(&format!(
+                    r#"<w:settings xmlns:w="w"><w:compat>{mode}</w:compat></w:settings>"#
+                )),
+            )
+            .unwrap();
+            match build(&doc, &Calib::current()).blocks.into_iter().next() {
+                Some(Block::Table(t)) => t,
+                _ => panic!("第一块应当是表格"),
+            }
+        };
+        // Word 2013 起列边界在左框线外沿往里半个线宽处；Word 2010 让首格文字对齐正文，
+        // 表格往左让出单元格的左边距（这里是 10pt）。
+        let old =
+            build_with(r#"<w:compatSetting w:name="compatibilityMode" w:uri="x" w:val="14"/>"#);
+        assert_eq!(old.indent, 5.0 - 10.0);
+        let t = build_with("");
+        assert_eq!(t.indent, 5.0 + 0.75);
+        assert_eq!(t.columns, [100.0, 200.0, 50.0]);
+
+        let width = |e: Edge| e.border.map(|b| b.width);
+        let cell = |r: usize, c: usize| &t.rows[r].cells[c];
+        // 第一行第一格：上、左是表格外框；它往下合并两行，下边就还在表格里面。
+        let a = cell(0, 0);
+        assert_eq!((a.col, a.span, a.rows, a.continued), (0, 1, 2, false));
+        assert_eq!(width(a.borders.top), Some(1.5));
+        assert_eq!(width(a.borders.left), Some(1.5));
+        assert_eq!(width(a.borders.bottom), Some(0.5));
+        assert_eq!(width(a.borders.right), Some(0.5));
+        assert_eq!(a.margins, [0.0, 10.0, 0.0, 5.4]);
+        assert_eq!(cell(0, 2).shading, Some([255, 0, 0]));
+        assert_eq!(width(cell(0, 2).borders.right), Some(1.5));
+
+        // 第二行：第一格接在上面；横跨两列的格自己去掉上边，行例外去掉 insideV。
+        assert!(cell(1, 0).continued);
+        let d = cell(1, 1);
+        assert_eq!((d.col, d.span), (1, 2));
+        assert_eq!(
+            d.borders.top,
+            Edge {
+                border: None,
+                explicit: true
+            }
+        );
+        assert_eq!(d.borders.left, Edge::default());
+        assert_eq!(width(d.borders.right), Some(1.5));
+
+        // 最后一行的下边是表格的下框线。
+        assert_eq!(width(cell(2, 0).borders.bottom), Some(1.5));
+        assert_eq!(width(cell(2, 1).borders.bottom), Some(1.5));
+        assert_eq!(cell(2, 0).rows, 1);
+    }
+
+    /// 列数大得离谱的坏表格按占位处理（文字照留），不按它分配列宽。
+    #[test]
+    fn absurdly_wide_tables_become_placeholders() {
+        let doc = parse::parse_document(
+            r#"<w:document xmlns:w="w"><w:body><w:tbl><w:tr><w:tc><w:tcPr><w:gridSpan w:val="2000000000"/></w:tcPr><w:p><w:r><w:t>甲</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/></w:body></w:document>"#,
+            parse::parse_styles(r#"<w:styles xmlns:w="w"/>"#),
+            Default::default(),
+        )
+        .unwrap();
+        let ir = build(&doc, &Calib::current());
+        assert!(
+            matches!(ir.blocks.first(), Some(Block::Placeholder(p)) if p.text == ["甲"]),
+            "{:?}",
+            ir.blocks.first()
         );
     }
 }

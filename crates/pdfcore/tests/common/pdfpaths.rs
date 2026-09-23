@@ -29,6 +29,18 @@ impl Path {
     pub fn h(&self) -> f32 {
         self.bbox[3] - self.bbox[1]
     }
+
+    /// 实际盖住的范围：水平、竖直的描边按线宽往两侧展开（平头线端），填充就是外框。
+    /// 同一条框线画成矩形还是描边，都得到同一个范围。
+    pub fn covered(&self) -> [f32; 4] {
+        let [x0, y0, x1, y1] = self.bbox;
+        let half = self.width / 2.0;
+        match (self.stroke, self.w() < 1e-3, self.h() < 1e-3) {
+            (true, false, true) => [x0, y0 - half, x1, y1 + half],
+            (true, true, false) => [x0 - half, y0, x1 + half, y1],
+            _ => self.bbox,
+        }
+    }
 }
 
 const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];

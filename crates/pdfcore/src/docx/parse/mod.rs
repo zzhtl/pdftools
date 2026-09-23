@@ -6,6 +6,7 @@
 mod numbering;
 mod props;
 mod story;
+mod table;
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
@@ -132,6 +133,12 @@ pub fn parse_settings(xml: &str) -> Settings {
             }
             Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == "themeFontLang" => {
                 settings.theme_font_lang_east_asia = attr(&e, "eastAsia").filter(|v| !v.is_empty());
+            }
+            Event::Start(e) | Event::Empty(e)
+                if e.local_name().as_ref() == "compatSetting"
+                    && attr(&e, "name").as_deref() == Some("compatibilityMode") =>
+            {
+                settings.compat_mode = attr(&e, "val").and_then(|v| v.trim().parse().ok());
             }
             Event::Eof => break,
             _ => {}

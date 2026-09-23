@@ -128,34 +128,242 @@ fn first_text_x(pdf: &[u8]) -> f32 {
     panic!("内容流里找不到文本定位操作符");
 }
 
-/// 表格不渲染，但**必须留痕且保住文字** —— 对法律文书来说，
-/// 悄悄丢一张表格是危险的。
+/// 表格画出来，文字都在，不再报「未能渲染」。嵌套的表格本版本仍按占位处理：
+/// **必须留痕且保住文字** —— 对法律文书来说，悄悄丢一张表格是危险的。
 #[test]
-fn tables_are_reported_and_their_text_preserved() {
+fn tables_are_drawn_and_nested_ones_reported() {
     if !require_cjk_font() {
         return;
     }
-    let body = r#"<w:tbl>
+    let nested = r#"<w:tbl><w:tr><w:tc><w:p><w:r><w:t>内层表格</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>"#;
+    let body = format!(
+        r#"<w:tbl>
 <w:tr><w:tc><w:p><w:r><w:t>条目一</w:t></w:r></w:p></w:tc>
 <w:tc><w:p><w:r><w:t>说明书</w:t></w:r></w:p></w:tc></w:tr>
 <w:tr><w:tc><w:p><w:r><w:t>条目二</w:t></w:r></w:p></w:tc>
-<w:tc><w:p><w:r><w:t>装箱单</w:t></w:r></w:p></w:tc></w:tr>
-</w:tbl>"#;
-    let path = make_docx("table.docx", body);
-    let report = convert(&path);
+<w:tc><w:p><w:r><w:t>装箱单</w:t></w:r></w:p>{nested}</w:tc></w:tr>
+</w:tbl>"#
+    );
+    let path = make_docx("table.docx", &body);
+    // 不比对重写前的引擎：它把内层表格的行也算作外层的行，占位说明写的行数不同。
+    let report = docx_to_pdf::run(&path, &NoProgress).expect("转换失败");
 
+    let reported: Vec<_> = report
+        .warnings
+        .iter()
+        .filter(|w| w.kind == WarningKind::UnsupportedElement && w.detail.contains("表格"))
+        .collect();
+    assert_eq!(
+        reported.len(),
+        1,
+        "只有嵌套的那张表格该报告，警告列表：{:?}",
+        report.warnings
+    );
+    assert!(reported[0].detail.contains("1 行 × 1 列"), "{reported:?}");
+
+    let got = text_of(&report.value.pdf);
+    for cell in ["条目一", "说明书", "条目二", "装箱单", "内层表格"] {
+        assert!(got.contains(cell), "表格单元格「{cell}」的文字丢了：{got}");
+    }
+}
+
+/// 表格的几何，与 LibreOffice 实测一致（两种兼容模式）：
+/// - 竖框线骑在列边界上，文字从列边界让出 5.4pt 的左边距；
+/// - Word 2013 起第一条列边界在左框线外沿（版心左边）往里半个线宽处，Word 2010
+///   让首格文字对齐正文，表格往左让出左边距；
+/// - 竖直方向依次是上框线、行、行间框线……下框线，各占自己的线宽。
+#[test]
+fn table_geometry_follows_word() {
+    use common::pdfpaths;
+    if !require_cjk_font() {
+        return;
+    }
+    // 固定行距 20pt，行高与字体无关；各行都是汉字，基线在行里的位置也一样。
+    let p = |text: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="400" w:lineRule="exact"/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    };
+    let borders: String = [
+        ("top", 12),
+        ("left", 12),
+        ("bottom", 12),
+        ("right", 12),
+        ("insideH", 8),
+        ("insideV", 8),
+    ]
+    .iter()
+    .map(|(side, sz)| {
+        format!(r#"<w:{side} w:val="single" w:sz="{sz}" w:space="0" w:color="000000"/>"#)
+    })
+    .collect();
+    let cell = |t: &str| {
+        format!(
+            r#"<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>{}</w:tc>"#,
+            p(t)
+        )
+    };
+    let rows: String = ["一", "二", "三"]
+        .iter()
+        .map(|i| {
+            format!(
+                "<w:tr>{}{}</w:tr>",
+                cell(&format!("甲{i}")),
+                cell(&format!("乙{i}"))
+            )
+        })
+        .collect();
+    let body = format!(
+        r#"{}<w:tbl><w:tblPr><w:tblBorders>{borders}</w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>{rows}</w:tbl>{}"#,
+        p("表前"),
+        p("表后")
+    );
+
+    let margin = 79.4;
+    for (mode, grid) in [("15", margin + 0.75), ("14", margin - 5.4)] {
+        let settings = format!(
+            r#"<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="{mode}"/></w:compat>"#
+        );
+        let path = DocxBuilder::new()
+            .settings(&settings)
+            .body(&body)
+            .build(&format!("table_geometry_{mode}.docx"));
+        let pdf = convert(&path).value.pdf;
+        let lines = &common::pdftext::extract(&pdf)[0].lines;
+        let texts: Vec<String> = lines.iter().map(|l| l.text.replace(' ', "")).collect();
+        assert_eq!(
+            texts,
+            ["表前", "甲一乙一", "甲二乙二", "甲三乙三", "表后"],
+            "兼容模式 {mode}"
+        );
+        for row in &lines[1..4] {
+            let x: Vec<f32> = row.frags.iter().map(|f| f.x).collect();
+            assert!(
+                (x[0] - (grid + 5.4)).abs() < 0.01 && (x[1] - (grid + 150.0 + 5.4)).abs() < 0.01,
+                "兼容模式 {mode}：{x:?}"
+            );
+        }
+        // 行与行之间隔一条 1pt 的内框线；表格上下各有一条 1.5pt 的外框线。
+        let gaps: Vec<f32> = lines.windows(2).map(|w| w[0].y - w[1].y).collect();
+        for (got, want) in gaps.iter().zip([21.5, 21.0, 21.0, 21.5]) {
+            assert!((got - want).abs() < 0.01, "兼容模式 {mode}：{gaps:?}");
+        }
+        // 竖框线骑在列边界上：左框线 1.5pt，中间的 1pt。
+        let paths = &pdfpaths::extract(&pdf)[0];
+        let centred_on = |x: f32, w: f32| {
+            paths.iter().any(|p| {
+                let [x0, y0, x1, y1] = p.covered();
+                y1 - y0 > 20.0 && (x1 - x0 - w).abs() < 0.01 && ((x0 + x1) / 2.0 - x).abs() < 0.01
+            })
+        };
+        assert!(centred_on(grid, 1.5), "兼容模式 {mode}：{paths:?}");
+        assert!(centred_on(grid + 150.0, 1.0), "兼容模式 {mode}：{paths:?}");
+        assert!(centred_on(grid + 300.0, 1.5), "兼容模式 {mode}：{paths:?}");
+    }
+}
+
+/// 行尾标点在正文里可以伸出边距，在单元格里不行（LibreOffice 实测）：同样宽的一栏，
+/// 正文第一行排下 13 个字再挂一个逗号，单元格里逗号带着前一个字换行。
+#[test]
+fn punctuation_does_not_hang_in_table_cells() {
+    if !require_cjk_font() {
+        return;
+    }
+    let text = "甲乙丙丁戊己庚辛壬癸子丑寅，卯辰";
+    let run = format!(
+        r#"<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r>"#
+    );
+    // 单元格 175pt 宽，去掉左右边距剩 164.2pt；正文用右缩进缩到同样宽。
+    let body = format!(
+        r#"<w:p><w:pPr><w:ind w:right="{}"/></w:pPr>{run}</w:p><w:tbl><w:tblGrid><w:gridCol w:w="3500"/></w:tblGrid><w:tr><w:tc><w:p>{run}</w:p></w:tc></w:tr></w:tbl><w:p/>"#,
+        ((436.5 - 164.2) * 20.0_f32).round() as i32
+    );
+    let pdf = convert(&make_docx("cell_punct.docx", &body)).value.pdf;
+    let lines: Vec<String> = common::pdftext::extract(&pdf)[0]
+        .lines
+        .iter()
+        .map(|l| l.text.replace(' ', ""))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "甲乙丙丁戊己庚辛壬癸子丑寅，",
+            "卯辰",
+            "甲乙丙丁戊己庚辛壬癸子丑",
+            "寅，卯辰"
+        ]
+    );
+}
+
+/// 页脚里的表格照样画出来，格里的页码域代入每一页的真实页码。
+#[test]
+fn footer_tables_are_drawn_with_page_numbers() {
+    use common::pdfpaths;
+    if !require_cjk_font() {
+        return;
+    }
+    let rpr = r#"<w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr>"#;
+    let run = |t: &str| format!(r#"<w:r>{rpr}<w:t xml:space="preserve">{t}</w:t></w:r>"#);
+    let fld = |c: &str| format!(r#"<w:r>{rpr}<w:fldChar w:fldCharType="{c}"/></w:r>"#);
+    let page = [
+        fld("begin"),
+        format!(r#"<w:r>{rpr}<w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>"#),
+        fld("separate"),
+        run("1"),
+        fld("end"),
+    ]
+    .concat();
+    let cell = |content: &str| {
+        format!(
+            r#"<w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr><w:p>{content}</w:p></w:tc>"#
+        )
+    };
+    let borders: String = ["top", "left", "bottom", "right", "insideV"]
+        .iter()
+        .map(|side| format!(r#"<w:{side} w:val="single" w:sz="4" w:space="0" w:color="000000"/>"#))
+        .collect();
+    let footer = format!(
+        r#"<w:tbl><w:tblPr><w:tblBorders>{borders}</w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid><w:tr>{}{}</w:tr></w:tbl><w:p/>"#,
+        cell(&run("页脚表格")),
+        cell(&page)
+    );
+    let body: String = (0..80)
+        .map(|i| format!("<w:p>{}</w:p>", run(&format!("正文{i}"))))
+        .collect();
+    let path = DocxBuilder::new()
+        .body(&body)
+        .footer("default", &footer)
+        .build("footer_table.docx");
+    let report = convert(&path);
     assert!(
-        report
-            .warnings
-            .iter()
-            .any(|w| w.kind == WarningKind::UnsupportedElement && w.detail.contains("表格")),
-        "表格没有被报告出来，警告列表：{:?}",
+        !report.warnings.iter().any(|w| w.detail.contains("表格")),
+        "{:?}",
         report.warnings
     );
 
-    let got = text_of(&report.value.pdf);
-    for cell in ["条目一", "说明书", "条目二", "装箱单"] {
-        assert!(got.contains(cell), "表格单元格「{cell}」的文字丢了：{got}");
+    let pages = common::pdftext::extract(&report.value.pdf);
+    let paths = pdfpaths::extract(&report.value.pdf);
+    assert!(pages.len() >= 2);
+    for (i, page) in pages.iter().enumerate() {
+        // 下边距（72pt）以下是页脚。两格各按自己的字体定基线，不在同一条线上。
+        let footer: Vec<_> = page.lines.iter().filter(|l| l.y < 72.0).collect();
+        let mut texts: Vec<String> = footer.iter().map(|l| l.text.replace(' ', "")).collect();
+        texts.sort();
+        assert_eq!(texts, [(i + 1).to_string(), "页脚表格".to_string()]);
+        // 表格的上下框线在页脚文字的上下两侧。
+        let (top, bottom) = (footer[0].y, footer[footer.len() - 1].y);
+        let around = |above: bool| {
+            paths[i].iter().any(|p| {
+                let [_, y0, _, y1] = p.covered();
+                p.w() > 100.0 && if above { y0 > top } else { y1 < bottom }
+            })
+        };
+        assert!(
+            around(true) && around(false),
+            "第 {} 页：{:?}",
+            i + 1,
+            paths[i]
+        );
     }
 }
 
@@ -1860,8 +2068,9 @@ fn paragraph_borders_and_shading_are_drawn() {
     assert!((gap(&text) - gap(&plain) - 2.5).abs() < 0.01);
     let line = &horizontal(&paths[0], RED)[..];
     assert_eq!(line.len(), 1, "{paths:?}");
-    assert!((line[0].h() - 1.5).abs() < 0.01 && (line[0].w() - 436.5).abs() < 0.05);
-    assert!(line[0].bbox[1] > text[0].lines[1].y && line[0].bbox[3] < text[0].lines[0].y);
+    let [x0, y0, x1, y1] = line[0].covered();
+    assert!((y1 - y0 - 1.5).abs() < 0.01 && (x1 - x0 - 436.5).abs() < 0.05);
+    assert!(y0 > text[0].lines[1].y && y1 < text[0].lines[0].y);
 
     // 边框相同的相邻段落合成一个框：中间没有横线，左边框从头连到尾；
     // 写了 between 才在中间画一条。
