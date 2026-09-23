@@ -663,7 +663,8 @@ fn missing_glyphs_fall_back_to_a_font_that_has_them() {
 /// 「②」紧跟在新 run 开头、后面是数字时，会被判给西文字体，而西文字体没有它。
 /// 曾经因此和别的缺字一起落到 .notdef，全被抽成了「℃」。
 ///
-/// 画它的应当是这个 run 自己的中文字体，而不是系统回退链里随便一个有它的字体。
+/// 西文字体没有的字，画它的应当是这个 run 自己的中文字体，而不是系统回退链里
+/// 随便一个有它的字体。西文字体本身有的（Windows 的 Times New Roman 就有 ℃）照常用它。
 #[test]
 fn circled_digits_at_a_run_start_are_not_lost() {
     if !require_cjk_font() {
@@ -680,14 +681,15 @@ fn circled_digits_at_a_run_start_are_not_lost() {
         run("②3月5日提交清单；"),
         run("③25℃")
     );
-    let pdf = convert(&make_docx("circled.docx", &body)).value.pdf;
-    let text = text_of(&pdf);
+    let report = convert(&make_docx("circled.docx", &body));
+    let pdf = &report.value.pdf;
+    let text = text_of(pdf);
     assert!(
         text.contains("第一项；②3月5日提交清单；③25℃"),
         "抽回：{text}"
     );
 
-    let frags: Vec<common::pdftext::Frag> = common::pdftext::extract(&pdf)
+    let frags: Vec<common::pdftext::Frag> = common::pdftext::extract(pdf)
         .into_iter()
         .flat_map(|p| p.lines)
         .flat_map(|l| l.frags)
@@ -699,10 +701,22 @@ fn circled_digits_at_a_run_start_are_not_lost() {
             .map(|f| f.font.clone())
             .unwrap_or_else(|| panic!("找不到「{c}」：{frags:?}"))
     };
-    let cjk = font_of('第');
+    let (cjk, latin) = (font_of('第'), font_of('2'));
     for c in ['②', '③', '℃'] {
-        assert_eq!(font_of(c), cjk, "「{c}」没有用 run 自己的中文字体");
+        let font = font_of(c);
+        assert!(
+            font == cjk || font == latin,
+            "「{c}」用了 {font}，应当用 run 自己的字体（{latin} 或 {cjk}）"
+        );
     }
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|w| w.detail.contains("没有字形")),
+        "{:?}",
+        report.warnings
+    );
 }
 
 /// 真的哪个字体都没有的字（这里用 Unicode 尚未分配的码位），不同的缺字
