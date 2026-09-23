@@ -34,8 +34,6 @@ unicode-script = "0.5"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 quick-xml = "0.42.0"
 
-anyhow.workspace = true
-log.workspace = true
 rayon = "1"
 thiserror = "2"
 

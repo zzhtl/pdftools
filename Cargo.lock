@@ -2460,7 +2460,6 @@ dependencies = [
 name = "pdfcore"
 version = "0.7.0"
 dependencies = [
- "anyhow",
  "chrono",
  "fast_image_resize",
  "flate2",
@@ -2469,7 +2468,6 @@ dependencies = [
  "image",
  "jpeg-encoder",
  "kamadak-exif",
- "log",
  "lopdf",
  "pdf-writer",
  "quick-xml 0.42.0",
