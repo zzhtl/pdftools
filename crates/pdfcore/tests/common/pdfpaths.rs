@@ -225,3 +225,85 @@ pub fn dump(pages: &[Vec<Path>]) -> String {
     }
     s
 }
+
+/// 一张图（`Do`）画在页面上的位置。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Placed {
+    /// 图的单位方块经 CTM 变换后的外框 `[x0, y0, x1, y1]`。
+    pub bbox: [f32; 4],
+    /// 当时生效的裁剪框（`re W n`）。与外框求交就是看得见的部分。
+    pub clip: Option<[f32; 4]>,
+}
+
+/// 每页画了哪些图，按内容流里的顺序。
+pub fn images(pdf: &[u8]) -> Vec<Vec<Placed>> {
+    let doc = Document::load_mem(pdf).expect("PDF 无法解析");
+    doc.get_pages()
+        .values()
+        .map(|&id| {
+            let content = doc.get_and_decode_page_content(id).expect("内容流无法解码");
+            page_images(&content.operations)
+        })
+        .collect()
+}
+
+fn page_images(ops: &[lopdf::content::Operation]) -> Vec<Placed> {
+    let apply =
+        |m: [f32; 6], (x, y): (f32, f32)| (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]);
+    let bbox = |points: &[(f32, f32)]| {
+        points
+            .iter()
+            .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, &(x, y)| {
+                [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)]
+            })
+    };
+    let mut ctm = IDENTITY;
+    let mut clip: Option<[f32; 4]> = None;
+    let mut stack = Vec::new();
+    let mut path: Vec<(f32, f32)> = Vec::new();
+    let mut clipping = false;
+    let mut out = Vec::new();
+    for op in ops {
+        let n: Vec<f32> = op
+            .operands
+            .iter()
+            .filter_map(|o| o.as_float().ok())
+            .collect();
+        match op.operator.as_str() {
+            "q" => stack.push((ctm, clip)),
+            "Q" => (ctm, clip) = stack.pop().unwrap_or((IDENTITY, None)),
+            "cm" if n.len() == 6 => ctm = mul([n[0], n[1], n[2], n[3], n[4], n[5]], ctm),
+            "re" if n.len() == 4 => {
+                let (x, y, w, h) = (n[0], n[1], n[2], n[3]);
+                path.extend(
+                    [(x, y), (x + w, y), (x + w, y + h), (x, y + h)].map(|p| apply(ctm, p)),
+                );
+            }
+            "W" | "W*" => clipping = true,
+            "n" | "f" | "S" | "B" => {
+                if clipping && !path.is_empty() {
+                    let b = bbox(&path);
+                    clip = Some(match clip {
+                        Some(c) => [
+                            c[0].max(b[0]),
+                            c[1].max(b[1]),
+                            c[2].min(b[2]),
+                            c[3].min(b[3]),
+                        ],
+                        None => b,
+                    });
+                }
+                clipping = false;
+                path.clear();
+            }
+            "Do" => out.push(Placed {
+                bbox: bbox(
+                    &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map(|p| apply(ctm, p)),
+                ),
+                clip,
+            }),
+            _ => {}
+        }
+    }
+    out
+}

@@ -1,18 +1,25 @@
 //! 把排好版的页面画成 PDF。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+use pdf_writer::Ref;
 
 use super::layout::{LaidOut, PaintOp};
-use crate::error::Result;
+use crate::error::{Result, Warning, WarningKind};
 use crate::fonts::{FontBook, FontId};
+use crate::imaging::{self, ColorData};
 use crate::pdf::writer::font::{embed_font, EmbeddedFont};
+use crate::pdf::writer::image::{ImageData, ImageEncoding};
 use crate::pdf::writer::{Canvas, DocBuilder, GlyphRun};
 
+/// 画出来的 PDF，以及画的时候才发现的问题（图片解不开之类）。
+/// `media`：包里的图片部件，路径 → 字节。
 pub fn paint(
     laid: &LaidOut,
     book: &FontBook,
     info: crate::pdf::writer::DocInfo,
-) -> Result<Vec<u8>> {
+    media: &HashMap<String, Vec<u8>>,
+) -> Result<(Vec<u8>, Vec<Warning>)> {
     // 第一趟：把每个字体实际用到的字形收齐。子集化必须一次性知道全部用量，
     // 所以字体只能等内容全部排完才能写。
     let mut used: BTreeMap<FontId, BTreeMap<u16, String>> = BTreeMap::new();
@@ -67,6 +74,9 @@ pub fn paint(
         embedded.insert(*font_id, embed_font(pdf, alloc, face, glyphs)?);
     }
 
+    // 图片：同一个部件只写一次。解不开的（EMF、WMF 这类矢量图，或者坏了的）画成灰框。
+    let mut images: HashMap<&str, Option<Ref>> = HashMap::new();
+    let mut broken: BTreeSet<&str> = BTreeSet::new();
     for laid_page in &laid.pages {
         let (w, h) = laid_page.size;
         let mut canvas = Canvas::new(w, h);
@@ -102,6 +112,25 @@ pub fn paint(
                     });
                 }
                 PaintOp::Rect { x, y, w, h, color } => canvas.fill_rect(*x, *y, *w, *h, *color),
+                PaintOp::Image {
+                    part,
+                    x,
+                    y,
+                    w,
+                    h,
+                    crop,
+                } => {
+                    let image = *images
+                        .entry(part.as_str())
+                        .or_insert_with(|| embed_image(&mut doc, media.get(part)?));
+                    match image {
+                        Some(image) => place_image(&mut canvas, image, [*x, *y, *w, *h], *crop),
+                        None => {
+                            broken.insert(part.as_str());
+                            missing_box(&mut canvas, [*x, *y, *w, *h]);
+                        }
+                    }
+                }
                 PaintOp::Line {
                     from,
                     to,
@@ -129,5 +158,57 @@ pub fn paint(
         doc.add_page(Canvas::new(595.3, 841.9).finish());
     }
 
-    doc.finish()
+    let mut warnings = Vec::new();
+    if !broken.is_empty() {
+        warnings.push(Warning::new(
+            WarningKind::UnsupportedElement,
+            format!(
+                "{} 张图片画不出来（EMF、WMF 之类的矢量图，或者图片已损坏），已按原大小画成灰框",
+                broken.len()
+            ),
+        ));
+    }
+    Ok((doc.finish()?, warnings))
+}
+
+/// 把一张图写进 PDF。解不开时返回 None。
+fn embed_image(doc: &mut DocBuilder, bytes: &[u8]) -> Option<Ref> {
+    let img = imaging::prepare_embedded(bytes).ok()?;
+    let (encoding, gray) = match &img.color {
+        ColorData::Jpeg { bytes, gray } => (ImageEncoding::Jpeg(bytes), *gray),
+        ColorData::Raw { bytes, gray } => (ImageEncoding::Raw(bytes), *gray),
+    };
+    Some(doc.add_image(&ImageData {
+        width: img.width,
+        height: img.height,
+        gray,
+        encoding,
+        alpha: img.alpha.as_deref(),
+    }))
+}
+
+/// 把图放进显示框 `[x, y, w, h]`（左下角与大小）。裁剪时整张图按比例放大，
+/// 再用显示框裁掉多出来的部分。
+fn place_image(canvas: &mut Canvas, image: Ref, [x, y, w, h]: [f32; 4], crop: [f32; 4]) {
+    let [l, t, r, b] = crop;
+    let full_w = w / (1.0 - l - r).max(1e-3);
+    let full_h = h / (1.0 - t - b).max(1e-3);
+    let matrix = [full_w, 0.0, 0.0, full_h, x - l * full_w, y - b * full_h];
+    if crop == [0.0; 4] {
+        canvas.image(image, matrix);
+        return;
+    }
+    canvas.save();
+    canvas.clip_rect(x, y, w, h);
+    canvas.image(image, matrix);
+    canvas.restore();
+}
+
+/// 画不出来的图：浅灰底、深灰边的框。
+fn missing_box(canvas: &mut Canvas, [x, y, w, h]: [f32; 4]) {
+    canvas.fill_rect(x, y, w, h, [0xEE; 3]);
+    let corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)];
+    for pair in corners.windows(2) {
+        canvas.stroke_line(pair[0], pair[1], 0.5, [0x99; 3], None);
+    }
 }

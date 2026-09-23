@@ -14,23 +14,56 @@ pub(super) struct LineBox {
     pub fit_height: f32,
 }
 
-/// `unsnapped` 是行内字体的自然行高（吸附前，取最大者），`ascent` 是最大上伸。
-/// `snap` 表示段落参与行网格吸附（且文档有网格）。
+/// 一行里的字与行内对象（图片）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct LineContent {
+    /// 文字的自然行高（吸附前，取最大者）与最大上伸。只有对象的行是段落标记的，
+    /// 只用来算行距倍数多出来的部分。
+    pub unsnapped: f32,
+    pub ascent: f32,
+    /// 最高的对象有多高（底边在基线上）。没有对象是 0。
+    pub object: f32,
+    /// 行里有文字；没有文字的行只由对象撑起来，没有下伸。
+    pub has_text: bool,
+}
+
+impl LineContent {
+    /// 只有文字的行。
+    pub fn text(unsnapped: f32, ascent: f32) -> Self {
+        Self {
+            unsnapped,
+            ascent,
+            object: 0.0,
+            has_text: true,
+        }
+    }
+}
+
+/// `snap` 表示段落参与行网格吸附（且文档有网格）。见 [`Images::Inline`](super::calib::Images)。
 pub(super) fn line_box(
-    unsnapped: f32,
-    ascent: f32,
+    content: LineContent,
     grid: Option<Grid>,
     snap: bool,
     spacing: LineSpacing,
     is_last_line: bool,
     calib: &Calib,
 ) -> LineBox {
+    let unsnapped = content.unsnapped;
+    // 对象的底边在基线上：它比文字高出的部分加在行的上伸里，下伸只看文字。
+    let (text_ascent, text_descent) = if content.has_text {
+        (content.ascent, unsnapped - content.ascent)
+    } else {
+        (0.0, 0.0)
+    };
+    let ascent = text_ascent.max(content.object);
+    let filled = ascent + text_descent;
+    let snapped = |h: f32| match grid {
+        Some(g) if snap => g.snap(h),
+        _ => h,
+    };
     // 行网格：单倍行高先向上吸附到网格整数倍，倍数再乘在这之上。
     // 漏掉这一步，中文文档的行密度会比 Word 高出近一倍。
-    let natural = match grid {
-        Some(g) if snap => g.snap(unsnapped),
-        _ => unsnapped,
-    };
+    let natural = snapped(filled);
 
     let height = match spacing {
         // 段落的**最后一行**，倍数带来的额外行距按**吸附前**的自然行高算，
@@ -40,8 +73,10 @@ pub(super) fn line_box(
         //
         // 不区分这一条，每个段落边界都会多出 (m-1) × 吸附增量，
         // 段落密集的文档累积下来会平白多出一整页。
+        //
+        // 倍数多出来的部分只按文字算：一行里有张图，行不会跟着图成倍地变高。
         LineSpacing::Multiple(m) if is_last_line => natural + (m - 1.0).max(0.0) * unsnapped,
-        LineSpacing::Multiple(m) => natural * m,
+        LineSpacing::Multiple(m) => natural + (m - 1.0) * snapped(unsnapped),
         LineSpacing::Exact(pt) => pt,
         LineSpacing::AtLeast(pt) => natural.max(pt),
     };
@@ -53,8 +88,10 @@ pub(super) fn line_box(
     // ascent 的话，基线比参照高 8.6pt，整页文字随之上移。
     //
     // **吸附**多出来的空间怎么分，见 [`GridLayout`]。
-    let snap_extra = (natural - unsnapped).max(0.0);
+    let snap_extra = (natural - filled).max(0.0);
+    // 图比字高时，图顶在行顶，吸附多出来的都在下面（LibreOffice 实测）。
     let above = match calib.grid {
+        _ if content.object > text_ascent => 0.0,
         GridLayout::Legacy => snap_extra,
         GridLayout::Centered => snap_extra / 2.0,
     };
@@ -116,7 +153,14 @@ mod tests {
             (GRID, true, LineSpacing::AtLeast(10.0), false, 31.2, 27.624),
         ];
         for (grid, snap, spacing, last, height, baseline) in cases {
-            let b = line_box(nat, asc, grid, snap, spacing, last, &Calib::legacy());
+            let b = line_box(
+                LineContent::text(nat, asc),
+                grid,
+                snap,
+                spacing,
+                last,
+                &Calib::legacy(),
+            );
             assert!(
                 (b.height - height).abs() < 1e-3 && (b.baseline - baseline).abs() < 1e-3,
                 "{grid:?} snap={snap} {spacing:?} last={last}: 得到 {b:?}，应为 ({height}, {baseline})"
@@ -138,8 +182,7 @@ mod tests {
             (34.776, 27.624, 46.8, 27.624 + (46.8 - 34.776) / 2.0),
         ] {
             let b = line_box(
-                nat,
-                asc,
+                LineContent::text(nat, asc),
                 GRID,
                 true,
                 LineSpacing::Multiple(1.0),
@@ -153,8 +196,7 @@ mod tests {
         }
         // 不吸附时没有多出来的空间可分。
         let b = line_box(
-            17.388,
-            13.812,
+            LineContent::text(17.388, 13.812),
             GRID,
             false,
             LineSpacing::Multiple(1.0),
@@ -179,7 +221,14 @@ mod tests {
             // 自然行高已经够高：与单倍行距一样。
             (LineSpacing::AtLeast(10.0), 17.244, 13.812),
         ] {
-            let b = line_box(nat, asc, None, false, spacing, false, &calib);
+            let b = line_box(
+                LineContent::text(nat, asc),
+                None,
+                false,
+                spacing,
+                false,
+                &calib,
+            );
             assert!(
                 (b.height - height).abs() < 1e-3 && (b.baseline - baseline).abs() < 1e-3,
                 "{spacing:?}: {b:?}"
@@ -191,8 +240,7 @@ mod tests {
     #[test]
     fn exact_multiple_of_the_grid_is_not_rounded_up() {
         let b = line_box(
-            15.6,
-            12.0,
+            LineContent::text(15.6, 12.0),
             GRID,
             true,
             LineSpacing::Multiple(1.0),

@@ -436,6 +436,29 @@ pub fn merge_tabs(base: &mut Vec<TabDef>, over: &[TabDef]) {
 /// 一串块级内容：正文、页眉页脚、单元格、文本框共用。
 pub type Story = Vec<Block>;
 
+/// 对故事里的每一张图片（表格里的也算）调用 `f`，按出现的顺序。
+pub fn for_each_picture(story: &mut Story, f: &mut dyn FnMut(&mut Picture)) {
+    for block in story {
+        match block {
+            Block::Para(p) => {
+                for item in p.runs.iter_mut().flat_map(|r| &mut r.items) {
+                    if let RunItem::Drawing(Drawing {
+                        picture: Some(pic), ..
+                    }) = item
+                    {
+                        f(pic);
+                    }
+                }
+            }
+            Block::Table(t) => {
+                for cell in t.rows.iter_mut().flat_map(|r| &mut r.cells) {
+                    for_each_picture(&mut cell.content, f);
+                }
+            }
+        }
+    }
+}
+
 // 块几乎都是段落，表格少见：给段落装箱省不下多少内存，反倒每段多一次分配。
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
@@ -477,10 +500,8 @@ pub enum RunItem {
     Break(BreakKind),
     /// `w:noBreakHyphen`。
     NoBreakHyphen,
-    /// 图片、形状、嵌入对象（`w:drawing` / `w:pict` / `w:object`）。目前只取替代文字。
-    Drawing {
-        alt: Option<String>,
-    },
+    /// 图片、形状、嵌入对象（`w:drawing` / `w:pict` / `w:object`）。
+    Drawing(Drawing),
     /// `w:sym`：用指定字体画的一个符号（Wingdings 的勾选框之类）。
     Sym {
         font: Option<String>,
@@ -490,6 +511,27 @@ pub enum RunItem {
     FieldChar(FieldChar),
     /// `w:instrText`：域代码（`PAGE \* MERGEFORMAT`）。
     FieldCode(String),
+}
+
+/// `w:drawing` 等画出来的东西。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Drawing {
+    /// 替代文字（`wp:docPr/@descr`）。
+    pub alt: Option<String>,
+    /// 行内的（`wp:inline`）；否则是浮动的（`wp:anchor`、VML、嵌入对象）。
+    pub inline: bool,
+    /// 显示大小（`wp:extent`），EMU（1pt = 12700）。
+    pub extent: Option<(i64, i64)>,
+    /// 图片（`pic:pic`）。形状、图表、组合都不是。
+    pub picture: Option<Picture>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Picture {
+    /// `a:blip/@r:embed` 的关系 id；读完整个包后换成部件路径（`word/media/image1.png`）。
+    pub target: Option<String>,
+    /// `a:srcRect`：左、上、右、下各裁掉多少，十万分之一。
+    pub crop: [i32; 4],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

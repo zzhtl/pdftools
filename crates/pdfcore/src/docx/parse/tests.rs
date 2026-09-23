@@ -1,7 +1,7 @@
 //! 解析层：只看「读到了什么」，不涉及层叠与排版。
 
 use super::*;
-use crate::docx::model::{Align, Block, Para, RunItem};
+use crate::docx::model::{Align, Block, Drawing, Para, Picture, RunItem};
 
 fn body(inner: &str) -> Document {
     let xml = format!(
@@ -74,7 +74,7 @@ fn alternate_content_yields_one_branch() {
     let items: Vec<&RunItem> = ps[0].runs.iter().flat_map(|r| &r.items).collect();
     assert_eq!(
         items,
-        vec![&RunItem::Drawing { alt: None }],
+        vec![&RunItem::Drawing(Drawing::default())],
         "只该有 Fallback 里那一个"
     );
     assert_eq!(ps.len(), 2);
@@ -104,9 +104,10 @@ fn attribute_values_are_unescaped() {
     let items: Vec<&RunItem> = paras(&doc)[0].runs.iter().flat_map(|r| &r.items).collect();
     assert_eq!(
         items,
-        vec![&RunItem::Drawing {
-            alt: Some("\"公章\" & 签名".into())
-        }]
+        vec![&RunItem::Drawing(Drawing {
+            alt: Some("\"公章\" & 签名".into()),
+            ..Default::default()
+        })]
     );
 }
 
@@ -369,4 +370,38 @@ fn deeply_nested_tables_become_text() {
         }
     }
     assert_eq!(depth, 16);
+}
+
+/// 行内的图片：显示大小、图片的关系 id、裁剪。组合里的图不算单独的图片。
+#[test]
+fn inline_pictures_are_read() {
+    let pic = |extra: &str| {
+        format!(
+            r#"<w:r><w:drawing><wp:inline><wp:extent cx="1270000" cy="635000"/><wp:docPr id="1" name="p" descr="签名"/><a:graphic xmlns:a="a"><a:graphicData uri="pic">{extra}</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#
+        )
+    };
+    let picture = r#"<pic:pic xmlns:pic="pic"><pic:blipFill><a:blip r:embed="rId7"/><a:srcRect l="25000" r="10000"/></pic:blipFill><pic:spPr><a:xfrm><a:ext cx="1" cy="1"/></a:xfrm></pic:spPr></pic:pic>"#;
+    let group = format!("<wpg:wgp>{picture}</wpg:wgp>");
+    let doc = body(&format!(
+        r#"<w:p>{}</w:p><w:p>{}</w:p>"#,
+        pic(picture),
+        pic(&group)
+    ));
+    let drawing = |i: usize| match &paras(&doc)[i].runs[0].items[0] {
+        RunItem::Drawing(d) => d.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        drawing(0),
+        Drawing {
+            alt: Some("签名".into()),
+            inline: true,
+            extent: Some((1_270_000, 635_000)),
+            picture: Some(Picture {
+                target: Some("rId7".into()),
+                crop: [25_000, 0, 10_000, 0],
+            }),
+        }
+    );
+    assert_eq!(drawing(1).picture, None);
 }

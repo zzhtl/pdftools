@@ -397,6 +397,42 @@ pub fn prepare_for_pdf(path: &Path, quality: &ImageQuality) -> Result<PreparedIm
     })
 }
 
+/// 文档里嵌着的一张图（docx 的 `word/media/…`），准备写进 PDF。
+pub struct EmbeddedImage {
+    pub color: ColorData,
+    pub alpha: Option<Vec<u8>>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// 能直通的 JPEG 原样用，其余解码成像素（有 alpha 的另存一个平面）。显示大小由文档
+/// 定，这里不缩放。EMF、WMF、SVG 这类矢量图解不开，返回错误。
+pub fn prepare_embedded(bytes: &[u8]) -> Result<EmbeddedImage> {
+    if probe::sniff(bytes) == probe::Container::Jpeg {
+        if let Some(i) = probe::jpeg_info(bytes)
+            .filter(|i| i.embeddable_in_pdf() && (i.components == 1 || i.components == 3))
+        {
+            return Ok(EmbeddedImage {
+                color: ColorData::Jpeg {
+                    bytes: bytes.to_vec(),
+                    gray: i.components == 1,
+                },
+                alpha: None,
+                width: i.width,
+                height: i.height,
+            });
+        }
+    }
+    let img = image::load_from_memory(bytes).map_err(|e| CoreError::Image(format!("{e}")))?;
+    let alpha = img.color().has_alpha().then(|| extract_alpha(&img));
+    Ok(EmbeddedImage {
+        color: raw_color(&img, false),
+        alpha,
+        width: img.width(),
+        height: img.height(),
+    })
+}
+
 /// 解码一张图，并把 EXIF 方向作用到像素上。
 ///
 /// 重新编码会丢掉 EXIF，方向标记也就跟着没了 —— 不先转正，横拍的手机照片

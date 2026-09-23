@@ -18,7 +18,7 @@
 use std::ops::Range;
 
 use super::layout::{
-    Calib, Cascade, CharGrid, HeaderFooter, ListNumbers, RunFormat, Sections, Tables, Theme,
+    Calib, Cascade, CharGrid, HeaderFooter, Images, ListNumbers, RunFormat, Sections, Tables, Theme,
 };
 use super::model::{
     self, BreakKind, FieldChar, FontRef, LineRule, NumSuffix, PPr, RPr, RunItem, ThemeScript,
@@ -30,6 +30,30 @@ use super::resolve::{Resolver, TableLayer};
 pub const LINE_BREAK: char = '\u{2028}';
 pub const PAGE_BREAK: char = '\u{000C}';
 pub const COLUMN_BREAK: char = '\u{000B}';
+/// 行内对象在段落文字里的替身：第 k 个是 [`Paragraph::objects`] 的第 k 项。
+pub const OBJECT: char = '\u{FFFC}';
+
+/// 行内对象（`wp:inline` 的图片）：底边在基线上，像一个很大的字。
+#[derive(Debug, Clone, PartialEq)]
+pub struct InlineObject {
+    /// 显示大小（点）。
+    pub width: f32,
+    pub height: f32,
+    pub content: ObjectContent,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ObjectContent {
+    /// 包里的图片：部件路径，左、上、右、下各裁掉的比例（0–1）。
+    Image { part: String, crop: [f32; 4] },
+    /// 画不出来的（形状、图表、找不到的图）：按大小画一个灰框，版面不乱。
+    Missing { alt: Option<String> },
+}
+
+/// EMU（DrawingML 的长度单位）换成点。
+fn emu(v: i64) -> f32 {
+    v as f32 / 12_700.0
+}
 
 /// 小型大写：小写字母画成这么大的大写字母。LibreOffice 实测 80%。
 const SMALL_CAPS_SCALE: f32 = 0.8;
@@ -298,6 +322,8 @@ pub struct Paragraph {
     pub number: Option<NumberLabel>,
     pub text: String,
     pub spans: Vec<Span>,
+    /// 行内对象，按在文字里出现的顺序，见 [`OBJECT`]。
+    pub objects: Vec<InlineObject>,
     /// 段落标记（¶）的格式。空段落的行高由它决定。
     pub mark: RunStyle,
 }
@@ -538,6 +564,8 @@ pub struct Document {
     pub default_tab_stop: f32,
     /// 不认识、按阿拉伯数字输出的编号格式。
     pub num_format_fallbacks: Vec<String>,
+    /// 画成灰框的行内对象（形状、图表、找不到的图片）有几个。
+    pub missing_objects: usize,
     pub blocks: Vec<Block>,
 }
 
@@ -555,6 +583,7 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
         resolver: &resolver,
         fonts: &fonts,
         calib,
+        missing: Default::default(),
     };
     let mut blocks = Vec::with_capacity(doc.body.len());
     let mut ends: Vec<(&model::SectPr, Range<usize>)> = Vec::new();
@@ -619,6 +648,7 @@ pub fn build(doc: &model::Document, calib: &Calib) -> Document {
         num_format_fallbacks: lists
             .map(|l| l.fallbacks.into_iter().collect())
             .unwrap_or_default(),
+        missing_objects: ctx.missing.get(),
         blocks,
     }
 }
@@ -661,6 +691,8 @@ struct Ctx<'a> {
     resolver: &'a Resolver<'a>,
     fonts: &'a FontNames<'a>,
     calib: &'a Calib,
+    /// 画成灰框的行内对象有几个。
+    missing: std::cell::Cell<usize>,
 }
 
 /// `table`：段落在表格里时表格样式给的格式。
@@ -676,11 +708,14 @@ fn push_paragraph(
         resolver,
         fonts,
         calib,
+        ..
     } = *ctx;
     let ppr = resolver.paragraph_in(&p.ppr, table);
     let mut text = String::new();
     let mut spans: Vec<Span> = Vec::with_capacity(p.runs.len());
     let mut drawings = Vec::new();
+    let mut objects = Vec::new();
+    let images = calib.images == Images::Inline;
     // 页码类域的结果文字标上记号，排版时代入真实的数。重写前不认域，结果照原样显示。
     let fields_on = calib.header_footer == HeaderFooter::Drawn;
     let mut fields = OpenFields::default();
@@ -742,7 +777,33 @@ fn push_paragraph(
                 RunItem::Break(BreakKind::Page) => push(PAGE_BREAK.into(), &style),
                 RunItem::Break(BreakKind::Column) => push(COLUMN_BREAK.into(), &style),
                 RunItem::NoBreakHyphen => push("\u{2011}".into(), &style),
-                RunItem::Drawing { alt } => drawings.push(alt.clone()),
+                RunItem::Drawing(d) if images && d.inline => match d.extent {
+                    Some((cx, cy)) if cx > 0 && cy > 0 => {
+                        let target = d
+                            .picture
+                            .as_ref()
+                            .and_then(|p| Some((p.target.clone()?, p.crop)));
+                        let content = match target {
+                            Some((part, crop)) => ObjectContent::Image {
+                                part,
+                                crop: crop.map(|c| c as f32 / 100_000.0),
+                            },
+                            None => {
+                                ctx.missing.set(ctx.missing.get() + 1);
+                                ObjectContent::Missing { alt: d.alt.clone() }
+                            }
+                        };
+                        objects.push(InlineObject {
+                            width: emu(cx),
+                            height: emu(cy),
+                            content,
+                        });
+                        push(OBJECT.to_string(), &style);
+                    }
+                    // 零大小的图看不见，也不占位置。
+                    _ => {}
+                },
+                RunItem::Drawing(d) => drawings.push(d.alt.clone()),
                 RunItem::FieldChar(FieldChar::Begin) if fields_on => fields.begin(),
                 RunItem::FieldCode(code) if fields_on => fields.code(code),
                 RunItem::FieldChar(FieldChar::Separate) if fields_on => fields.separate(),
@@ -851,6 +912,7 @@ fn push_paragraph(
 
     let mark = run_style(&mark_rpr, fonts, calib);
     let mut para = paragraph(&ppr, text, spans, mark, char_size);
+    para.objects = objects;
     para.numbering_dropped = dropped;
     para.number = number;
     para.style_id = ppr
@@ -1087,6 +1149,7 @@ fn paragraph(
         number: None,
         text,
         spans,
+        objects: Vec::new(),
         mark,
     }
 }

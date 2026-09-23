@@ -78,7 +78,21 @@ pub(super) struct Piece {
     upem: f32,
     /// 本片开头要额外插入的间距（点）。中日韩与西文相邻时加，见 `CJK_LATIN_GAP_EM`。
     pub gap_before: f32,
+    /// 行内对象（图片）占的这一片：不画字，只占宽度、撑高行。
+    pub object: Option<ObjectBox>,
 }
+
+/// 行内对象在一片里的样子，见 [`ir::InlineObject`]。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct ObjectBox {
+    /// 第几个对象（[`ir::Paragraph::objects`] 的下标）。
+    pub index: usize,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// 对象片的「字形」按千分之一点量宽度：步进是整数字体单位，字号取 1、每 em 1000 单位。
+const OBJECT_UPEM: f32 = 1000.0;
 
 impl Piece {
     /// 本片（含其前置间距）在区间内贡献的宽度。
@@ -400,134 +414,187 @@ pub(super) fn shape(
     };
 
     let mut pieces: Vec<Piece> = Vec::new();
+    // 已经排过几个行内对象：文字里第 k 个替身是第 k 个对象。
+    let mut objects = 0;
     for (span, style) in spans {
-        for (abs, class) in script::within(&classes, span) {
-            let east = class == ScriptClass::EastAsian;
-            let family = if east {
-                style
-                    .font_east_asia
-                    .as_deref()
-                    .or(style.font_latin.as_deref())
-            } else {
-                style
-                    .font_latin
-                    .as_deref()
-                    .or(style.font_east_asia.as_deref())
-            };
-            let Some(primary) = book.resolve(family, east, style.bold, style.italic) else {
-                // 系统里一个字体都没有。无法排版，但要留痕而不是装作没事。
-                book.note_no_font();
-                continue;
-            };
-            for (part, font) in split_by_coverage(&text, abs.clone(), primary, east, style, book) {
-                let face = book.face(font.id);
-                let m = face.metrics();
-                let upem = m.upem as f32;
-                // 上下标画小一号，抬高「上伸 + 行间距」、压低「下伸」的余下部分
-                // （LibreOffice 实测：58% 字号，12pt 时上标抬高 4.7pt、下标压低 1.1pt）。
-                let (size, rise) = match style.vert_align {
-                    ir::VertAlign::Baseline => (style.size_pt, style.position_pt),
-                    ir::VertAlign::Superscript => (
-                        style.size_pt * SUPERSCRIPT_SCALE,
-                        style.position_pt
-                            + (m.ascender + m.line_gap) as f32 / upem
-                                * style.size_pt
-                                * (1.0 - SUPERSCRIPT_SCALE),
-                    ),
-                    ir::VertAlign::Subscript => (
-                        style.size_pt * SUPERSCRIPT_SCALE,
-                        style.position_pt
-                            + m.descender as f32 / upem * style.size_pt * (1.0 - SUPERSCRIPT_SCALE),
-                    ),
-                };
-                let shaped = if is_unpainted(&text[part.clone()]) {
-                    ShapedRun::empty()
+        for (whole, class) in script::within(&classes, span) {
+            for (abs, is_object) in split_objects(&text, whole) {
+                if is_object {
+                    let Some(obj) = para.objects.get(objects) else {
+                        continue;
+                    };
+                    objects += 1;
+                    let east = class == ScriptClass::EastAsian;
+                    let family = style
+                        .font_latin
+                        .as_deref()
+                        .or(style.font_east_asia.as_deref());
+                    let Some(font) = book.resolve(family, east, false, false) else {
+                        book.note_no_font();
+                        continue;
+                    };
+                    pieces.push(Piece {
+                        range: abs,
+                        class,
+                        font: font.id,
+                        metrics_font: font.id,
+                        synthetic_bold: false,
+                        synthetic_italic: false,
+                        size_pt: 1.0,
+                        letter_spacing: 0.0,
+                        letter_ends: Vec::new(),
+                        metrics_size_pt: 1.0,
+                        rise: style.position_pt,
+                        color: style.color,
+                        underline: None,
+                        strike: false,
+                        double_strike: false,
+                        background: None,
+                        link: style.link.clone(),
+                        shaped: ShapedRun::object((obj.width * OBJECT_UPEM).round() as i32),
+                        texts: vec![String::new()],
+                        upem: OBJECT_UPEM,
+                        gap_before: 0.0,
+                        object: Some(ObjectBox {
+                            index: objects - 1,
+                            width: obj.width,
+                            height: obj.height,
+                        }),
+                    });
+                    continue;
+                }
+                let east = class == ScriptClass::EastAsian;
+                let family = if east {
+                    style
+                        .font_east_asia
+                        .as_deref()
+                        .or(style.font_latin.as_deref())
                 } else {
-                    let kern = calib.kerning == Kerning::Always || style.kern;
-                    shape_run_with(face, &text[part.clone()], class.to_rustybuzz(), kern)
+                    style
+                        .font_latin
+                        .as_deref()
+                        .or(style.font_east_asia.as_deref())
                 };
-                // 字符间距加在每个字（cluster）的最后一个字形之后；记下到每个字形为止
-                // 有几个字的末尾，量宽度时一次减法就够。不折算成字体单位：
-                // 宋体每 em 只有 256 个单位，取整后每个字会差出 0.016pt。
-                // 字符网格：汉字、全角标点（一个 em 宽）撑满整格。字号比格宽略大时
-                // 仍占一格（公文的三号字就比格宽大 0.2pt），明显更大时占两格。
-                let grid_extra = match char_pitch {
-                    Some(p) if east && !is_unpainted(&text[part.clone()]) => {
-                        let cells = (style.size_pt / p - 0.05).ceil().max(1.0);
-                        cells * p - style.size_pt
-                    }
-                    _ => 0.0,
+                let Some(primary) = book.resolve(family, east, style.bold, style.italic) else {
+                    // 系统里一个字体都没有。无法排版，但要留痕而不是装作没事。
+                    book.note_no_font();
+                    continue;
                 };
-                let letter_spacing = style.char_spacing + grid_extra;
-                let letter_ends = if letter_spacing != 0.0 {
-                    let g = &shaped.glyphs;
-                    std::iter::once(0)
-                        .chain((0..g.len()).scan(0u32, |n, i| {
-                            if i + 1 == g.len() || g[i + 1].cluster != g[i].cluster {
-                                *n += 1;
-                            }
-                            Some(*n)
-                        }))
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                collect_missing(&text[part.clone()], &shaped, book);
-                let texts = cluster_texts(&text[part.clone()], &shaped.glyphs)
-                    .into_iter()
-                    .map(|(_, t)| t)
-                    .collect();
-                // 与紧邻的上一片之间插入中西文间距，加在哪里见 [`AutoSpace`]。
-                // 间距按两侧较大的字号算，跟 Word 的观感一致。回退字体切出来的片段
-                // 与主字体同文种，不会在它们之间加间距。
-                //
-                // 边界上已经有空白时**不加** —— 空格本身已经把两边分开了，再叠一层
-                // 会让行变宽并提前折行。实测参照：「正文第1段。」每个边界加 2.4pt，
-                // 而「正文第 1 段。」只有空格宽度、没有额外间距。
-                let spaced = |prev: &Piece| match calib.auto_space {
-                    AutoSpace::Legacy => {
-                        prev.class != class
-                            && !text[prev.range.clone()].ends_with(char::is_whitespace)
-                            && !text[part.clone()].starts_with(char::is_whitespace)
-                    }
-                    AutoSpace::Letters => {
-                        let before = text[prev.range.clone()].chars().next_back();
-                        let after = text[part.clone()].chars().next();
-                        matches!((before, after), (Some(b), Some(a))
+                for (part, font) in
+                    split_by_coverage(&text, abs.clone(), primary, east, style, book)
+                {
+                    let face = book.face(font.id);
+                    let m = face.metrics();
+                    let upem = m.upem as f32;
+                    // 上下标画小一号，抬高「上伸 + 行间距」、压低「下伸」的余下部分
+                    // （LibreOffice 实测：58% 字号，12pt 时上标抬高 4.7pt、下标压低 1.1pt）。
+                    let (size, rise) = match style.vert_align {
+                        ir::VertAlign::Baseline => (style.size_pt, style.position_pt),
+                        ir::VertAlign::Superscript => (
+                            style.size_pt * SUPERSCRIPT_SCALE,
+                            style.position_pt
+                                + (m.ascender + m.line_gap) as f32 / upem
+                                    * style.size_pt
+                                    * (1.0 - SUPERSCRIPT_SCALE),
+                        ),
+                        ir::VertAlign::Subscript => (
+                            style.size_pt * SUPERSCRIPT_SCALE,
+                            style.position_pt
+                                + m.descender as f32 / upem
+                                    * style.size_pt
+                                    * (1.0 - SUPERSCRIPT_SCALE),
+                        ),
+                    };
+                    let shaped = if is_unpainted(&text[part.clone()]) {
+                        ShapedRun::empty()
+                    } else {
+                        let kern = calib.kerning == Kerning::Always || style.kern;
+                        shape_run_with(face, &text[part.clone()], class.to_rustybuzz(), kern)
+                    };
+                    // 字符间距加在每个字（cluster）的最后一个字形之后；记下到每个字形为止
+                    // 有几个字的末尾，量宽度时一次减法就够。不折算成字体单位：
+                    // 宋体每 em 只有 256 个单位，取整后每个字会差出 0.016pt。
+                    // 字符网格：汉字、全角标点（一个 em 宽）撑满整格。字号比格宽略大时
+                    // 仍占一格（公文的三号字就比格宽大 0.2pt），明显更大时占两格。
+                    let grid_extra = match char_pitch {
+                        Some(p) if east && !is_unpainted(&text[part.clone()]) => {
+                            let cells = (style.size_pt / p - 0.05).ceil().max(1.0);
+                            cells * p - style.size_pt
+                        }
+                        _ => 0.0,
+                    };
+                    let letter_spacing = style.char_spacing + grid_extra;
+                    let letter_ends = if letter_spacing != 0.0 {
+                        let g = &shaped.glyphs;
+                        std::iter::once(0)
+                            .chain((0..g.len()).scan(0u32, |n, i| {
+                                if i + 1 == g.len() || g[i + 1].cluster != g[i].cluster {
+                                    *n += 1;
+                                }
+                                Some(*n)
+                            }))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    collect_missing(&text[part.clone()], &shaped, book);
+                    let texts = cluster_texts(&text[part.clone()], &shaped.glyphs)
+                        .into_iter()
+                        .map(|(_, t)| t)
+                        .collect();
+                    // 与紧邻的上一片之间插入中西文间距，加在哪里见 [`AutoSpace`]。
+                    // 间距按两侧较大的字号算，跟 Word 的观感一致。回退字体切出来的片段
+                    // 与主字体同文种，不会在它们之间加间距。
+                    //
+                    // 边界上已经有空白时**不加** —— 空格本身已经把两边分开了，再叠一层
+                    // 会让行变宽并提前折行。实测参照：「正文第1段。」每个边界加 2.4pt，
+                    // 而「正文第 1 段。」只有空格宽度、没有额外间距。
+                    let spaced = |prev: &Piece| match calib.auto_space {
+                        AutoSpace::Legacy => {
+                            prev.class != class
+                                && !text[prev.range.clone()].ends_with(char::is_whitespace)
+                                && !text[part.clone()].starts_with(char::is_whitespace)
+                        }
+                        AutoSpace::Letters => {
+                            let before = text[prev.range.clone()].chars().next_back();
+                            let after = text[part.clone()].chars().next();
+                            matches!((before, after), (Some(b), Some(a))
                             if autospaced((b, prev.class), (a, class)))
-                    }
-                };
-                let gap_before = match pieces.last() {
-                    Some(prev)
-                        if para.auto_space && prev.range.end == part.start && spaced(prev) =>
-                    {
-                        CJK_LATIN_GAP_EM * prev.size_pt.max(style.size_pt)
-                    }
-                    _ => 0.0,
-                };
-                pieces.push(Piece {
-                    range: part,
-                    class,
-                    font: font.id,
-                    metrics_font: primary.id,
-                    synthetic_bold: font.synthetic_bold,
-                    synthetic_italic: font.synthetic_italic,
-                    size_pt: size,
-                    letter_spacing,
-                    letter_ends,
-                    metrics_size_pt: style.size_pt,
-                    rise,
-                    color: style.color,
-                    underline: style.underline,
-                    strike: style.strike,
-                    double_strike: style.double_strike,
-                    background: style.background,
-                    link: style.link.clone(),
-                    shaped,
-                    texts,
-                    upem,
-                    gap_before,
-                });
+                        }
+                    };
+                    let gap_before = match pieces.last() {
+                        Some(prev)
+                            if para.auto_space && prev.range.end == part.start && spaced(prev) =>
+                        {
+                            CJK_LATIN_GAP_EM * prev.size_pt.max(style.size_pt)
+                        }
+                        _ => 0.0,
+                    };
+                    pieces.push(Piece {
+                        range: part,
+                        class,
+                        font: font.id,
+                        metrics_font: primary.id,
+                        synthetic_bold: font.synthetic_bold,
+                        synthetic_italic: font.synthetic_italic,
+                        size_pt: size,
+                        letter_spacing,
+                        letter_ends,
+                        metrics_size_pt: style.size_pt,
+                        rise,
+                        color: style.color,
+                        underline: style.underline,
+                        strike: style.strike,
+                        double_strike: style.double_strike,
+                        background: style.background,
+                        link: style.link.clone(),
+                        shaped,
+                        texts,
+                        upem,
+                        gap_before,
+                        object: None,
+                    });
+                }
             }
         }
     }
@@ -539,6 +606,26 @@ pub(super) fn shape(
         breaks,
         tabs,
     }
+}
+
+/// 把区间按行内对象的替身切开：(子区间, 是不是一个对象)。
+fn split_objects(text: &str, range: Range<usize>) -> Vec<(Range<usize>, bool)> {
+    let mut out = Vec::new();
+    let mut start = range.start;
+    for (i, c) in text[range.clone()].char_indices() {
+        if c == ir::OBJECT {
+            let at = range.start + i;
+            if at > start {
+                out.push((start..at, false));
+            }
+            out.push((at..at + c.len_utf8(), true));
+            start = at + c.len_utf8();
+        }
+    }
+    if start < range.end {
+        out.push((start..range.end, false));
+    }
+    out
 }
 
 /// 相邻两个字之间要不要加中西文间距（[`AutoSpace::Letters`]）：一边是汉字、假名、

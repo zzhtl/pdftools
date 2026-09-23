@@ -18,9 +18,9 @@ mod text;
 
 pub use calib::{
     AutoSpace, Breaks, Calib, Cascade, CharClass, CharGrid, Decor, EmptyPara, FixedBaseline, Flow,
-    GridLayout, HangingIndent, HangingPunct, HeaderFooter, Justify, Kerning, LineGap, ListNumbers,
-    Overflow, PageBottom, PageBreakBefore, ParaSpacing, RunFormat, Sections, Tables, Tabs, Theme,
-    TrailingSpaces,
+    GridLayout, HangingIndent, HangingPunct, HeaderFooter, Images, Justify, Kerning, LineGap,
+    ListNumbers, Overflow, PageBottom, PageBreakBefore, ParaSpacing, RunFormat, Sections, Tables,
+    Tabs, Theme, TrailingSpaces,
 };
 
 use super::ir;
@@ -62,6 +62,16 @@ pub enum PaintOp {
         y2: f32,
         uri: String,
     },
+    /// 图片：`part` 是包里的图片部件，(`x`, `y`) 是显示框的左下角（测量时 y 与其他
+    /// 操作一样相对基线），`crop` 是左、上、右、下各裁掉的比例。
+    Image {
+        part: String,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        crop: [f32; 4],
+    },
     /// 下划线、删除线、底色、占位框的边都用矩形画。
     Rect {
         x: f32,
@@ -77,7 +87,9 @@ impl PaintOp {
     fn shifted(&self, dy: f32) -> PaintOp {
         let mut op = self.clone();
         match &mut op {
-            PaintOp::Text { y, .. } | PaintOp::Rect { y, .. } => *y += dy,
+            PaintOp::Text { y, .. } | PaintOp::Rect { y, .. } | PaintOp::Image { y, .. } => {
+                *y += dy
+            }
             PaintOp::Line { from, to, .. } => {
                 from.1 += dy;
                 to.1 += dy;
@@ -224,6 +236,15 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
             format!(
                 "编号格式 {} 暂不支持，已按阿拉伯数字输出",
                 doc.num_format_fallbacks.join("、")
+            ),
+        ));
+    }
+    if doc.missing_objects > 0 {
+        warnings.push(Warning::new(
+            WarningKind::UnsupportedElement,
+            format!(
+                "{} 个行内的形状、图表或找不到的图片本版本画不出来，已按原大小画成灰框",
+                doc.missing_objects
             ),
         ));
     }
@@ -650,6 +671,7 @@ fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
         number: None,
         text,
         spans,
+        objects: Vec::new(),
         mark: style,
     }
 }

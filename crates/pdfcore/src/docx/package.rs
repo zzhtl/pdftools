@@ -33,6 +33,8 @@ pub struct Package {
     pub header_footer: HashMap<String, String>,
     /// `document.xml` 的关系：id → 目标。
     pub rels: HashMap<String, Relationship>,
+    /// 页眉页脚部件各自的关系：部件路径 → (id → 目标)。页眉里的图片靠它找。
+    pub part_rels: HashMap<String, HashMap<String, Relationship>>,
     /// 部件路径 → 字节。只收 word/media/ 下的图片。
     pub media: HashMap<String, Vec<u8>>,
 }
@@ -70,6 +72,7 @@ pub fn open(path: &Path) -> Result<Package> {
     let mut rels_xml = None;
     let mut core_xml = None;
     let mut media = HashMap::new();
+    let mut part_rels = HashMap::new();
 
     for i in 0..zip.len() {
         let mut entry = zip
@@ -101,7 +104,13 @@ pub fn open(path: &Path) -> Result<Package> {
         let want_media = name.starts_with("word/media/");
         let want_hf = (name.starts_with("word/header") || name.starts_with("word/footer"))
             && name.ends_with(".xml");
-        if !want_text && !want_media && !want_hf {
+        // `word/_rels/header1.xml.rels` 是 `word/header1.xml` 的关系。
+        let hf_rels = name
+            .strip_prefix("word/_rels/")
+            .and_then(|n| n.strip_suffix(".rels"))
+            .filter(|n| n.starts_with("header") || n.starts_with("footer"))
+            .map(|n| format!("word/{n}"));
+        if !want_text && !want_media && !want_hf && hf_rels.is_none() {
             continue;
         }
 
@@ -118,6 +127,10 @@ pub fn open(path: &Path) -> Result<Package> {
             .map_err(|_| CoreError::Docx(format!("{name} 不是合法的 UTF-8")))?;
         if want_hf {
             header_footer.insert(name, text);
+            continue;
+        }
+        if let Some(part) = hf_rels {
+            part_rels.insert(part, parse_rels(&text));
             continue;
         }
         match name.as_str() {
@@ -144,6 +157,7 @@ pub fn open(path: &Path) -> Result<Package> {
         theme,
         header_footer,
         rels: rels_xml.as_deref().map(parse_rels).unwrap_or_default(),
+        part_rels,
         media,
     })
 }

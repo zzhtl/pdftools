@@ -6,11 +6,15 @@ use super::calib::{
     Calib, Decor, EmptyPara, Flow, HangingIndent, HangingPunct, Justify, LineGap, Overflow,
     TrailingSpaces,
 };
-use super::metrics::line_box;
+use super::metrics::{line_box, LineContent};
 use super::text::{self, Hang, Piece, ShapedPara, TabRules};
 use super::PaintOp;
 use crate::docx::ir::{self, Align, Grid, LineSpacing};
 use crate::fonts::FontBook;
+
+/// 画不出来的行内对象：浅灰的底、深一点的边。
+const MISSING_FILL: [u8; 3] = [0xEE, 0xEE, 0xEE];
+const MISSING_EDGE: [u8; 3] = [0x99, 0x99, 0x99];
 
 /// 测量环境：一栏的横向位置与宽度，以及排版规则。
 pub(super) struct Env<'a> {
@@ -147,7 +151,11 @@ impl ParaBox {
 pub(super) fn measure(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> ParaBox {
     let shaped = text::shape(para, book, env.calib, env.char_pitch);
     let body = if !shaped.pieces.is_empty() {
-        ParaBody::Lines(break_lines(para, &shaped, env, book))
+        // 只有图的行，行距倍数多出来的部分按段落标记的字体算。
+        let marks = (!para.objects.is_empty())
+            .then(|| mark_metrics(para, env, book))
+            .flatten();
+        ParaBody::Lines(break_lines(para, &shaped, env, book, marks))
     } else {
         match env.calib.empty_para {
             EmptyPara::MarkLine => match mark_line(para, env, book) {
@@ -185,23 +193,27 @@ fn legacy_empty_height(para: &ir::Paragraph) -> f32 {
     }
 }
 
-/// 空段落的那一行：只有段落标记，行高按标记的西文字体、字号算，见 [`EmptyPara::MarkLine`]。
-fn mark_line(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> Option<Line> {
+/// 段落标记的自然行高与上伸：按标记的西文字体、字号算，与正文片段同一算法
+/// （`Piece::natural_line_pt` / `ascent_pt`）。
+fn mark_metrics(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> Option<(f32, f32)> {
     let mark = &para.mark;
     let font = book.resolve(mark.font_latin.as_deref(), false, mark.bold, mark.italic)?;
     let m = book.face(font.id).metrics();
     let upem = m.upem as f32;
-    // 与正文片段的自然行高、上伸同一算法（`Piece::natural_line_pt` / `ascent_pt`）。
     let unsnapped = (m.default_line_height() * mark.size_pt / upem).max(1.0);
     let gap = if env.calib.line_gap == LineGap::Above {
         m.line_gap as f32
     } else {
         0.0
     };
-    let ascent = (m.ascender as f32 + gap) * mark.size_pt / upem;
+    Some((unsnapped, (m.ascender as f32 + gap) * mark.size_pt / upem))
+}
+
+/// 空段落的那一行：只有段落标记，行高按标记的西文字体、字号算，见 [`EmptyPara::MarkLine`]。
+fn mark_line(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> Option<Line> {
+    let (unsnapped, ascent) = mark_metrics(para, env, book)?;
     let b = line_box(
-        unsnapped,
-        ascent,
+        LineContent::text(unsnapped, ascent),
         env.grid,
         para.snap_to_grid,
         para.line,
@@ -264,7 +276,14 @@ fn line_start(para: &ir::Paragraph, sp: &ShapedPara, is_first: bool, calib: &Cal
     para.indent_left + first_line_offset(para, sp, is_first, calib)
 }
 
-fn break_lines(para: &ir::Paragraph, sp: &ShapedPara, env: &Env, book: &FontBook) -> Vec<Line> {
+/// `marks`：段落标记的自然行高与上伸，见 [`mark_metrics`]。
+fn break_lines(
+    para: &ir::Paragraph,
+    sp: &ShapedPara,
+    env: &Env,
+    book: &FontBook,
+    marks: Option<(f32, f32)>,
+) -> Vec<Line> {
     let avail_first = env.width - para.indent_left - para.indent_right + para.first_line.min(0.0);
     let avail_rest = env.width - para.indent_left - para.indent_right;
     let first_indent = para.first_line.max(0.0);
@@ -299,6 +318,7 @@ fn break_lines(para: &ir::Paragraph, sp: &ShapedPara, env: &Env, book: &FontBook
             is_first,
             is_last || mandatory,
             is_last,
+            marks,
         );
         l.page_break_after = mandatory
             && sp.text[start..end]
@@ -323,21 +343,42 @@ fn line(
     suppress_justify: bool,
     // 本行是不是所属段落的最后一行 —— 决定倍数行距怎么算，见 `line_box`。
     is_last: bool,
+    marks: Option<(f32, f32)>,
 ) -> Line {
-    // 行内实际出现的片段决定行高：取最大的那个字体。
+    // 行内实际出现的片段决定行高：取最大的那个字体。行内对象另算，见 `LineContent`。
     let active = sp.pieces_in(range.start, range.end);
-    let unsnapped = active
+    let text = || active.iter().filter(|p| p.object.is_none());
+    let object = active
         .iter()
-        .map(|p| p.natural_line_pt(book))
-        .fold(0.0f32, f32::max)
-        .max(1.0);
-    let ascent = active
-        .iter()
-        .map(|p| p.ascent_pt(book, env.calib.line_gap == LineGap::Above))
+        .filter_map(|p| p.object.map(|o| o.height))
         .fold(0.0f32, f32::max);
+    let has_text = text().next().is_some();
+    let content = if has_text || object == 0.0 {
+        let unsnapped = text()
+            .map(|p| p.natural_line_pt(book))
+            .fold(0.0f32, f32::max)
+            .max(1.0);
+        let ascent = text()
+            .map(|p| p.ascent_pt(book, env.calib.line_gap == LineGap::Above))
+            .fold(0.0f32, f32::max);
+        LineContent {
+            unsnapped,
+            ascent,
+            object,
+            has_text: true,
+        }
+    } else {
+        // 只有对象的行：行距倍数多出来的部分按段落标记的字体算。
+        let (unsnapped, ascent) = marks.unwrap_or((object, object));
+        LineContent {
+            unsnapped,
+            ascent,
+            object,
+            has_text: false,
+        }
+    };
     let metrics = line_box(
-        unsnapped,
-        ascent,
+        content,
         env.grid,
         para.snap_to_grid,
         para.line,
@@ -398,6 +439,42 @@ fn line(
                 ops.push(op);
             }
             x = env.left + shift + to;
+            continue;
+        }
+        if let Some(obj) = piece.object {
+            let extra: f32 = extra_after.iter().sum();
+            let (w, h, y) = (obj.width, obj.height, piece.rise);
+            match &para.objects[obj.index].content {
+                ir::ObjectContent::Image { part, crop } => ops.push(PaintOp::Image {
+                    part: part.clone(),
+                    x,
+                    y,
+                    w,
+                    h,
+                    crop: *crop,
+                }),
+                // 画不出来的：浅灰底、深灰边的框，版面不乱。
+                ir::ObjectContent::Missing { .. } => {
+                    ops.push(PaintOp::Rect {
+                        x,
+                        y,
+                        w,
+                        h,
+                        color: MISSING_FILL,
+                    });
+                    let corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)];
+                    for pair in corners.windows(2) {
+                        ops.push(PaintOp::Line {
+                            from: pair[0],
+                            to: pair[1],
+                            width: 0.5,
+                            color: MISSING_EDGE,
+                            dash: Vec::new(),
+                        });
+                    }
+                }
+            }
+            x += w + extra;
             continue;
         }
         let glyphs = piece.glyphs_between(range.start, range.end);

@@ -38,6 +38,25 @@ pub struct Calib {
     pub line_gap: LineGap,
     pub char_grid: CharGrid,
     pub tables: Tables,
+    pub images: Images,
+}
+
+/// 图片（`w:drawing`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Images {
+    /// 不画：段落后面补一句说明，并给出警告。
+    Placeholder,
+    /// 行内的图片（`wp:inline`）排进行里。对照 LibreOffice 实测：
+    /// - 底边在基线上，左边在它所在的文字位置；居中、右对齐按图宽摆；
+    /// - 行的上伸取文字上伸与图高的大者，下伸只看文字；只有图的行就是图那么高；
+    /// - 行距倍数多出来的部分按文字的自然行高算（只有图时按段落标记的字体），
+    ///   一点五倍行距里一张 50pt 的图占 55.75pt 而不是 75pt；固定行距时行高不变，
+    ///   图往上伸出去，不裁；有行网格时整行吸附到格，图比字高时吸附多出来的都在图下面；
+    /// - 裁剪（`a:srcRect`）把整张图放大后按显示框裁掉；JPEG 的 EXIF 方向不管，
+    ///   像素按存的样子画（LibreOffice 实测也不管）。
+    ///
+    /// 浮动的（`wp:anchor`）、VML 的、形状图表，本版本仍按占位处理。
+    Inline,
 }
 
 /// 表格。
@@ -453,6 +472,7 @@ impl Calib {
             line_gap: LineGap::Above,
             char_grid: CharGrid::Cells,
             tables: Tables::Drawn,
+            images: Images::Inline,
         }
     }
 
@@ -486,6 +506,7 @@ impl Calib {
             line_gap: LineGap::Below,
             char_grid: CharGrid::Ignored,
             tables: Tables::Placeholder,
+            images: Images::Placeholder,
         }
     }
 }

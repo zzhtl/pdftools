@@ -34,6 +34,19 @@ impl ShapedRun {
         }
     }
 
+    /// 行内对象（图片）：一个不绘制的「字形」，步进是对象的宽度（字体单位）。
+    /// 这样断行、对齐、量宽度都不用为它另开一条路。
+    pub fn object(advance: i32) -> Self {
+        Self {
+            glyphs: vec![ShapedGlyph {
+                gid: 0,
+                cluster: 0,
+                x_advance: advance,
+            }],
+            prefix_width: vec![0, advance as i64],
+        }
+    }
+
     /// 字形区间 `[from, to)` 的宽度，字体单位。
     pub fn width_between(&self, from: usize, to: usize) -> i64 {
         self.prefix_width[to.min(self.glyphs.len())]

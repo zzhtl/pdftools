@@ -412,6 +412,59 @@ pub fn all() -> Vec<Probe> {
         DocxBuilder::new().styles(&styles).body(&body),
     );
 
+    // 行内图片：单独一段的、夹在字里的、一点五倍行距的，还有一张高得要换页的。
+    let mut builder = DocxBuilder::new();
+    let png = |w: u32, h: u32| {
+        let img = image::DynamicImage::ImageRgb8(super::images::photo(w, h));
+        let mut bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        bytes
+    };
+    let wide = builder.media("wide.png", png(80, 40));
+    let square = builder.media(
+        "square.jpeg",
+        super::images::jpeg_q(
+            &image::DynamicImage::ImageRgb8(super::images::photo(40, 40)),
+            90,
+        ),
+    );
+    let pic = |rid: &str, w: u32, h: u32| {
+        format!(
+            r#"<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{}" cy="{}"/><wp:docPr id="1" name="p"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="1" name="p"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{}" cy="{}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#,
+            w * 12700,
+            h * 12700,
+            w * 12700,
+            h * 12700
+        )
+    };
+    let run = |t: &str| {
+        format!(
+            r#"<w:r><w:rPr><w:rFonts w:ascii="Liberation Serif" w:hAnsi="Liberation Serif" w:eastAsia="Noto Serif CJK SC"/><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">{t}</w:t></w:r>"#
+        )
+    };
+    let mut body = String::new();
+    for i in 0..6 {
+        body += &paras(3, "", 50 + i * 7);
+        body += &format!("<w:p>{}</w:p>", pic(&wide, 160, 80));
+        body += &format!(
+            "<w:p>{}{}{}</w:p>",
+            run(&filler(i, 12)),
+            pic(&square, 24, 24),
+            run(&filler(i + 2, 30))
+        );
+        body += &format!(
+            r#"<w:p><w:pPr><w:spacing w:line="360" w:lineRule="auto"/><w:jc w:val="center"/></w:pPr>{}</w:p>"#,
+            pic(&square, 60, 60)
+        );
+    }
+    body += &format!("<w:p>{}</w:p>", pic(&wide, 400, 200));
+    body += &paras(4, "", 60);
+    add("images_inline", builder.body(&body));
+
     let numbering = r#"<w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="hybridMultilevel"/>
 <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="chineseCounting"/><w:lvlText w:val="%1、"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="420" w:hanging="420"/></w:pPr></w:lvl>
 <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="840" w:hanging="420"/></w:pPr></w:lvl>

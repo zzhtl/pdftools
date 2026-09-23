@@ -1,9 +1,10 @@
 //! Word 文档转 PDF。
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::bail_if_cancelled;
-use crate::docx::{ir, layout, package, paint, parse};
+use crate::docx::{ir, layout, model, package, paint, parse};
 use crate::error::{Report, Result};
 use crate::progress::{Progress, ProgressSink};
 
@@ -63,13 +64,17 @@ pub fn run_with(
         .as_deref()
         .map(parse::parse_numbering)
         .unwrap_or_default();
+    // 页眉页脚里的图片查它们自己的关系表。
+    resolve_pictures(&mut raw.body, Some(&pkg.rels));
     // 页眉页脚按关系 id 存：各节的 w:headerReference 写的是关系 id。
     raw.header_footer = pkg
         .rels
         .iter()
         .filter_map(|(id, rel)| {
             let xml = pkg.header_footer.get(&rel.target)?;
-            Some((id.clone(), parse::parse_header_footer(xml)))
+            let mut story = parse::parse_header_footer(xml);
+            resolve_pictures(&mut story, pkg.part_rels.get(&rel.target));
+            Some((id.clone(), story))
         })
         .collect();
     raw.hyperlinks = pkg
@@ -96,18 +101,35 @@ pub fn run_with(
         creation: pkg.created,
         modified: Some(crate::timestamp::Timestamp::now()),
     };
-    let pdf = paint::paint(&laid, &book, info)?;
+    let (pdf, painted) = paint::paint(&laid, &book, info, &pkg.media)?;
     sink.emit(step(4, "生成 PDF"));
 
     let pages = laid.pages.len();
+    let mut warnings = laid.warnings;
+    warnings.extend(painted);
     Ok(Report::with(
         Outcome {
             pdf,
             pages,
             creation: pkg.created,
         },
-        laid.warnings,
+        warnings,
     ))
+}
+
+/// 图片写的是关系 id，换成包里的部件路径。找不到、或者指向包外的，留空。
+fn resolve_pictures(
+    story: &mut model::Story,
+    rels: Option<&HashMap<String, package::Relationship>>,
+) {
+    model::for_each_picture(story, &mut |pic| {
+        pic.target = pic
+            .target
+            .as_ref()
+            .and_then(|id| rels?.get(id))
+            .filter(|r| !r.external)
+            .map(|r| r.target.clone());
+    });
 }
 
 /// 用重写前的排版引擎转换。只给测试做新旧对照用。

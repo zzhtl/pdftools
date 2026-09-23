@@ -266,6 +266,116 @@ fn table_geometry_follows_word() {
     }
 }
 
+/// 行内的图片，对照 LibreOffice 实测：底边在基线上、左边在文字的位置，只有图的一行就是
+/// 图那么高；裁剪把整张图放大、按显示框裁掉；页眉里的图查页眉自己的关系表；画不出来的
+/// （EMF 之类）按原大小画成灰框并报告。
+#[test]
+fn inline_images_are_drawn() {
+    use common::pdfpaths;
+    if !require_cjk_font() {
+        return;
+    }
+    let png = {
+        let img = image::DynamicImage::ImageRgb8(common::images::photo(40, 20));
+        let mut bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        bytes
+    };
+    let jpeg = common::images::jpeg_q(
+        &image::DynamicImage::ImageRgb8(common::images::photo(30, 30)),
+        90,
+    );
+    let mut builder = DocxBuilder::new();
+    let a = builder.media("a.png", png.clone());
+    let b = builder.media("b.jpeg", jpeg);
+    let c = builder.media("c.emf", b"\x01\x00\x00\x00 not an image".to_vec());
+    let h = builder.media_in_part(true, 1, "a.png", png);
+    let pic = |rid: &str, w: f32, h: f32, crop: &str| {
+        format!(
+            r#"<w:r><w:drawing><wp:inline><wp:extent cx="{}" cy="{}"/><wp:docPr id="1" name="p"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill><a:blip r:embed="{rid}"/>{crop}</pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#,
+            (w * 12700.0) as i64,
+            (h * 12700.0) as i64
+        )
+    };
+    let text = |t: &str| format!(r#"<w:r><w:t xml:space="preserve">{t}</w:t></w:r>"#);
+    let body = format!(
+        "<w:p>{}</w:p><w:p>{}</w:p><w:p>{}</w:p><w:p>{}</w:p>",
+        pic(&a, 100.0, 50.0, ""),
+        text("前文") + &pic(&b, 30.0, 30.0, "") + &text("后文"),
+        pic(&a, 100.0, 50.0, r#"<a:srcRect l="25000" r="25000"/>"#),
+        pic(&c, 40.0, 20.0, "")
+    );
+    let path = builder
+        .body(&body)
+        .header(
+            "default",
+            &format!("<w:p>{}</w:p>", pic(&h, 20.0, 10.0, "")),
+        )
+        .build("inline_images.docx");
+    let report = convert(&path);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.detail.contains("画不出来")),
+        "{:?}",
+        report.warnings
+    );
+    let pdf = &report.value.pdf;
+    let placed = &pdfpaths::images(pdf)[0];
+    let close = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.01);
+    // 版心顶在 841.9 - 72 = 769.9；左边距 79.4。
+    let body_top = 841.9 - 72.0;
+    assert!(
+        placed
+            .iter()
+            .any(|p| close(p.bbox, [79.4, body_top - 50.0, 179.4, body_top])),
+        "只有图的一行就是图那么高：{placed:?}"
+    );
+    // 与文字同行：图的底边在这一行的基线上，左右紧挨着前后的字。
+    let lines = &common::pdftext::extract(pdf)[0].lines;
+    let mixed = lines
+        .iter()
+        .find(|l| l.text.replace(' ', "").contains("前文后文"))
+        .expect("找不到图所在的那一行");
+    let jpeg_box = placed
+        .iter()
+        .find(|p| (p.bbox[2] - p.bbox[0] - 30.0).abs() < 0.01)
+        .expect("找不到 30pt 的那张图");
+    let (before, after) = (&mixed.frags[0], &mixed.frags[1]);
+    assert!(
+        (jpeg_box.bbox[1] - mixed.y).abs() < 0.01,
+        "{jpeg_box:?} {mixed:?}"
+    );
+    assert!((jpeg_box.bbox[0] - (before.x + before.width)).abs() < 0.05);
+    assert!((after.x - jpeg_box.bbox[2]).abs() < 0.05);
+    // 左右各裁掉四分之一：整张图放大到 200pt，显示框还是 100pt 宽。
+    let cropped = placed
+        .iter()
+        .find(|p| (p.bbox[2] - p.bbox[0] - 200.0).abs() < 0.01)
+        .expect("找不到裁剪的那张图");
+    assert!((cropped.bbox[0] - (79.4 - 50.0)).abs() < 0.01);
+    let clip = cropped.clip.expect("裁剪要有裁剪框");
+    assert!((clip[0] - 79.4).abs() < 0.01 && (clip[2] - 179.4).abs() < 0.01);
+    // 页眉里的图在版心上面。
+    assert!(
+        placed
+            .iter()
+            .any(|p| (p.bbox[2] - p.bbox[0] - 20.0).abs() < 0.01 && p.bbox[1] > body_top),
+        "{placed:?}"
+    );
+    // EMF 画成 40×20 的灰框。
+    let paths = &pdfpaths::extract(pdf)[0];
+    assert!(paths.iter().any(|p| !p.stroke
+        && (p.w() - 40.0).abs() < 0.01
+        && (p.h() - 20.0).abs() < 0.01
+        && p.color.iter().all(|c| (c - 0.933).abs() < 0.01)));
+}
+
 /// Word 默认插入的「网格型」表格只写了 `w:tblStyle`：框线、单元格里的段距都来自表格样式；
 /// 首行的条件格式铺底纹（加粗在 `ir` 的单元测试里验：宋体没有粗体时是合成的，字体名看不出）。
 #[test]
