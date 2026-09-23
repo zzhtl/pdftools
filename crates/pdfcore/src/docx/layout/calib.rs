@@ -20,6 +20,16 @@ pub enum EmptyPara {
     /// 首个 run 的字号（一个 run 都没有时 10.5pt）× 1.2，再按行距规则放大；
     /// 不检查放不放得下，可以越过页底。
     Legacy,
+    /// 空段落是只有一个段落标记的一行：行高取标记的西文字体在标记字号下的自然行高，
+    /// 之后与正文行一样吸附网格、套行距，也一样要放得下才放。
+    ///
+    /// 对照 LibreOffice 实测（无网格）：12pt / 16pt 标记分别是 13.8 / 18.4pt，
+    /// 即 Liberation Serif 的自然行高；写了 `w:hint="eastAsia"` 也仍按西文字体；
+    /// 1.5 倍行距是 20.7pt，与正文末行的规则一致。
+    ///
+    /// 有行网格时 LibreOffice 把空段落一律排成一格，连 16pt、固定行距也不例外，
+    /// 而正文行是按字高吸附整格的。这里与正文行保持一致 —— Word 的网格也按字高吸附。
+    MarkLine,
 }
 
 impl Calib {
@@ -27,7 +37,7 @@ impl Calib {
     pub fn current() -> Self {
         Self {
             default_size_pt: 10.0,
-            ..Self::legacy()
+            empty_para: EmptyPara::MarkLine,
         }
     }
 

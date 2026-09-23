@@ -879,3 +879,60 @@ fn text_without_any_size_is_10pt() {
         "字号应当都是 10pt：{sizes:?}"
     );
 }
+
+/// 空段落是只有段落标记的一行：行高与同一字体、同一字号的一行西文相同，
+/// 有行网格时同样吸附到整格。
+#[test]
+fn an_empty_paragraph_is_as_tall_as_a_line_of_its_mark_font() {
+    if !require_cjk_font() {
+        return;
+    }
+    let fonts = r#"<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="32"/>"#;
+    let marker = |tag: &str| {
+        format!(
+            r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="24"/></w:rPr><w:t>标记{tag}行</w:t></w:r></w:p>"#
+        )
+    };
+    let empty = format!(r#"<w:p><w:pPr><w:rPr>{fonts}</w:rPr></w:pPr></w:p>"#);
+    let latin = format!(r#"<w:p><w:r><w:rPr>{fonts}</w:rPr><w:t>Mm</w:t></w:r></w:p>"#);
+    let body = marker("甲")
+        + &empty.repeat(3)
+        + &marker("乙")
+        + &marker("丙")
+        + &latin.repeat(3)
+        + &marker("丁");
+    for (name, sect) in [
+        ("empty_mark.docx", ""),
+        (
+            "empty_mark_grid.docx",
+            r#"<w:docGrid w:type="lines" w:linePitch="312"/>"#,
+        ),
+    ] {
+        let path = DocxBuilder::new().body(&body).sect_extra(sect).build(name);
+        let pages = common::pdftext::extract(&convert(&path).value.pdf);
+        let gap = |a, b| common::calib::gap(&pages, a, b).expect("标记行不在同一页");
+        let (empties, latins) = (gap("甲", "乙"), gap("丙", "丁"));
+        assert!(
+            (empties - latins).abs() < 0.01,
+            "{name}：三个空段落占 {empties}pt，三行同字号西文占 {latins}pt"
+        );
+    }
+}
+
+/// 空段落也是一行：页面放不下就换页，而不是越过页底、把后面的内容整体往下推。
+#[test]
+fn empty_paragraphs_that_do_not_fit_go_to_the_next_page() {
+    if !require_cjk_font() {
+        return;
+    }
+    let empty = r#"<w:p><w:pPr><w:rPr><w:rFonts w:ascii="Times New Roman"/><w:sz w:val="24"/></w:rPr></w:pPr></w:p>"#;
+    let body = empty.repeat(120) + &para("最后一段");
+    let report = convert(&make_docx("many_empties.docx", &body));
+    // 120 个 12pt 空段落约 1650pt，内容区一页约 697pt：最后一段应当在第 3 页。
+    let pages = common::pdftext::extract(&report.value.pdf);
+    let last_page = pages
+        .iter()
+        .position(|p| p.text().contains("最后一段"))
+        .expect("找不到最后一段");
+    assert_eq!(last_page, 2, "共 {} 页", pages.len());
+}

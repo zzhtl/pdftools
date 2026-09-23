@@ -130,6 +130,8 @@ pub struct Paragraph {
     pub numbering_dropped: bool,
     pub text: String,
     pub spans: Vec<Span>,
+    /// 段落标记（¶）的格式。空段落的行高由它决定。
+    pub mark: RunStyle,
 }
 
 /// 本版本画不出来的内容。它是 IR 的一等公民，而不是一个被丢掉的分支 ——
@@ -243,7 +245,8 @@ fn push_paragraph(out: &mut Vec<Block>, p: &model::Para, resolver: &Resolver, ca
         .or_else(|| spans.first().map(|s| s.style.size_pt))
         .unwrap_or(calib.default_size_pt);
 
-    out.push(Block::Para(paragraph(&ppr, text, spans, char_size)));
+    let mark = run_style(&mark, calib);
+    out.push(Block::Para(paragraph(&ppr, text, spans, mark, char_size)));
     for alt in drawings {
         out.push(Block::Placeholder(Placeholder {
             kind: PlaceholderKind::Drawing { alt },
@@ -268,7 +271,13 @@ fn run_style(rpr: &RPr, calib: &Calib) -> RunStyle {
     }
 }
 
-fn paragraph(ppr: &PPr, text: String, spans: Vec<Span>, char_size_pt: f32) -> Paragraph {
+fn paragraph(
+    ppr: &PPr,
+    text: String,
+    spans: Vec<Span>,
+    mark: RunStyle,
+    char_size_pt: f32,
+) -> Paragraph {
     let ind = &ppr.indent;
 
     // `*Chars` 版本优先于 twips 版本 —— Word 就是这么做的，而中文文档里
@@ -324,6 +333,7 @@ fn paragraph(ppr: &PPr, text: String, spans: Vec<Span>, char_size_pt: f32) -> Pa
         numbering_dropped: ppr.numbering,
         text,
         spans,
+        mark,
     }
 }
 

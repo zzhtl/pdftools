@@ -43,12 +43,21 @@ pub(super) struct ParaBox {
 
 pub(super) fn measure(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> ParaBox {
     let shaped = text::shape(para, book);
-    let body = if shaped.pieces.is_empty() {
-        ParaBody::Empty {
-            height: empty_height(para, env.calib),
-        }
-    } else {
+    let body = if !shaped.pieces.is_empty() {
         ParaBody::Lines(break_lines(para, &shaped, env, book))
+    } else {
+        match env.calib.empty_para {
+            EmptyPara::MarkLine => match mark_line(para, env, book) {
+                Some(line) => ParaBody::Lines(vec![line]),
+                // 系统里一个字体都没有，量不出行高。
+                None => ParaBody::Empty {
+                    height: legacy_empty_height(para),
+                },
+            },
+            EmptyPara::Legacy => ParaBody::Empty {
+                height: legacy_empty_height(para),
+            },
+        }
     };
     ParaBox {
         space_before: para.space_before,
@@ -58,17 +67,37 @@ pub(super) fn measure(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> P
     }
 }
 
-fn empty_height(para: &ir::Paragraph, calib: &Calib) -> f32 {
-    match calib.empty_para {
-        EmptyPara::Legacy => {
-            let base = para.spans.first().map(|s| s.style.size_pt).unwrap_or(10.5) * 1.2;
-            match para.line {
-                LineSpacing::Multiple(m) => base * m,
-                LineSpacing::Exact(pt) => pt,
-                LineSpacing::AtLeast(pt) => base.max(pt),
-            }
-        }
+fn legacy_empty_height(para: &ir::Paragraph) -> f32 {
+    let base = para.spans.first().map(|s| s.style.size_pt).unwrap_or(10.5) * 1.2;
+    match para.line {
+        LineSpacing::Multiple(m) => base * m,
+        LineSpacing::Exact(pt) => pt,
+        LineSpacing::AtLeast(pt) => base.max(pt),
     }
+}
+
+/// 空段落的那一行：只有段落标记，行高按标记的西文字体、字号算，见 [`EmptyPara::MarkLine`]。
+fn mark_line(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> Option<Line> {
+    let mark = &para.mark;
+    let font = book.resolve(mark.font_latin.as_deref(), false, mark.bold, mark.italic)?;
+    let m = book.face(font.id).metrics();
+    let upem = m.upem as f32;
+    // 与正文片段的自然行高、上伸同一算法（`Piece::natural_line_pt` / `ascent_pt`）。
+    let unsnapped = (m.default_line_height() * mark.size_pt / upem).max(1.0);
+    let ascent = m.ascender as f32 * mark.size_pt / upem;
+    let b = line_box(
+        unsnapped,
+        ascent,
+        env.grid,
+        para.snap_to_grid,
+        para.line,
+        true,
+    );
+    Some(Line {
+        height: b.height,
+        baseline: b.baseline,
+        ops: Vec::new(),
+    })
 }
 
 fn break_lines(para: &ir::Paragraph, sp: &ShapedPara, env: &Env, book: &FontBook) -> Vec<Line> {

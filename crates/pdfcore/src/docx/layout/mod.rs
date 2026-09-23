@@ -146,18 +146,19 @@ fn placeholder_paras(ph: &ir::Placeholder) -> Vec<ir::Paragraph> {
 }
 
 fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
+    let style = ir::RunStyle {
+        size_pt: 9.0,
+        bold: false,
+        italic: false,
+        underline: false,
+        strike: false,
+        color: PLACEHOLDER_COLOR,
+        font_latin: None,
+        font_east_asia: None,
+    };
     let spans = vec![ir::Span {
         range: 0..text.len(),
-        style: ir::RunStyle {
-            size_pt: 9.0,
-            bold: false,
-            italic: false,
-            underline: false,
-            strike: false,
-            color: PLACEHOLDER_COLOR,
-            font_latin: None,
-            font_east_asia: None,
-        },
+        style: style.clone(),
     }];
     ir::Paragraph {
         align: ir::Align::Left,
@@ -174,5 +175,6 @@ fn placeholder_para(text: String, is_note: bool) -> ir::Paragraph {
         numbering_dropped: false,
         text,
         spans,
+        mark: style,
     }
 }
