@@ -127,9 +127,11 @@ impl DocBuilder {
 
     pub fn finish(mut self) -> Result<Vec<u8>> {
         let page_ids: Vec<Ref> = self.pages.iter().map(|(id, _)| *id).collect();
+        let mut file_id = FileId::new();
 
         {
             let info = std::mem::take(&mut self.info);
+            file_id.feed(format!("{:?}", info).as_bytes());
             let info_id = self.alloc.next_ref();
             // document_info 会自动把这个对象登记进 trailer 的 /Info。
             let mut d = self.pdf.document_info(info_id);
@@ -194,6 +196,7 @@ impl DocBuilder {
             }
 
             let data = spec.content.finish();
+            file_id.feed(&data);
             let compressed = crate::pdf::writer::deflate(&data);
             self.pdf
                 .stream(content_id, &compressed)
@@ -201,7 +204,46 @@ impl DocBuilder {
                 .finish();
         }
 
+        let id = file_id.digest();
+        // 新建的文件，两个标识相同；改版时第二个才会变。
+        self.pdf.set_file_id((id.clone(), id));
         Ok(self.pdf.finish())
+    }
+}
+
+/// trailer 的 `/ID`：由页面内容、文档信息与生成时刻派生的 16 字节。
+///
+/// 只需要「不同文件大概率不同」，不需要抗碰撞，所以不引入哈希库。
+struct FileId {
+    a: u64,
+    b: u64,
+}
+
+impl FileId {
+    fn new() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let mut me = Self {
+            a: 0xcbf2_9ce4_8422_2325,
+            b: 0x6c62_272e_07bb_0142,
+        };
+        me.feed(&nanos.to_le_bytes());
+        me
+    }
+
+    fn feed(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.a = (self.a ^ *byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
+            self.b = (self.b ^ *byte as u64).wrapping_mul(0x0000_0100_0000_0193);
+        }
+    }
+
+    fn digest(&self) -> Vec<u8> {
+        let mut out = self.a.to_be_bytes().to_vec();
+        out.extend_from_slice(&self.b.to_be_bytes());
+        out
     }
 }
 

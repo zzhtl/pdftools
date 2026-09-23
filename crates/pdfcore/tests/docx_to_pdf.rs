@@ -558,3 +558,74 @@ fn no_extra_gap_when_a_real_space_already_separates() {
         );
     }
 }
+
+fn base_fonts(pdf: &[u8]) -> Vec<String> {
+    let doc = lopdf::Document::load_mem(pdf).unwrap();
+    doc.objects
+        .values()
+        .filter_map(|o| o.as_dict().ok())
+        .filter(|d| d.get(b"Type").and_then(lopdf::Object::as_name).ok() == Some(b"Font".as_ref()))
+        .filter(|d| {
+            d.get(b"Subtype").and_then(lopdf::Object::as_name).ok() == Some(b"Type0".as_ref())
+        })
+        .filter_map(|d| d.get(b"BaseFont").and_then(lopdf::Object::as_name).ok())
+        .map(|n| String::from_utf8_lossy(n).into_owned())
+        .collect()
+}
+
+/// 嵌入字体的 BaseFont 要用字体自己的 PostScript 名。
+///
+/// 曾经取的是 name 表里第一条「全名」记录，那条碰巧是 Mac 平台编码、解不出来时
+/// 就写成了「Unknown」—— 在阅读器的字体列表里根本看不出嵌的是什么字体。
+#[test]
+fn embedded_fonts_are_named_by_postscript_name() {
+    if !require_cjk_font() {
+        return;
+    }
+    let body = r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Liberation Serif" w:hAnsi="Liberation Serif" w:eastAsia="Noto Serif CJK SC"/><w:sz w:val="24"/></w:rPr><w:t>Font name 字体名称</w:t></w:r></w:p>"#;
+    let names = base_fonts(&convert(&make_docx("psname.docx", body)).value.pdf);
+    assert!(!names.is_empty());
+    for n in &names {
+        let (tag, rest) = n.split_once('+').expect("子集字体要带六个字母的前缀");
+        assert!(
+            tag.len() == 6 && tag.chars().all(|c| c.is_ascii_uppercase()),
+            "{n}"
+        );
+        assert!(!rest.is_empty() && rest != "Unknown", "BaseFont 是 {n}");
+    }
+    // 本机有 Liberation Serif 时，它的 PostScript 名必须原样出现。
+    if let Some(found) =
+        pdfcore::fonts::system::SystemFonts::load().query("Liberation Serif", false, false)
+    {
+        let face = ttf_parser::Face::parse(found.face.data(), found.face.index()).unwrap();
+        let ps = face
+            .names()
+            .into_iter()
+            .filter(|n| n.name_id == ttf_parser::name_id::POST_SCRIPT_NAME)
+            .find_map(|n| n.to_string())
+            .unwrap();
+        assert!(
+            names.iter().any(|n| n.ends_with(&format!("+{ps}"))),
+            "{names:?} 里没有 {ps}"
+        );
+    }
+}
+
+/// trailer 里要有 /ID。PDF/A 要求它，部分阅读器与签名工具靠它识别文件。
+#[test]
+fn pdf_has_a_file_identifier() {
+    let pdf = convert(&make_docx("fileid.docx", &para("文件标识")))
+        .value
+        .pdf;
+    let doc = lopdf::Document::load_mem(&pdf).unwrap();
+    let id = doc
+        .trailer
+        .get(b"ID")
+        .expect("trailer 里没有 /ID")
+        .as_array()
+        .unwrap();
+    assert_eq!(id.len(), 2);
+    for part in id {
+        assert_eq!(part.as_str().unwrap().len(), 16);
+    }
+}

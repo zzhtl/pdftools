@@ -47,7 +47,11 @@ pub fn embed_font(
     let to_unicode_ref = alloc.next_ref();
 
     let metrics = face.metrics();
-    let base_name = format!("{}+{}", subset_tag(&gids), sanitize_name(&face.name));
+    let base_name = format!(
+        "{}+{}",
+        subset_tag(&gids),
+        sanitize_name(&face.postscript_name)
+    );
 
     // ---- Type0 ----
     {
@@ -241,7 +245,7 @@ fn subset_tag(gids: &[u16]) -> String {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     (0..6)
-        .map(|i| (b'A' + ((hash >> (i * 5)) & 0x19) as u8) as char)
+        .map(|i| (b'A' + ((hash >> (i * 10)) % 26) as u8) as char)
         .collect()
 }
 
@@ -250,4 +254,26 @@ fn sanitize_name(name: &str) -> String {
     name.chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::subset_tag;
+
+    #[test]
+    fn subset_tag_uses_the_whole_alphabet() {
+        let mut seen = std::collections::BTreeSet::new();
+        for i in 0..200u16 {
+            let tag = subset_tag(&[i, i.wrapping_mul(7).wrapping_add(3), 500 + i]);
+            assert_eq!(tag.len(), 6);
+            assert!(tag.chars().all(|c| c.is_ascii_uppercase()), "{tag}");
+            seen.extend(tag.chars());
+        }
+        // 只用 8 个字母时，不同子集撞前缀的概率高得多 —— 规范要求前缀能区分同一字体的不同子集。
+        assert!(
+            seen.len() > 20,
+            "子集前缀只用到了 {} 个字母：{seen:?}",
+            seen.len()
+        );
+    }
 }

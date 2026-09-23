@@ -45,8 +45,10 @@ pub struct FontFace {
     data: Arc<Vec<u8>>,
     index: u32,
     metrics: Metrics,
-    /// 排版名，用于诊断信息与 PDF 的 BaseFont
+    /// 全名，用于诊断信息。
     pub name: String,
+    /// PostScript 名，写进 PDF 的 BaseFont。
+    pub postscript_name: String,
 }
 
 /// 字体度量。除 `italic_angle` 外都是字体单位（font units），用时除以 `upem`。
@@ -104,12 +106,20 @@ impl FontFace {
 
         let upem = face.units_per_em();
         let bbox = face.global_bounding_box();
-        let name = face
-            .names()
-            .into_iter()
-            .find(|n| n.name_id == ttf_parser::name_id::FULL_NAME)
-            .and_then(|n| n.to_string())
+        // name 表里同一个名字常有好几条记录（Mac、Windows 平台各一份）。
+        // 取第一条「解得出来」的，而不是第一条 —— Mac 平台的记录 ttf-parser 解不了，
+        // 曾因此把 Liberation Serif 写成「Unknown」。
+        let name_of = |id: u16| {
+            face.names()
+                .into_iter()
+                .filter(|n| n.name_id == id)
+                .find_map(|n| n.to_string())
+        };
+        let name = name_of(ttf_parser::name_id::FULL_NAME)
+            .or_else(|| name_of(ttf_parser::name_id::FAMILY))
             .unwrap_or_else(|| "Unknown".to_string());
+        let postscript_name =
+            name_of(ttf_parser::name_id::POST_SCRIPT_NAME).unwrap_or_else(|| name.replace(' ', ""));
 
         let metrics = Metrics {
             upem,
@@ -135,6 +145,7 @@ impl FontFace {
             index,
             metrics,
             name,
+            postscript_name,
         })
     }
 
