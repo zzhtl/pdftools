@@ -29,6 +29,18 @@ pub struct Calib {
     pub flow: Flow,
     pub theme: Theme,
     pub char_class: CharClass,
+    pub auto_space: AutoSpace,
+}
+
+/// 中西文之间的自动间距（`w:autoSpaceDE` / `w:autoSpaceDN`，0.2em）加在哪里。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoSpace {
+    /// 相邻两片一个用东亚字体、一个用西文字体，边界上又没有空白，就加。
+    Legacy,
+    /// 只加在汉字（假名、谚文）与西文字母、数字之间。对照 LibreOffice 实测：
+    /// 「中a」「中1」「中α」「①中」加；中文标点两侧（「，a」「：1」「a。」「「a」）、
+    /// 西文标点与符号两侧（「中×」「中%」「a“中」「中(」）、「1㎡」都不加。
+    Letters,
 }
 
 /// `w:rFonts` 的主题字体（`w:asciiTheme`、`w:eastAsiaTheme` 等）。
@@ -291,6 +303,7 @@ impl Calib {
             flow: Flow::Word,
             theme: Theme::Resolved,
             char_class: CharClass::Blocks,
+            auto_space: AutoSpace::Letters,
         }
     }
 
@@ -315,6 +328,7 @@ impl Calib {
             flow: Flow::Legacy,
             theme: Theme::Ignored,
             char_class: CharClass::Legacy,
+            auto_space: AutoSpace::Legacy,
         }
     }
 }

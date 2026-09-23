@@ -14,7 +14,7 @@ use std::ops::Range;
 
 use unicode_linebreak::{linebreaks, BreakOpportunity};
 
-use super::calib::{Breaks, Calib, CharClass, Tabs};
+use super::calib::{AutoSpace, Breaks, Calib, CharClass, Tabs};
 use super::script;
 use crate::docx::ir;
 use crate::fonts::{
@@ -458,23 +458,29 @@ pub(super) fn shape(para: &ir::Paragraph, book: &mut FontBook, calib: &Calib) ->
                     .into_iter()
                     .map(|(_, t)| t)
                     .collect();
-                // 与紧邻的上一片文种不同时，插入中西文间距。
+                // 与紧邻的上一片之间插入中西文间距，加在哪里见 [`AutoSpace`]。
                 // 间距按两侧较大的字号算，跟 Word 的观感一致。回退字体切出来的片段
                 // 与主字体同文种，不会在它们之间加间距。
                 //
-                // 但边界上已经有空白时**不加** —— 空格本身已经把两边分开了，再叠一层
+                // 边界上已经有空白时**不加** —— 空格本身已经把两边分开了，再叠一层
                 // 会让行变宽并提前折行。实测参照：「正文第1段。」每个边界加 2.4pt，
                 // 而「正文第 1 段。」只有空格宽度、没有额外间距。
-                let boundary_spaced = pieces.last().is_some_and(|prev| {
-                    text[prev.range.clone()].ends_with(char::is_whitespace)
-                        || text[part.clone()].starts_with(char::is_whitespace)
-                });
+                let spaced = |prev: &Piece| match calib.auto_space {
+                    AutoSpace::Legacy => {
+                        prev.class != class
+                            && !text[prev.range.clone()].ends_with(char::is_whitespace)
+                            && !text[part.clone()].starts_with(char::is_whitespace)
+                    }
+                    AutoSpace::Letters => {
+                        let before = text[prev.range.clone()].chars().next_back();
+                        let after = text[part.clone()].chars().next();
+                        matches!((before, after), (Some(b), Some(a))
+                            if autospaced((b, prev.class), (a, class)))
+                    }
+                };
                 let gap_before = match pieces.last() {
                     Some(prev)
-                        if para.auto_space
-                            && prev.class != class
-                            && prev.range.end == part.start
-                            && !boundary_spaced =>
+                        if para.auto_space && prev.range.end == part.start && spaced(prev) =>
                     {
                         CJK_LATIN_GAP_EM * prev.size_pt.max(style.size_pt)
                     }
@@ -514,6 +520,14 @@ pub(super) fn shape(para: &ir::Paragraph, book: &mut FontBook, calib: &Calib) ->
         breaks,
         tabs,
     }
+}
+
+/// 相邻两个字之间要不要加中西文间距（[`AutoSpace::Letters`]）：一边是汉字、假名、
+/// 谚文，另一边是用西文字体的字母或数字。
+fn autospaced((a, a_class): (char, ScriptClass), (b, b_class): (char, ScriptClass)) -> bool {
+    let ideograph = |c: char, class| class == ScriptClass::EastAsian && c.is_alphabetic();
+    let alnum = |c: char, class| class == ScriptClass::Latin && c.is_alphanumeric();
+    (ideograph(a, a_class) && alnum(b, b_class)) || (alnum(a, a_class) && ideograph(b, b_class))
 }
 
 /// 收集整形后落到 `.notdef` 的字符。
@@ -688,6 +702,22 @@ mod tests {
         assert_eq!(p.measured_end(0, 9, Hang::default()), 9);
         // 全角空格不悬挂：它是一个正常的字。
         assert_eq!(para("甲\u{3000}").measured_end(0, 6, BOTH), 6);
+    }
+
+    /// 对照 LibreOffice 实测的几组相邻字符。
+    #[test]
+    fn autospace_goes_between_ideographs_and_alphanumerics_only() {
+        use ScriptClass::{EastAsian as E, Latin as L};
+        assert!(autospaced(('中', E), ('a', L)));
+        assert!(autospaced(('1', L), ('中', E)));
+        assert!(autospaced(('中', E), ('α', L)));
+        assert!(autospaced(('①', L), ('中', E)));
+        assert!(!autospaced(('，', E), ('a', L)));
+        assert!(!autospaced(('a', L), ('。', E)));
+        assert!(!autospaced(('中', E), ('×', L)));
+        assert!(!autospaced(('中', E), ('(', L)));
+        assert!(!autospaced(('“', L), ('中', E)));
+        assert!(!autospaced(('1', L), ('㎡', E)));
     }
 
     #[test]

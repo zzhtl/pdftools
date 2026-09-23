@@ -16,9 +16,9 @@ mod script;
 mod text;
 
 pub use calib::{
-    Breaks, Calib, Cascade, CharClass, EmptyPara, FixedBaseline, Flow, GridLayout, HangingIndent,
-    HangingPunct, Justify, Overflow, PageBottom, PageBreakBefore, ParaSpacing, RunFormat, Tabs,
-    Theme, TrailingSpaces,
+    AutoSpace, Breaks, Calib, Cascade, CharClass, EmptyPara, FixedBaseline, Flow, GridLayout,
+    HangingIndent, HangingPunct, Justify, Overflow, PageBottom, PageBreakBefore, ParaSpacing,
+    RunFormat, Tabs, Theme, TrailingSpaces,
 };
 
 use super::ir;

@@ -1659,3 +1659,37 @@ fn ambiguous_characters_follow_context_and_the_east_asia_hint() {
     assert_eq!(font("‘"), cjk, "w:hint=eastAsia 时引号用中文字体");
     assert_eq!(font("EF"), latin, "字母不受 hint 影响");
 }
+
+/// 中西文间距只加在汉字与西文字母、数字之间，中文标点、西文符号两侧不加。
+#[test]
+fn autospace_only_between_ideographs_and_alphanumerics() {
+    if !require_cjk_font() {
+        return;
+    }
+    let cases = ["中a", "，a", "中×", "中1"];
+    let body: String = cases.iter().map(|c| para(c)).collect();
+    let pages = common::pdftext::extract(&convert(&make_docx("autospace.docx", &body)).value.pdf);
+    let advances: Vec<f32> = pages[0]
+        .lines
+        .iter()
+        .map(|l| {
+            let g: Vec<f32> = l
+                .frags
+                .iter()
+                .flat_map(|f| &f.glyphs)
+                .map(|(_, x)| *x)
+                .collect();
+            g[1] - g[0]
+        })
+        .collect();
+    // 12 磅的全角字宽 12pt，间距 0.2em = 2.4pt。
+    for (case, (got, want)) in cases
+        .iter()
+        .zip(advances.iter().zip([14.4, 12.0, 12.0, 14.4]))
+    {
+        assert!(
+            (got - want).abs() < 0.01,
+            "「{case}」第二个字离第一个字 {got}，应为 {want}"
+        );
+    }
+}
