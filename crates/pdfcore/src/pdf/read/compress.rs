@@ -19,8 +19,10 @@ pub struct CompressOutcome {
     pub recompressed: usize,
     /// 试过但保留原样的图片数（重编码后反而更大）。
     pub kept_original: usize,
-    /// 跳过没处理的图片数（不支持的色彩空间、蒙版、JPEG2000 等）。
+    /// 跳过没处理的图片数（CMYK、蒙版、JPEG2000 等）。具体类别见警告。
     pub skipped: usize,
+    /// 已经是合适形态、不需要动的图片数（不需要降采样的 JPEG）。
+    pub already_optimal: usize,
     /// 整体护栏触发：输出不比输入小，于是原样返回。
     pub returned_unchanged: bool,
 }
@@ -33,24 +35,99 @@ impl CompressOutcome {
         1.0 - (self.pdf.len() as f32 / self.original_bytes as f32)
     }
 
-    /// 这份 PDF 基本没有可压的图像。用来在界面上解释「为什么没压下去」。
+    /// 这份 PDF 基本没有可压的图像（图标这类小图不算）。
+    /// 用来在界面上解释「为什么没压下去」。
     pub fn is_mostly_vector(&self) -> bool {
-        self.recompressed == 0 && self.kept_original == 0 && self.skipped == 0
+        self.recompressed == 0
+            && self.kept_original == 0
+            && self.skipped == 0
+            && self.already_optimal == 0
     }
 }
 
-/// 从页面里收集到的一张待处理图片。先收成 owned 数据，
-/// 是因为随后要 `get_object_mut`，不能同时持有对 doc 的不可变借用。
+/// 从页面里收集到的一张待处理图片。只记元数据，像素等处理到它时再按需解码 ——
+/// 预先把所有图片数据复制一份，扫描件 PDF 的峰值内存会翻倍。
 struct ImageEntry {
     id: ObjectId,
     width: u32,
     height: u32,
     filters: Vec<String>,
-    color_space: Option<String>,
+    model: std::result::Result<Model, Skip>,
     bits: u32,
     has_smask: bool,
     is_mask: bool,
-    raw: Vec<u8>,
+    has_decode: bool,
+    /// 流的存储长度（压缩态）。「不比原来大」就比它。
+    stored_len: usize,
+}
+
+/// 颜色模型。只处理灰度与 RGB：重编码后分量数不变，原来的 `/ColorSpace`
+/// （包括 ICCBased 这类引用）继续有效，不必重写。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Model {
+    Gray,
+    Rgb,
+}
+
+impl Model {
+    fn components(self) -> usize {
+        match self {
+            Model::Gray => 1,
+            Model::Rgb => 3,
+        }
+    }
+}
+
+/// 本版本不处理、原样保留的原因。按类别汇总进警告。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Skip {
+    Cmyk,
+    SpecialColorSpace,
+    Mask,
+    Transparency,
+    Jpeg2000,
+    OtherFilter,
+    DecodeArray,
+    Undecodable,
+}
+
+impl Skip {
+    fn label(self) -> &'static str {
+        match self {
+            // CMYK 的 JPEG 解码后是 RGB，写回去就得改色彩空间并处理 Adobe 的反相约定，
+            // 判错了输出是偏色而不是报错，所以不碰。
+            Skip::Cmyk => "CMYK 图片",
+            Skip::SpecialColorSpace => "索引色、专色等特殊色彩空间的图片",
+            Skip::Mask => "位图蒙版或非 8 位的图片",
+            Skip::Transparency => "带透明蒙版的图片",
+            Skip::Jpeg2000 => "JPEG2000 图片",
+            Skip::OtherFilter => "CCITT、JBIG2 等特殊编码的图片",
+            Skip::DecodeArray => "带解码映射（/Decode）、无法转灰度的图片",
+            Skip::Undecodable => "无法解码的图片",
+        }
+    }
+}
+
+enum Decision {
+    /// 重编码后更小，替换。
+    Replace(Replacement),
+    /// 试过了，不比原来小，保留原图。
+    KeptOriginal,
+    /// 已经是 JPEG 且不需要降采样：重编码只会拿画质换那几个百分点。
+    AlreadyOptimal,
+    /// 图标、项目符号这类小图，从来不是体积问题。
+    Tiny,
+    Skip(Skip),
+}
+
+struct Replacement {
+    data: Vec<u8>,
+    /// true = DCTDecode（JPEG），false = FlateDecode（无损）。
+    jpeg: bool,
+    width: u32,
+    height: u32,
+    /// 新数据是单分量。
+    gray: bool,
 }
 
 pub fn run(
@@ -89,23 +166,27 @@ pub fn run(
         recompressed: 0,
         kept_original: 0,
         skipped: 0,
+        already_optimal: 0,
         returned_unchanged: false,
     };
+    let mut skips: std::collections::BTreeMap<Skip, usize> = Default::default();
 
     if !quality.lossless_only() {
         for (i, entry) in entries.iter().enumerate() {
             bail_if_cancelled!(sink);
 
             // 每张图独立隔离：一张图的怪色彩空间不该让整份文件失败。
-            match try_recompress(entry, &placements, &quality) {
-                Ok(Some(new_data)) => {
-                    apply(&mut doc, entry, new_data, grayscale);
+            match try_recompress(&doc, entry, &placements, &quality) {
+                Decision::Replace(r) => {
+                    apply(&mut doc, entry, r);
                     outcome.recompressed += 1;
                 }
-                Ok(None) => outcome.kept_original += 1,
-                Err(reason) => {
+                Decision::KeptOriginal => outcome.kept_original += 1,
+                Decision::AlreadyOptimal => outcome.already_optimal += 1,
+                Decision::Tiny => {}
+                Decision::Skip(reason) => {
                     outcome.skipped += 1;
-                    log::debug!("跳过图片 {:?}：{reason}", entry.id);
+                    *skips.entry(reason).or_default() += 1;
                 }
             }
             sink.emit(Progress::Item {
@@ -152,18 +233,28 @@ pub fn run(
         warnings.push(Warning::new(
             WarningKind::ImageKeptOriginal,
             format!(
-                "{} 张图片重新编码后反而更大，已保留原图",
+                "{} 张图片重新编码后不比原来小，已保留原图",
                 outcome.kept_original
             ),
         ));
     }
-    if outcome.skipped > 0 {
+    if !skips.is_empty() {
+        // 按类别说清楚：用户看得懂「2 张 CMYK 图片」，看不懂「不处理的格式」。
+        let parts: Vec<String> = skips
+            .iter()
+            .map(|(reason, n)| {
+                let label = reason.label();
+                let sep = if label.starts_with(|c: char| c.is_ascii()) {
+                    " "
+                } else {
+                    ""
+                };
+                format!("{n} 张{sep}{label}")
+            })
+            .collect();
         warnings.push(Warning::new(
             WarningKind::ImageKeptOriginal,
-            format!(
-                "{} 张图片使用了本版本不处理的格式（JPEG2000、位图蒙版、特殊色彩空间等），已原样保留",
-                outcome.skipped
-            ),
+            format!("{}本版本不处理，已原样保留", parts.join("、")),
         ));
     }
 
@@ -205,149 +296,273 @@ fn collect_images(doc: &Document) -> Vec<ImageEntry> {
                 continue; // 同一张图被多页引用，只处理一次
             }
             let dict = img.origin_dict;
+            let filters = img.filters.unwrap_or_default();
             out.push(ImageEntry {
                 id: img.id,
                 width: img.width.max(0) as u32,
                 height: img.height.max(0) as u32,
-                filters: img.filters.unwrap_or_default(),
-                color_space: img.color_space,
+                model: color_model(doc, dict, &filters, img.content),
                 bits: img.bits_per_component.unwrap_or(8).max(0) as u32,
                 has_smask: dict.get(b"SMask").is_ok() || dict.get(b"Mask").is_ok(),
                 is_mask: dict
                     .get(b"ImageMask")
                     .and_then(Object::as_bool)
                     .unwrap_or(false),
-                raw: img.content.to_vec(),
+                has_decode: dict.get(b"Decode").is_ok(),
+                stored_len: img.content.len(),
+                filters,
             });
         }
     }
     out
 }
 
-/// 尝试重新编码一张图。
-///
-/// - `Ok(Some(bytes))`：编码成功且更小，应当替换。
-/// - `Ok(None)`：编码成功但不比原来小，保留原图。
-/// - `Err(reason)`：这张图不在本版本处理范围内，原样跳过。
+/// 定出颜色模型。字典里声明的色彩空间与 JPEG 头里的实际分量数都要看：
+/// DCT 流的 `/ColorSpace` 可能是 ICCBased 数组，也可能干脆缺省。
+fn color_model(
+    doc: &Document,
+    dict: &lopdf::Dictionary,
+    filters: &[String],
+    data: &[u8],
+) -> std::result::Result<Model, Skip> {
+    let declared = match dict.get(b"ColorSpace").ok() {
+        None => None,
+        Some(cs) => {
+            let (_, cs) = doc.dereference(cs).map_err(|_| Skip::SpecialColorSpace)?;
+            Some(declared_components(doc, cs)?)
+        }
+    };
+    let components = if filters.iter().any(|f| f == "DCTDecode") {
+        let info = crate::imaging::probe::jpeg_info(data).ok_or(Skip::Undecodable)?;
+        let n = info.components as usize;
+        // 声明与数据对不上的图，原文件本身就是坏的，不碰。
+        if declared.is_some_and(|d| d != n) {
+            return Err(Skip::Undecodable);
+        }
+        n
+    } else {
+        declared.ok_or(Skip::SpecialColorSpace)?
+    };
+    match components {
+        1 => Ok(Model::Gray),
+        3 => Ok(Model::Rgb),
+        4 => Err(Skip::Cmyk),
+        _ => Err(Skip::SpecialColorSpace),
+    }
+}
+
+fn declared_components(doc: &Document, cs: &Object) -> std::result::Result<usize, Skip> {
+    match cs {
+        Object::Name(n) => match n.as_slice() {
+            b"DeviceGray" | b"CalGray" => Ok(1),
+            b"DeviceRGB" | b"CalRGB" => Ok(3),
+            b"DeviceCMYK" => Ok(4),
+            _ => Err(Skip::SpecialColorSpace),
+        },
+        Object::Array(a) => match a.first().and_then(|o| o.as_name().ok()) {
+            Some(b"CalGray") => Ok(1),
+            Some(b"CalRGB") => Ok(3),
+            Some(b"ICCBased") => {
+                let n = a
+                    .get(1)
+                    .and_then(|o| doc.dereference(o).ok())
+                    .and_then(|(_, o)| o.as_stream().ok())
+                    .and_then(|s| s.dict.get(b"N").ok())
+                    .and_then(|n| n.as_i64().ok());
+                match n {
+                    Some(n @ (1 | 3 | 4)) => Ok(n as usize),
+                    _ => Err(Skip::SpecialColorSpace),
+                }
+            }
+            _ => Err(Skip::SpecialColorSpace),
+        },
+        _ => Err(Skip::SpecialColorSpace),
+    }
+}
+
+/// 决定一张图怎么处理。
 fn try_recompress(
+    doc: &Document,
     entry: &ImageEntry,
     placements: &placement::Placements,
     quality: &crate::imaging::ImageQuality,
-) -> std::result::Result<Option<Vec<u8>>, String> {
+) -> Decision {
     if entry.is_mask || entry.bits != 8 {
         // 位图蒙版是 1 位模板，CCITT/JBIG2 已经比我们能做的任何编码都小。
-        return Err("位图蒙版或非 8 位样本".into());
+        return Decision::Skip(Skip::Mask);
     }
     if entry.has_smask {
         // 主图降采样了而蒙版没有，就会错位；蒙版走 JPEG 又会在边缘产生光晕。
         // 带透明的图在扫描件里几乎从不是体积大头，跳过是划算的。
-        return Err("带透明蒙版".into());
+        return Decision::Skip(Skip::Transparency);
     }
     if entry.filters.iter().any(|f| f == "JPXDecode") {
-        return Err("JPEG2000，无法解码".into());
+        return Decision::Skip(Skip::Jpeg2000);
     }
     // 小图（图标、项目符号、签名章）不碰：DPI 估算对它们本来就不准，
     // 而且它们从来不是体积问题。
     if entry.width < 200 || entry.height < 200 {
-        return Err("尺寸过小，不值得处理".into());
+        return Decision::Tiny;
     }
-
-    let components = match entry.color_space.as_deref() {
-        Some("DeviceGray") | Some("CalGray") => 1,
-        Some("DeviceRGB") | Some("CalRGB") => 3,
-        // ICCBased 在字典里是个数组，PdfImage 给不出名字。对 DCTDecode 我们能
-        // 从 JPEG 头里拿到真实分量数，所以留给下面判断。
-        _ if entry.filters.iter().any(|f| f == "DCTDecode") => 0,
-        other => return Err(format!("不处理的色彩空间：{other:?}")),
+    let model = match entry.model {
+        Ok(m) => m,
+        Err(reason) => return Decision::Skip(reason),
     };
+    // 转灰度会改变分量数，而 /Decode 数组的长度随分量数而定，改完就对不上了。
+    let to_gray = quality.grayscale && model == Model::Rgb;
+    if to_gray && entry.has_decode {
+        return Decision::Skip(Skip::DecodeArray);
+    }
 
     // 有效 DPI：优先用内容流里扫到的实际放置尺寸；扫不到就退化为「整页铺满」。
     let (place_w, place_h) = placements.get(&entry.id).copied().unwrap_or((595.0, 842.0));
-
     let target = quality.downscale_target(entry.width, entry.height, place_w, place_h);
 
     // 代际损失护栏：已经是 JPEG、又不需要重采样、也不转灰度，那就没有任何理由重编码。
     // 重新量化一次确实能再挤掉几个百分点，但那几个百分点是拿画质换的 ——
     // 同一份文件压两次就会肉眼可见地糊。这种情况下「什么都不做」才是正确答案。
-    let already_jpeg = entry.filters.iter().any(|f| f == "DCTDecode");
-    if already_jpeg && target.is_none() && !quality.grayscale {
-        return Ok(None);
+    let dct = entry.filters.iter().any(|f| f == "DCTDecode");
+    if dct && target.is_none() && !to_gray {
+        return Decision::AlreadyOptimal;
     }
 
-    let img = decode(entry, components)?;
+    let Some(stream) = doc
+        .get_object(entry.id)
+        .ok()
+        .and_then(|o| o.as_stream().ok())
+    else {
+        return Decision::Skip(Skip::Undecodable);
+    };
+    let img = match decode(stream, entry, model, dct) {
+        Ok(img) => img,
+        Err(reason) => return Decision::Skip(reason),
+    };
     let img = match target {
-        Some((w, h)) => crate::imaging::resize_image(&img, w, h).map_err(|e| e.to_string())?,
+        Some((w, h)) => match crate::imaging::resize_image(&img, w, h) {
+            Ok(img) => img,
+            Err(_) => return Decision::Skip(Skip::Undecodable),
+        },
         None => img,
     };
 
-    let encoded = crate::imaging::encode_jpeg_image(&img, quality.jpeg_quality, quality.grayscale)
-        .map_err(|e| e.to_string())?;
+    let gray = to_gray || model == Model::Gray;
+    let (w, h) = (img.width(), img.height());
+    let Ok(jpeg) = crate::imaging::encode_jpeg_image(&img, quality.jpeg_quality, gray) else {
+        return Decision::Skip(Skip::Undecodable);
+    };
+
+    // 原本就是无损存储的图，多半是截图、线稿、文字扫描：两种编码各估一次，按实测体积选，
+    // 与「图片转 PDF」是同一条规则 —— 一律转 JPEG 会在文字边缘压出振铃。
+    let candidate = if dct {
+        Replacement {
+            data: jpeg,
+            jpeg: true,
+            width: w,
+            height: h,
+            gray,
+        }
+    } else {
+        let raw = if gray {
+            img.to_luma8().into_raw()
+        } else {
+            img.to_rgb8().into_raw()
+        };
+        let row = w as usize * if gray { 1 } else { 3 };
+        let flate_est = crate::imaging::estimate_flate_len(&raw, row);
+        if flate_est as f32 <= jpeg.len() as f32 * crate::imaging::LOSSLESS_TOLERANCE {
+            Replacement {
+                data: crate::pdf::writer::deflate(&raw),
+                jpeg: false,
+                width: w,
+                height: h,
+                gray,
+            }
+        } else {
+            Replacement {
+                data: jpeg,
+                jpeg: true,
+                width: w,
+                height: h,
+                gray,
+            }
+        }
+    };
 
     // 核心护栏：不比原来小就不换。对一份已经 q60 的 JPEG 用 q85 重编，
     // 结果是**又大又差**，这条判断是不可商量的。
-    Ok((encoded.len() < entry.raw.len()).then_some(encoded))
+    if candidate.data.len() < entry.stored_len {
+        Decision::Replace(candidate)
+    } else {
+        Decision::KeptOriginal
+    }
 }
 
-fn decode(entry: &ImageEntry, components: u8) -> std::result::Result<image::DynamicImage, String> {
-    if entry.filters.iter().any(|f| f == "DCTDecode") {
-        return image::load_from_memory_with_format(&entry.raw, image::ImageFormat::Jpeg)
-            .map_err(|e| format!("JPEG 解码失败：{e}"));
-    }
-    if entry.filters.is_empty() || entry.filters.iter().all(|f| f == "FlateDecode") {
-        let expected = entry.width as usize * entry.height as usize * components as usize;
-        if components == 0 || entry.raw.len() != expected {
-            return Err(format!(
-                "原始样本长度 {} 与 {}×{}×{} 不符",
-                entry.raw.len(),
-                entry.width,
-                entry.height,
-                components
-            ));
+fn decode(
+    stream: &lopdf::Stream,
+    entry: &ImageEntry,
+    model: Model,
+    dct: bool,
+) -> std::result::Result<image::DynamicImage, Skip> {
+    if dct {
+        // DCTDecode 前面再套一层 Flate 之类的组合极少见，不处理。
+        if entry.filters.len() != 1 {
+            return Err(Skip::OtherFilter);
         }
-        return match components {
-            1 => image::GrayImage::from_raw(entry.width, entry.height, entry.raw.clone())
-                .map(image::DynamicImage::ImageLuma8)
-                .ok_or_else(|| "灰度样本装载失败".to_string()),
-            3 => image::RgbImage::from_raw(entry.width, entry.height, entry.raw.clone())
-                .map(image::DynamicImage::ImageRgb8)
-                .ok_or_else(|| "RGB 样本装载失败".to_string()),
-            n => Err(format!("不支持 {n} 个分量")),
-        };
+        return image::load_from_memory_with_format(&stream.content, image::ImageFormat::Jpeg)
+            .map_err(|_| Skip::Undecodable);
     }
-    Err(format!("不处理的 filter 组合：{:?}", entry.filters))
+
+    const LOSSLESS: [&str; 5] = [
+        "FlateDecode",
+        "LZWDecode",
+        "RunLengthDecode",
+        "ASCII85Decode",
+        "ASCIIHexDecode",
+    ];
+    if !entry.filters.iter().all(|f| LOSSLESS.contains(&f.as_str())) {
+        return Err(Skip::OtherFilter);
+    }
+    let expected = entry.width as usize * entry.height as usize * model.components();
+    // 带上限地解压：predictor 每行多一个字节，再留点余量；
+    // 恶意构造的流（解压炸弹）会在这里被拒绝，而不是把内存吃光。
+    let limit = expected + entry.height as usize + 64;
+    let samples = stream
+        .decompressed_content_with_limit(limit)
+        .map_err(|_| Skip::Undecodable)?;
+    if samples.len() != expected {
+        return Err(Skip::Undecodable);
+    }
+    match model {
+        Model::Gray => image::GrayImage::from_raw(entry.width, entry.height, samples)
+            .map(image::DynamicImage::ImageLuma8),
+        Model::Rgb => image::RgbImage::from_raw(entry.width, entry.height, samples)
+            .map(image::DynamicImage::ImageRgb8),
+    }
+    .ok_or(Skip::Undecodable)
 }
 
-/// 把新的 JPEG 数据写回对象，只改必要的键。
+/// 把新数据写回对象，只改必要的键。
 ///
 /// 刻意不重建整个字典：`/Decode`、`/Intent`、`/Interpolate` 以及任何我们不认识的键
 /// 都必须原样保留 —— 那些是我们看不懂但阅读器可能需要的信息。
-fn apply(doc: &mut Document, entry: &ImageEntry, data: Vec<u8>, grayscale: bool) {
-    let Ok(obj) = doc.get_object_mut(entry.id) else {
+fn apply(doc: &mut Document, entry: &ImageEntry, r: Replacement) {
+    let Ok(Object::Stream(stream)) = doc.get_object_mut(entry.id) else {
         return;
     };
-    let Object::Stream(stream) = obj else { return };
-
-    let (w, h) = image_dims(&data).unwrap_or((entry.width, entry.height));
-
-    stream.set_plain_content(data);
-    stream
-        .dict
-        .set("Filter", Object::Name(b"DCTDecode".to_vec()));
-    stream.dict.set("Width", w as i64);
-    stream.dict.set("Height", h as i64);
+    // set_plain_content 会一并去掉旧的 /Filter 与 /DecodeParms ——
+    // 数据已不再是原来的 filter 链，留着旧参数阅读器会拿它去解新数据。
+    stream.set_plain_content(r.data);
+    let filter: &[u8] = if r.jpeg { b"DCTDecode" } else { b"FlateDecode" };
+    stream.dict.set("Filter", Object::Name(filter.to_vec()));
+    stream.dict.set("Width", r.width as i64);
+    stream.dict.set("Height", r.height as i64);
     stream.dict.set("BitsPerComponent", 8i64);
-    // 重编码后数据已不再是原来的 filter 链，DecodeParms 必须去掉，否则阅读器会按
-    // 旧参数去解一段新数据。
-    stream.dict.remove(b"DecodeParms");
-    if grayscale {
+    // 分量数只在「彩色转灰度」时变化，这时色彩空间必须跟着改；
+    // 其余情况下分量数不变，原 /ColorSpace（含 ICCBased 引用）继续有效。
+    if r.gray && entry.model == Ok(Model::Rgb) {
         stream
             .dict
             .set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
     }
-    // 没转灰度时保留原 /ColorSpace：分量数没变，ICCBased 之类的引用继续有效。
-    stream.allows_compression = false; // 已经是 DCTDecode，别再套一层 flate
-}
-
-fn image_dims(jpeg: &[u8]) -> Option<(u32, u32)> {
-    crate::imaging::probe::jpeg_info(jpeg).map(|i| (i.width, i.height))
+    stream.allows_compression = false; // 数据已经压缩过，别再套一层 flate
 }
