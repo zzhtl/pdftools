@@ -277,9 +277,10 @@ pub fn is_heif(path: &Path) -> bool {
 
 /// 从 EXIF 里读拍摄时间。
 ///
-/// 优先级 `DateTimeOriginal`（按下快门的时刻）→ `DateTimeDigitized`（数字化时刻）
-/// → `DateTime`（文件最后修改，最不可信）。时区取 `OffsetTimeOriginal`，没有就留空 ——
-/// 硬套一个本地时区是在编造信息。
+/// 只认 `DateTimeOriginal`（按下快门的时刻）与 `DateTimeDigitized`（数字化的时刻，
+/// 相机里与前者相同）。IFD0 的 `DateTime` 不算：它是文件最后修改的时刻，
+/// 图片软件一保存就改写。时区取 `OffsetTimeOriginal`，没有就留空 ——
+/// 硬套一个本地时区是在编造信息。全零之类不合法的值一律当作没有。
 pub fn capture_time(exif_raw: &[u8]) -> Option<crate::timestamp::Timestamp> {
     let exif = exif::Reader::new().read_raw(exif_raw.to_vec()).ok()?;
 
@@ -289,11 +290,11 @@ pub fn capture_time(exif_raw: &[u8]) -> Option<crate::timestamp::Timestamp> {
                 exif::Value::Ascii(v) => v.first().and_then(|b| exif::DateTime::from_ascii(b).ok()),
                 _ => None,
             })
+            .filter(|dt| crate::timestamp::Timestamp::from_exif(dt).is_plausible())
     };
 
-    let mut dt = read(exif::Tag::DateTimeOriginal)
-        .or_else(|| read(exif::Tag::DateTimeDigitized))
-        .or_else(|| read(exif::Tag::DateTime))?;
+    let mut dt =
+        read(exif::Tag::DateTimeOriginal).or_else(|| read(exif::Tag::DateTimeDigitized))?;
 
     // 时区是独立的一个 tag，DateTime::from_ascii 拿不到。
     if let Some(offset) = exif
@@ -307,7 +308,7 @@ pub fn capture_time(exif_raw: &[u8]) -> Option<crate::timestamp::Timestamp> {
         let _ = dt.parse_offset(&offset);
     }
 
-    Some(crate::timestamp::Timestamp::from_exif(&dt))
+    Some(crate::timestamp::Timestamp::from_exif(&dt)).filter(|t| t.is_plausible())
 }
 
 /// 从 XMP 里读拍摄时间。
@@ -392,12 +393,13 @@ pub fn iptc_capture_time(iptc: &[u8]) -> Option<crate::timestamp::Timestamp> {
     };
 
     Some(crate::timestamp::Timestamp {
-        year: y as u16,
-        month: mo as u8,
-        day: da as u8,
-        hour: h as u8,
-        minute: mi as u8,
-        second: se as u8,
+        year: u16::try_from(y).ok()?,
+        month: u8::try_from(mo).ok()?,
+        day: u8::try_from(da).ok()?,
+        hour: u8::try_from(h).ok()?,
+        minute: u8::try_from(mi).ok()?,
+        second: u8::try_from(se).ok()?,
         utc_offset_minutes: off,
     })
+    .filter(|t| t.is_plausible())
 }

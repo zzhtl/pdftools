@@ -3,6 +3,8 @@
 //! 这两件事共用 EXIF，也共同决定了「不失真」这个承诺是否对手机照片成立：
 //! 横拍的照片几乎都带方向标记，如果为了摆正而重新编码，承诺就落空了。
 
+mod common;
+
 use std::path::PathBuf;
 
 use pdfcore::imaging::Tier;
@@ -508,4 +510,130 @@ fn user_time_input_accepts_common_formats() {
             "不该解析成功：{bad}"
         );
     }
+}
+
+/// 相机没设时间时会写下「0000:00:00 00:00:00」这样的占位值，那不是拍摄时间。
+/// 当成拍摄时间的话，它是全批里最早的一个，会被写进 PDF 的 /CreationDate。
+#[test]
+fn zeroed_exif_date_is_not_a_capture_time() {
+    let path = write_jpeg_with_exif("zero_date.jpg", 320, 240, 1, "0000:00:00 00:00:00");
+    let t = pdfcore::imaging::read_time(&path).unwrap();
+    assert_eq!(
+        t.source,
+        TimeSource::FileSystem,
+        "全零日期被当成了拍摄时间：{}",
+        t.when.display()
+    );
+}
+
+/// IFD0 的 `DateTime` 是文件最后修改的时刻，图片软件一保存就改写 —— 不是拍摄时间。
+#[test]
+fn ifd0_datetime_is_not_a_capture_time() {
+    let jpeg = common::images::jpeg_q(&image::DynamicImage::ImageRgb8(photo(320, 240)), 90);
+    let path = tmp().join("ifd0_only.jpg");
+    std::fs::write(
+        &path,
+        common::images::with_segment(
+            &jpeg,
+            &common::images::exif_app1_ifd0_datetime("2024:03:15 14:30:22"),
+        ),
+    )
+    .unwrap();
+    let t = pdfcore::imaging::read_time(&path).unwrap();
+    assert_eq!(
+        t.source,
+        TimeSource::FileSystem,
+        "IFD0 的修改时间被当成了拍摄时间：{}",
+        t.when.display()
+    );
+}
+
+/// XMP 里的日期常常只有日期（photoshop:DateCreated），或者不带秒。都要能读出来。
+#[test]
+fn xmp_date_only_or_without_seconds_is_read() {
+    for (i, (value, expect)) in [
+        ("2024-03-15", (2024, 3, 15, 0, 0, None)),
+        ("2024-03-15T14:30", (2024, 3, 15, 14, 30, None)),
+        ("2024-03-15T14:30+08:00", (2024, 3, 15, 14, 30, Some(480))),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = write_jpeg_with_xmp(&format!("xmp_short_{i}.jpg"), value);
+        let t = pdfcore::imaging::read_time(&path).unwrap();
+        assert_eq!(t.source, TimeSource::Xmp, "XMP 值 {value} 没有被读出来");
+        let w = t.when;
+        assert_eq!(
+            (
+                w.year,
+                w.month,
+                w.day,
+                w.hour,
+                w.minute,
+                w.utc_offset_minutes
+            ),
+            expect,
+            "XMP 值 {value}"
+        );
+    }
+}
+
+#[test]
+fn iso8601_variants() {
+    use pdfcore::Timestamp;
+    let t = Timestamp::parse_iso8601("2024-03-15T14:30:22.123-05:30").unwrap();
+    assert_eq!(
+        (t.hour, t.minute, t.second, t.utc_offset_minutes),
+        (14, 30, 22, Some(-330))
+    );
+    let t = Timestamp::parse_iso8601("2024-03-15T14:30:22+0800").unwrap();
+    assert_eq!(t.utc_offset_minutes, Some(480));
+    let t = Timestamp::parse_iso8601("2024-03-15 14:30:22Z").unwrap();
+    assert_eq!(t.utc_offset_minutes, Some(0));
+    for bad in [
+        "2024-13-01",
+        "2024-03-15T25:00",
+        "2024-03-32",
+        "not a date",
+        "",
+    ] {
+        assert!(
+            Timestamp::parse_iso8601(bad).is_none(),
+            "{bad:?} 不是合法时间，不该被接受"
+        );
+    }
+}
+
+/// 不到一小时的负时区（如 -00:30）写进 PDF 时不能丢掉负号 ——
+/// 丢了就变成东半区的 +00:30，时刻整整差一小时。
+#[test]
+fn negative_offset_under_an_hour_keeps_its_sign() {
+    let jpeg = common::images::jpeg_q(&image::DynamicImage::ImageRgb8(photo(320, 240)), 90);
+    let path = tmp().join("neg_offset.jpg");
+    std::fs::write(&path, &jpeg).unwrap();
+    let when = pdfcore::Timestamp {
+        year: 2024,
+        month: 3,
+        day: 15,
+        hour: 14,
+        minute: 30,
+        second: 22,
+        utc_offset_minutes: Some(-30),
+    };
+    let manual = std::collections::HashMap::from([(path.clone(), when)]);
+    let report = images_to_pdf::run(&[path], Tier::Lossless, &manual, &NoProgress).unwrap();
+    let doc = lopdf::Document::load_mem(&report.value.pdf).unwrap();
+    let info_ref = doc.trailer.get(b"Info").unwrap().as_reference().unwrap();
+    let raw = doc
+        .get_dictionary(info_ref)
+        .unwrap()
+        .get(b"CreationDate")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    let text = String::from_utf8_lossy(raw);
+    assert!(
+        text.starts_with("D:20240315143022-00'30"),
+        "CreationDate 是 {text}，应当带着 -00'30"
+    );
 }

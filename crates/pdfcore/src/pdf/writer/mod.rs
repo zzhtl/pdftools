@@ -142,10 +142,16 @@ impl DocBuilder {
                 d.subject(pdf_writer::TextStr(t));
             }
             if let Some(t) = info.creation {
-                d.creation_date(t.to_pdf_date());
+                d.pair(
+                    Name(b"CreationDate"),
+                    pdf_writer::Str(t.to_pdf_string().as_bytes()),
+                );
             }
             if let Some(t) = info.modified {
-                d.modified_date(t.to_pdf_date());
+                d.pair(
+                    Name(b"ModDate"),
+                    pdf_writer::Str(t.to_pdf_string().as_bytes()),
+                );
             }
             d.finish();
         }

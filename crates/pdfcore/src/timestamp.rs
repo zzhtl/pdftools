@@ -106,39 +106,94 @@ impl Timestamp {
         )
     }
 
-    /// 解析 ISO 8601（`2024-03-15T14:30:22+08:00`、`2024-03-15 14:30:22Z`…）。
-    /// XMP 与 docx 的核心属性都用这个格式。
+    /// 各字段是否落在合法范围内。
+    ///
+    /// 相机没设时间时会在 EXIF 里写「0000:00:00 00:00:00」这样的占位值，
+    /// 它能被解析，却不是时间。当成拍摄时间的话，它会是全批里最早的一个，
+    /// 被写进 PDF 的 /CreationDate —— 这正是取证材料里最不能出现的伪造日期。
+    pub fn is_plausible(&self) -> bool {
+        (1000..=9999).contains(&self.year)
+            && (1..=12).contains(&self.month)
+            && (1..=31).contains(&self.day)
+            && self.hour <= 23
+            && self.minute <= 59
+            && self.second <= 60
+            && self
+                .utc_offset_minutes
+                .is_none_or(|o| (-14 * 60..=14 * 60).contains(&o))
+    }
+
+    /// 解析 ISO 8601。XMP 与 docx 的核心属性都用这个格式。
+    ///
+    /// 接受 `2024-03-15`、`2024-03-15T14:30`、`2024-03-15T14:30:22.123`，
+    /// 时区可以是 `Z`、`+08:00`、`+0800`、`+08` 或缺省。只有日期时时刻按 00:00:00 记。
+    /// photoshop:DateCreated 常常只写日期，要求带秒的话这类照片就读不出拍摄时间了。
     pub fn parse_iso8601(s: &str) -> Option<Self> {
         let s = s.trim();
-        let num = |a: usize, b: usize| s.get(a..b)?.parse::<u32>().ok();
-        if s.len() < 19 {
+        let num = |t: &str| -> Option<u32> {
+            (!t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| t.parse().ok())
+                .flatten()
+        };
+        let date = s.get(..10)?;
+        if date.as_bytes().get(4) != Some(&b'-') || date.as_bytes().get(7) != Some(&b'-') {
             return None;
         }
-        let offset = if s.ends_with('Z') || s.ends_with('z') {
-            Some(0i16)
-        } else {
-            // 尾部形如 +08:00 / -05:30
-            let tail = &s[s.len().saturating_sub(6)..];
-            let bytes = tail.as_bytes();
-            match (bytes.first(), tail.len()) {
-                (Some(b'+'), 6) | (Some(b'-'), 6) if bytes[3] == b':' => {
-                    let h: i16 = tail[1..3].parse().ok()?;
-                    let m: i16 = tail[4..6].parse().ok()?;
-                    let v = h * 60 + m;
-                    Some(if bytes[0] == b'-' { -v } else { v })
+        let (year, month, day) = (num(&date[..4])?, num(&date[5..7])?, num(&date[8..10])?);
+
+        let mut rest = &s[10..];
+        let (mut hour, mut minute, mut second) = (0, 0, 0);
+        if !rest.is_empty() {
+            rest = rest.strip_prefix(['T', 't', ' '])?;
+            hour = num(rest.get(..2)?)?;
+            if rest.as_bytes().get(2) != Some(&b':') {
+                return None;
+            }
+            minute = num(rest.get(3..5)?)?;
+            rest = &rest[5..];
+            if let Some(r) = rest.strip_prefix(':') {
+                second = num(r.get(..2)?)?;
+                rest = &r[2..];
+                // 小数秒只影响亚秒精度，PDF 的日期格式也放不下，丢掉。
+                if let Some(r) = rest.strip_prefix(['.', ',']) {
+                    rest = r.trim_start_matches(|c: char| c.is_ascii_digit());
                 }
-                _ => None,
+            }
+        }
+
+        let utc_offset_minutes = match rest {
+            "" => None,
+            "Z" | "z" => Some(0),
+            _ => {
+                let sign: i16 = match rest.as_bytes()[0] {
+                    b'+' => 1,
+                    b'-' => -1,
+                    _ => return None,
+                };
+                let digits: String = rest[1..].chars().filter(|c| *c != ':').collect();
+                if digits.len() != 2 && digits.len() != 4 {
+                    return None;
+                }
+                let h = num(&digits[..2])? as i16;
+                let m = if digits.len() == 4 {
+                    num(&digits[2..])? as i16
+                } else {
+                    0
+                };
+                Some(sign * (h * 60 + m))
             }
         };
-        Some(Self {
-            year: num(0, 4)? as u16,
-            month: num(5, 7)? as u8,
-            day: num(8, 10)? as u8,
-            hour: num(11, 13)? as u8,
-            minute: num(14, 16)? as u8,
-            second: num(17, 19)? as u8,
-            utc_offset_minutes: offset,
-        })
+
+        let t = Self {
+            year: u16::try_from(year).ok()?,
+            month: u8::try_from(month).ok()?,
+            day: u8::try_from(day).ok()?,
+            hour: u8::try_from(hour).ok()?,
+            minute: u8::try_from(minute).ok()?,
+            second: u8::try_from(second).ok()?,
+            utc_offset_minutes,
+        };
+        t.is_plausible().then_some(t)
     }
 
     /// 解析用户手动录入的时间。接受 `2024-03-15 14:30`、`2024-03-15 14:30:22`、
@@ -177,7 +232,9 @@ impl Timestamp {
     }
 
     /// PDF 的日期字符串形式：`D:YYYYMMDDHHmmSS+HH'mm'`。
-    /// 直接改写已有 PDF 的字典时用它（`pdf_writer::Date` 只能用于新建文档）。
+    ///
+    /// 新建和改写 PDF 都用它，不用 `pdf_writer::Date`：后者把时区拆成带符号的小时
+    /// 和无符号的分钟，-00:30 这种不到一小时的负时区会丢掉负号。
     pub fn to_pdf_string(&self) -> String {
         let mut out = format!(
             "D:{:04}{:02}{:02}{:02}{:02}{:02}",
@@ -193,21 +250,5 @@ impl Timestamp {
             None => {}
         }
         out
-    }
-
-    /// 转成 PDF 的日期对象。
-    pub fn to_pdf_date(&self) -> pdf_writer::Date {
-        let mut d = pdf_writer::Date::new(self.year)
-            .month(self.month.clamp(1, 12))
-            .day(self.day.clamp(1, 31))
-            .hour(self.hour.min(23))
-            .minute(self.minute.min(59))
-            .second(self.second.min(59));
-        if let Some(off) = self.utc_offset_minutes {
-            let hours = (off / 60).clamp(-23, 23) as i8;
-            let minutes = (off % 60).unsigned_abs().min(59) as u8;
-            d = d.utc_offset_hour(hours).utc_offset_minute(minutes);
-        }
-        d
     }
 }
