@@ -47,8 +47,10 @@ pub fn gap(pages: &[PageText], a: &str, b: &str) -> Option<f32> {
     (pa == pb).then_some(ya - yb)
 }
 
+/// 测量用的文档一律带 settings.xml：真实文档都有，而 LibreOffice 在缺了它时
+/// 按另一套默认规则排段落间距（同一组正文 → 小标题差出 3pt）。
 fn doc(body: String, grid: bool) -> DocxBuilder {
-    let d = DocxBuilder::new().body(&body);
+    let d = DocxBuilder::new().body(&body).settings(COMPAT_15);
     if grid {
         d.sect_extra(GRID)
     } else {
@@ -155,13 +157,16 @@ pub fn default_size() -> Vec<Measure> {
     vec![
         Measure {
             name: "默认字号 没有 styles.xml".into(),
-            doc: DocxBuilder::new().body(&text),
+            doc: DocxBuilder::new().body(&text).settings(COMPAT_15),
             unit: "pt",
             value: Box::new(|p| size_of(p, "甲")),
         },
         Measure {
             name: "默认字号 docDefaults 不写 sz".into(),
-            doc: DocxBuilder::new().body(&text).styles(&styles),
+            doc: DocxBuilder::new()
+                .body(&text)
+                .styles(&styles)
+                .settings(COMPAT_15),
             unit: "pt",
             value: Box::new(|p| size_of(p, "甲")),
         },
@@ -260,7 +265,7 @@ pub fn trailing_space() -> Vec<Measure> {
     );
     vec![Measure {
         name: "P6 右对齐 首行右缘距右边距".into(),
-        doc: DocxBuilder::new().body(&body),
+        doc: DocxBuilder::new().body(&body).settings(COMPAT_15),
         unit: "pt",
         value: Box::new(|p| {
             let page = p.first()?;
@@ -276,11 +281,335 @@ pub fn trailing_space() -> Vec<Measure> {
     }]
 }
 
+/// 带段落间距的标记行。
+fn spaced_marker(tag: &str, after: u32, before: u32) -> String {
+    format!(
+        r#"<w:p><w:pPr><w:spacing w:before="{before}" w:after="{after}"/></w:pPr><w:r><w:rPr>{FONTS}<w:sz w:val="24"/></w:rPr><w:t>标记{tag}行</w:t></w:r></w:p>"#
+    )
+}
+
+/// P4：上一段的段后距与下一段的段前距，实际隔开多少（twips 写入，量出来是点）。
+/// 行距倍数下的情形见 [`spacing_with_multiple`]。
+pub fn paragraph_spacing() -> Vec<Measure> {
+    let mut v = Vec::new();
+    for grid in [false, true] {
+        let g = if grid { "网格" } else { "无网格" };
+        for (after, before) in [
+            (60, 0),
+            (0, 160),
+            (80, 160),
+            (360, 0),
+            (360, 240),
+            (240, 240),
+            (100, 100),
+        ] {
+            let body = spaced_marker("甲", after, 0)
+                + &spaced_marker("乙", 0, before)
+                + &marker("丙")
+                + &marker("丁");
+            v.push(Measure {
+                name: format!(
+                    "P4 段后 {} 段前 {} {g}",
+                    after as f32 / 20.0,
+                    before as f32 / 20.0
+                ),
+                doc: doc(body, grid),
+                unit: "pt",
+                value: Box::new(|p| Some(gap(p, "甲", "乙")? - gap(p, "丙", "丁")?)),
+            });
+        }
+    }
+    v
+}
+
+/// P4b：1.3 倍行距下，段后距与段前距怎么合并。量的是两行基线距离比没有段落间距时多出的部分。
+pub fn spacing_with_multiple() -> Vec<Measure> {
+    let mut v = Vec::new();
+    for grid in [false, true] {
+        let g = if grid { "网格" } else { "无网格" };
+        for (after, before) in [
+            (60, 240),
+            (240, 60),
+            (80, 160),
+            (120, 0),
+            (0, 240),
+            (240, 240),
+        ] {
+            let body = line130("甲", 24, false, 0, after)
+                + &line130("乙", 24, false, before, 0)
+                + &line130("丙", 24, false, 0, 0)
+                + &line130("丁", 24, false, 0, 0);
+            v.push(Measure {
+                name: format!(
+                    "P4b 1.3 倍 段后 {} 段前 {} {g}",
+                    after as f32 / 20.0,
+                    before as f32 / 20.0
+                ),
+                doc: doc(body, grid),
+                unit: "pt",
+                value: Box::new(|p| Some(gap(p, "甲", "乙")? - gap(p, "丙", "丁")?)),
+            });
+        }
+    }
+    v
+}
+
+/// 1.3 倍行距下的一段单行文字（中文 12pt，或按参数加粗、改字号、加段落间距）。
+fn line130(tag: &str, sz: u32, bold: bool, before: u32, after: u32) -> String {
+    let b = if bold { "<w:b/>" } else { "" };
+    format!(
+        r#"<w:p><w:pPr><w:spacing w:before="{before}" w:after="{after}" w:line="312" w:lineRule="auto"/><w:rPr>{FONTS}{b}<w:sz w:val="{sz}"/></w:rPr></w:pPr><w:r><w:rPr>{FONTS}{b}<w:sz w:val="{sz}"/></w:rPr><w:t>标记{tag}行</w:t></w:r></w:p>"#
+    )
+}
+
+/// P5：1.3 倍行距、行网格下，两行基线之间的实际距离（参照语料的常见写法）。
+pub fn multiple_spacing_transitions() -> Vec<Measure> {
+    let cases: [(&str, String); 6] = [
+        (
+            "常规→常规",
+            line130("甲", 24, false, 0, 0) + &line130("乙", 24, false, 0, 0),
+        ),
+        (
+            "常规→加粗",
+            line130("甲", 24, false, 0, 0) + &line130("乙", 24, true, 0, 0),
+        ),
+        (
+            "加粗→常规",
+            line130("甲", 24, true, 0, 0) + &line130("乙", 24, false, 0, 0),
+        ),
+        (
+            "常规 段后4→加粗 段前8",
+            line130("甲", 24, false, 0, 80) + &line130("乙", 24, true, 160, 80),
+        ),
+        (
+            "16pt→12pt",
+            line130("甲", 32, false, 0, 0) + &line130("乙", 24, false, 0, 0),
+        ),
+        (
+            "16pt 加粗→12pt",
+            line130("甲", 32, true, 0, 0) + &line130("乙", 24, false, 0, 0),
+        ),
+    ];
+    cases
+        .into_iter()
+        .map(|(label, body)| Measure {
+            name: format!("P5 1.3 倍 网格 {label}"),
+            doc: doc(body, true),
+            unit: "pt",
+            value: Box::new(|p| gap(p, "甲", "乙")),
+        })
+        .collect()
+}
+
+/// 指定中文字体的 1.3 倍行距单行段落。
+fn line130_font(tag: &str, font: &str, sz: u32, bold: bool, before: u32, after: u32) -> String {
+    let b = if bold { "<w:b/>" } else { "" };
+    let f = format!(
+        r#"<w:rFonts w:ascii="Liberation Serif" w:hAnsi="Liberation Serif" w:eastAsia="{font}"/>"#
+    );
+    format!(
+        r#"<w:p><w:pPr><w:spacing w:before="{before}" w:after="{after}" w:line="312" w:lineRule="auto"/><w:rPr>{f}{b}<w:sz w:val="{sz}"/></w:rPr></w:pPr><w:r><w:rPr>{f}{b}<w:sz w:val="{sz}"/></w:rPr><w:t>标记{tag}行</w:t></w:r></w:p>"#
+    )
+}
+
+/// P5b：正文（段后 3pt）接 14pt 小标题（段前 12pt）：两行基线的距离。
+pub fn heading_transitions() -> Vec<Measure> {
+    let mut v = Vec::new();
+    for (label, body_font, head_font, bold) in [
+        (
+            "衬线正文→衬线加粗",
+            "Noto Serif CJK SC",
+            "Noto Serif CJK SC",
+            true,
+        ),
+        (
+            "衬线正文→黑体加粗",
+            "Noto Serif CJK SC",
+            "Noto Sans CJK SC",
+            true,
+        ),
+        (
+            "黑体正文→黑体加粗",
+            "Noto Sans CJK SC",
+            "Noto Sans CJK SC",
+            true,
+        ),
+        (
+            "黑体正文→黑体常规",
+            "Noto Sans CJK SC",
+            "Noto Sans CJK SC",
+            false,
+        ),
+        (
+            "衬线正文→衬线常规",
+            "Noto Serif CJK SC",
+            "Noto Serif CJK SC",
+            false,
+        ),
+    ] {
+        let body = line130_font("甲", body_font, 24, false, 0, 60)
+            + &line130_font("乙", head_font, 28, bold, 240, 120);
+        v.push(Measure {
+            name: format!("P5b 网格 {label}"),
+            doc: doc(body, true),
+            unit: "pt",
+            value: Box::new(|p| gap(p, "甲", "乙")),
+        });
+    }
+    v
+}
+
+const COMPAT_14: &str = r#"<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="14"/></w:compat>"#;
+const COMPAT_15: &str = r#"<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat>"#;
+const COMPAT_WPS: &str = r#"<w:compat><w:spaceForUL/><w:balanceSingleByteDoubleByteWidth/><w:doNotLeaveBackslashAlone/><w:ulTrailSpace/><w:doNotExpandShiftReturn/><w:adjustLineHeightInTable/><w:doNotWrapTextWithPunct/><w:doNotUseEastAsianBreakRules/><w:useFELayout/><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="14"/></w:compat>"#;
+
+const COMPAT_NO_HTML: &str = r#"<w:compat><w:doNotUseHTMLParagraphAutoSpacing/><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat>"#;
+
+/// P5c：同一组「正文 → 小标题」在不同兼容设置下。
+pub fn heading_by_compat() -> Vec<Measure> {
+    let body = line130_font("甲", "Noto Sans CJK SC", 24, false, 0, 60)
+        + &line130_font("乙", "Noto Sans CJK SC", 28, true, 240, 120);
+    [
+        ("compatibilityMode 14", COMPAT_14),
+        ("compatibilityMode 15", COMPAT_15),
+        ("参照语料的兼容选项", COMPAT_WPS),
+        ("doNotUseHTMLParagraphAutoSpacing", COMPAT_NO_HTML),
+        ("空的 settings", ""),
+    ]
+    .into_iter()
+    .map(|(label, settings)| Measure {
+        name: format!("P5c 网格 正文→小标题 {label}"),
+        doc: doc(body.clone(), true).settings(settings),
+        unit: "pt",
+        value: Box::new(|p| gap(p, "甲", "乙")),
+    })
+    .collect()
+}
+
+/// P7：大字号的行（标题）比 12pt 的行在基线上方、下方各多占多少。
+pub fn large_text_lines() -> Vec<Measure> {
+    let mut v = Vec::new();
+    for grid in [true, false] {
+        let g = if grid { "网格" } else { "无网格" };
+        for (spacing, ppr) in [
+            ("单倍", ""),
+            ("1.3 倍", r#"<w:spacing w:line="312" w:lineRule="auto"/>"#),
+        ] {
+            for sz in [32u32, 40, 48] {
+                v.extend(delta_measures(
+                    &format!("P7 {}pt {spacing} {g}", sz / 2),
+                    grid,
+                    one_line("被测", ppr, sz, sz),
+                    one_line("对照", ppr, 24, 24),
+                ));
+            }
+        }
+    }
+    v
+}
+
+/// P8：正文第一行的基线离正文顶多远（上边距 1440 twips = 72pt）。
+pub fn first_baseline() -> Vec<Measure> {
+    let mut v = Vec::new();
+    for grid in [true, false] {
+        let g = if grid { "网格" } else { "无网格" };
+        for sz in [21u32, 24, 28, 32, 40, 48, 64] {
+            let body = one_line("甲", "", sz, sz) + &marker("乙");
+            v.push(Measure {
+                name: format!("P8 {}pt 首行基线 {g}", sz as f32 / 2.0),
+                doc: doc(body, grid),
+                unit: "pt",
+                value: Box::new(|p| {
+                    let (page, y) = baseline(p, "甲")?;
+                    (page == 0).then(|| p[0].height - 72.0 - y)
+                }),
+            });
+        }
+    }
+    v
+}
+
+/// P9：行网格在版心里的位置 —— 第二页首行、不吸附网格的段落首行，基线离正文顶多远。
+pub fn grid_origin() -> Vec<Measure> {
+    let filler = |i: usize| one_line(&format!("填{i}"), "", 24, 24);
+    // 22 行 12pt 正好占满一页的网格（每行 2 格）；第 23 行落到第二页的第一行。
+    let two_pages: String = (0..22).map(filler).collect::<String>() + &marker("甲");
+    let no_snap = one_line("甲", r#"<w:snapToGrid w:val="0"/>"#, 24, 24) + &marker("乙");
+    let first_on_page = |p: &[PageText], page: usize| {
+        let (pg, y) = baseline(p, "甲")?;
+        (pg == page).then(|| p[pg].height - 72.0 - y)
+    };
+    // 23pt 固定行距、不吸附网格：网格区（686.4pt）放 29 行，版心去掉顶部偏移（692.1pt）放 30 行。
+    let exact23: String = (0..40)
+        .map(|i| {
+            one_line(
+                &format!("固{i}"),
+                r#"<w:snapToGrid w:val="0"/><w:spacing w:line="460" w:lineRule="exact"/>"#,
+                24,
+                24,
+            )
+        })
+        .collect();
+    vec![
+        Measure {
+            name: "P9 固定 23pt 不吸附 首页行数 网格".into(),
+            doc: doc(exact23, true),
+            unit: "行",
+            value: Box::new(|p| Some(p.first()?.lines.len() as f32)),
+        },
+        Measure {
+            name: "P9 第二页首行基线 网格".into(),
+            doc: doc(two_pages, true),
+            unit: "pt",
+            value: Box::new(move |p| first_on_page(p, 1)),
+        },
+        Measure {
+            name: "P9 不吸附网格的首行基线 网格".into(),
+            doc: doc(no_snap, true),
+            unit: "pt",
+            value: Box::new(move |p| first_on_page(p, 0)),
+        },
+    ]
+}
+
+/// P10：页底最后一行 —— 行距倍数多出来的空白算不算进「放得下」。
+/// 量第一页放了几行：一段很长的中文，每行都是整行。
+pub fn page_bottom() -> Vec<Measure> {
+    let text: String = "行距倍数的空白能否越过页底".repeat(120);
+    [
+        ("1.5 倍 无网格", false, 360),
+        ("1.3 倍 网格", true, 312),
+        ("单倍 网格", true, 240),
+    ]
+    .into_iter()
+    .map(|(label, grid, line)| {
+        let body = format!(
+            r#"<w:p><w:pPr><w:spacing w:line="{line}" w:lineRule="auto"/></w:pPr><w:r><w:rPr>{FONTS}<w:sz w:val="24"/></w:rPr><w:t>{text}</w:t></w:r></w:p>"#
+        );
+        Measure {
+            name: format!("P10 {label} 首页行数"),
+            doc: doc(body, grid),
+            unit: "行",
+            value: Box::new(|p| Some(p.first()?.lines.len() as f32)),
+        }
+    })
+    .collect()
+}
+
 pub fn all() -> Vec<Measure> {
     let mut v = empty_paragraphs();
     v.extend(default_size());
     v.extend(paragraph_mark_in_last_line());
     v.extend(exact_and_at_least());
     v.extend(trailing_space());
+    v.extend(paragraph_spacing());
+    v.extend(spacing_with_multiple());
+    v.extend(multiple_spacing_transitions());
+    v.extend(heading_transitions());
+    v.extend(heading_by_compat());
+    v.extend(large_text_lines());
+    v.extend(first_baseline());
+    v.extend(grid_origin());
+    v.extend(page_bottom());
     v
 }
