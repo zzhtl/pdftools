@@ -6,15 +6,22 @@ use crate::docx::ir::PageGeom;
 
 pub(super) struct Paginator<'a> {
     page: &'a PageGeom,
+    /// 正文区的起点离版心顶端多远。有行网格时网格在版心里居中，起点就不在顶端。
+    origin: f32,
+    /// 正文区的高度。
+    capacity: f32,
     pages: Vec<Page>,
-    /// 当前页已用掉的垂直空间（从内容区顶部往下量）。
+    /// 当前页已用掉的垂直空间（从正文区顶部往下量）。
     used: f32,
 }
 
 impl<'a> Paginator<'a> {
-    pub fn new(page: &'a PageGeom) -> Self {
+    /// `area` 是正文区：(离版心顶端的偏移, 高度)。
+    pub fn new(page: &'a PageGeom, (origin, capacity): (f32, f32)) -> Self {
         Self {
             page,
+            origin,
+            capacity,
             pages: vec![Page::default()],
             used: 0.0,
         }
@@ -55,7 +62,7 @@ impl<'a> Paginator<'a> {
             ParaBody::Lines(lines) => {
                 let mut next = 0;
                 while next < lines.len() {
-                    let n = fit_lines(&lines[next..], self.used, self.page.content_height());
+                    let n = fit_lines(&lines[next..], self.used, self.capacity);
                     if n == 0 {
                         self.new_page();
                         continue;
@@ -71,12 +78,16 @@ impl<'a> Paginator<'a> {
     }
 
     fn commit(&mut self, line: &Line) {
-        let base = self.page.h_pt - self.page.margin_top - self.used - line.baseline;
+        let base = self.page.h_pt - self.page.margin_top - self.origin - self.used - line.baseline;
         let page = self.pages.last_mut().expect("至少有一页");
         page.ops.extend(line.ops.iter().map(|op| op.shifted(base)));
         self.used += line.height;
     }
 }
+
+/// 放不放得下的判断允许的误差。行网格下行高都是格高的整数倍，22 行 31.2pt
+/// 在 f32 里累加出来会比网格区的 686.4pt 多一点点，不留余量就会少排一行。
+const FIT_TOLERANCE: f32 = 1e-3;
 
 /// 从已用高度 `used` 开始，当前页还放得下前几行。
 ///
@@ -84,7 +95,7 @@ impl<'a> Paginator<'a> {
 fn fit_lines(lines: &[Line], mut used: f32, content_height: f32) -> usize {
     let mut n = 0;
     for line in lines {
-        if used + line.height > content_height && used > f32::EPSILON {
+        if used + line.height > content_height + FIT_TOLERANCE && used > f32::EPSILON {
             break;
         }
         used += line.height;
@@ -114,6 +125,16 @@ mod tests {
         assert_eq!(fit_lines(&l, 0.0, 60.0), 3);
         assert_eq!(fit_lines(&l, 0.0, 59.9), 2);
         assert_eq!(fit_lines(&l, 45.0, 60.0), 0);
+    }
+
+    /// 网格区正好放满 22 行：浮点累加误差不能让最后一行被挤到下一页。
+    /// 行高与网格区都按排版时的同一算法求（A4、上下边距 72pt、格高 15.6pt）。
+    #[test]
+    fn lines_that_exactly_fill_the_grid_area_all_fit() {
+        let grid = crate::docx::ir::Grid { pitch_pt: 15.6 };
+        let area = (697.9f32 / grid.pitch_pt).floor() * grid.pitch_pt;
+        let l = lines(&[grid.snap(17.388); 23]);
+        assert_eq!(fit_lines(&l, 0.0, area), 22);
     }
 
     #[test]

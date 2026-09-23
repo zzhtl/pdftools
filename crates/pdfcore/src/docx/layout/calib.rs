@@ -12,6 +12,21 @@ pub struct Calib {
     /// 实测也是 10pt。重写前按五号字 10.5pt 算。
     pub default_size_pt: f32,
     pub empty_para: EmptyPara,
+    pub grid: GridLayout,
+}
+
+/// 行网格（`w:docGrid` 为 lines 等类型）下，行在格子里、网格在版心里怎么摆。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridLayout {
+    /// 吸附多出来的空间全加在基线上方（文字贴着格子底边），网格从版心顶端开始。
+    Legacy,
+    /// 对照 LibreOffice 实测（10.5–32pt 七个字号、有无行距倍数）：
+    /// - 文字在它所占的整格里上下居中：基线 = 上伸 + (整格高 − 字高) / 2。
+    ///   字号相同的行之间两种摆法行距一样，所以只有标题这类大字号行才看得出差别。
+    /// - 网格在版心里上下居中：版心放得下 ⌊版心高 / 格高⌋ 格，余下的对半分在上下；
+    ///   正文从上面那一半之下开始，排到网格区底边为止。每页都如此，
+    ///   不吸附网格的段落（`w:snapToGrid w:val="0"`）也一样。
+    Centered,
 }
 
 /// 空段落（没有任何文字）的高度规则。
@@ -38,6 +53,7 @@ impl Calib {
         Self {
             default_size_pt: 10.0,
             empty_para: EmptyPara::MarkLine,
+            grid: GridLayout::Centered,
         }
     }
 
@@ -45,6 +61,7 @@ impl Calib {
         Self {
             default_size_pt: 10.5,
             empty_para: EmptyPara::Legacy,
+            grid: GridLayout::Legacy,
         }
     }
 }

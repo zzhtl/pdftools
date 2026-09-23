@@ -14,7 +14,7 @@ mod paginate;
 mod para;
 mod text;
 
-pub use calib::{Calib, EmptyPara};
+pub use calib::{Calib, EmptyPara, GridLayout};
 
 use super::ir;
 use crate::error::{Warning, WarningKind};
@@ -78,7 +78,7 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
         width: doc.page.content_width(),
         calib,
     };
-    let mut pages = paginate::Paginator::new(&doc.page);
+    let mut pages = paginate::Paginator::new(&doc.page, grid_area(doc, calib));
     let mut warnings = Vec::new();
 
     let mut numbered = 0usize;
@@ -130,6 +130,18 @@ pub fn layout(doc: &ir::Document, book: &mut FontBook, calib: &Calib) -> LaidOut
     LaidOut {
         pages: pages.finish(),
         warnings,
+    }
+}
+
+/// 正文能用的竖向区间：(离版心顶端的偏移, 高度)。见 [`GridLayout::Centered`]。
+fn grid_area(doc: &ir::Document, calib: &Calib) -> (f32, f32) {
+    let height = doc.page.content_height();
+    match (doc.grid, calib.grid) {
+        (Some(g), GridLayout::Centered) if g.pitch_pt > 0.0 && g.pitch_pt <= height => {
+            let area = (height / g.pitch_pt).floor() * g.pitch_pt;
+            ((height - area) / 2.0, area)
+        }
+        _ => (0.0, height),
     }
 }
 

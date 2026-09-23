@@ -92,6 +92,7 @@ fn mark_line(para: &ir::Paragraph, env: &Env, book: &mut FontBook) -> Option<Lin
         para.snap_to_grid,
         para.line,
         true,
+        env.calib,
     );
     Some(Line {
         height: b.height,
@@ -162,6 +163,7 @@ fn line(
         para.snap_to_grid,
         para.line,
         is_last,
+        env.calib,
     );
 
     let line_width = sp.width(range.start, range.end);
